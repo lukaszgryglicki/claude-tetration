@@ -1,0 +1,21 @@
+[package]
+name = "tetration"
+version = "0.1.0"
+edition = "2021"
+description = "Arbitrary-precision complex tetration"
+license = "MIT"
+
+[[bin]]
+name = "tet"
+path = "src/main.rs"
+
+[dependencies]
+rug = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.test]
+opt-level = 2

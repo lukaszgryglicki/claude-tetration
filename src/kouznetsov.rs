@@ -34,12 +34,22 @@ use rug::{float::Constant, Complex, Float};
 use crate::{
     cnum,
     fft::{cross_correlate_with_kernel, precompute_kernel_fft, KernelFft},
+    lambertw,
     regions::FixedPointData,
 };
 
-/// Compute `F_b(h)` via Anderson-accelerated Cauchy iteration. Currently
-/// restricted to real bases `b > e^(1/e)`. Precision target `digits` drives
-/// node count and contour height.
+/// Compute `F_b(h)` via Newton-Kantorovich Cauchy iteration on the
+/// Kouznetsov-style rectangle. Works for general complex bases `b` outside
+/// Shell-Thron: the natural F is fixed by the asymptotic conditions
+/// `F → L_upper` (Im → +∞) and `F → L_lower` (Im → −∞), where the two
+/// fixed points of `b^z = z` sit in opposite half-planes.
+///
+/// For real bases `b > e^(1/e)`, the two fixed points are complex conjugates
+/// (Schwarz reflection), and the natural F satisfies `F(z̄) = F̄(z)`; the
+/// iteration symmetrizes each iterate to keep us on that manifold. For
+/// general complex bases the conjugate symmetry is broken, so we drop the
+/// symmetrize step and pick `L_upper / L_lower` from the `W₀` and `W₋₁`
+/// branches independently.
 pub fn tetrate_kouznetsov(
     b: &Complex,
     h: &Complex,
@@ -47,26 +57,53 @@ pub fn tetrate_kouznetsov(
     prec: u32,
     digits: u64,
 ) -> Result<Complex, String> {
-    require_real_positive_above_eta(b, prec)?;
+    // Decide regime: real positive base allows Schwarz symmetry; everything
+    // else (real negative, imaginary, general complex) does not.
+    let use_schwarz = is_real_positive(b);
+    if !use_schwarz {
+        // Bases on the boundary or with degenerate fixed points are still
+        // routed away by `dispatch.rs`; we just need to ensure ln(b) is
+        // well-defined here.
+        if cnum::is_zero(b) {
+            return Err("Kouznetsov: b = 0 unsupported".into());
+        }
+    }
 
-    // Fixed-point pair. `fp.fixed_point = -W₀(-ln b)/ln b` and its conjugate
-    // are the two complex fixed points of `b^z = z`. We label the one with
-    // non-negative imag as "upper" (boundary value as Im(z)→+∞) and the one
-    // with non-positive imag as "lower" (Im(z)→-∞). Sorting explicitly is
-    // necessary because Lambert W's f64 seed can flip across the branch cut
-    // depending on the sign of zero in `-ln b` (real bases give either +0 or
-    // -0 imag), so we cannot assume `fp.fixed_point` consistently has one sign.
-    let raw = fp.fixed_point.clone();
-    let raw_conj = Complex::with_val(prec, raw.conj_ref());
-    let raw_imag_neg = raw.imag().is_sign_negative();
-    let (l_lower, l_upper) = if raw_imag_neg {
-        (raw, raw_conj)
-    } else {
-        (raw_conj, raw)
-    };
-    // λ_upper = (ln b)·L_upper has non-negative imag for real b > e^(1/e); take
-    // the consistent sign by re-deriving from L_upper rather than `fp.lambda`.
+    // Fixed-point pair. For real bases > e^(1/e) we use `fp.fixed_point` =
+    // `-W₀(-ln b)/ln b` and its complex conjugate (since the two fixed points
+    // are conjugate in the real case, regardless of which branch was sampled).
+    // For complex bases the two fixed points come from distinct W branches
+    // (W₀ and W₋₁), so we recompute both explicitly.
     let ln_b = Complex::with_val(prec, b.ln_ref());
+    let neg_ln_b = Complex::with_val(prec, -&ln_b);
+
+    let raw = fp.fixed_point.clone();
+    let (l_lower, l_upper) = if use_schwarz {
+        let raw_conj = Complex::with_val(prec, raw.conj_ref());
+        let raw_imag_neg = raw.imag().is_sign_negative();
+        if raw_imag_neg {
+            (raw, raw_conj)
+        } else {
+            (raw_conj, raw)
+        }
+    } else {
+        // Compute the two fixed points -W_k(-ln b)/ln b for k=0,-1.
+        let w0_val = lambertw::w0(&neg_ln_b, prec)?;
+        let neg_w0 = Complex::with_val(prec, -&w0_val);
+        let l_w0 = Complex::with_val(prec, &neg_w0 / &ln_b);
+        let wm1_val = lambertw::wm1(&neg_ln_b, prec)?;
+        let neg_wm1 = Complex::with_val(prec, -&wm1_val);
+        let l_wm1 = Complex::with_val(prec, &neg_wm1 / &ln_b);
+        // Place the fixed point with larger Im as L_upper, smaller as L_lower.
+        let l_w0_im = Float::with_val(prec, l_w0.imag()).to_f64();
+        let l_wm1_im = Float::with_val(prec, l_wm1.imag()).to_f64();
+        if l_w0_im >= l_wm1_im {
+            (l_wm1, l_w0)
+        } else {
+            (l_w0, l_wm1)
+        }
+    };
+    // λ_upper = (ln b)·L_upper drives the contour decay rate.
     let lambda_upper = Complex::with_val(prec, &ln_b * &l_upper);
 
     // Decay rate of F → fixed point: ~ exp(-T·|arg(λ̄)|). Pick T so the tail
@@ -115,12 +152,20 @@ pub fn tetrate_kouznetsov(
     // converge cleanly via T (which uses these pinned values in its integrand).
     initial[0] = l_lower.clone();
     initial[n_nodes - 1] = l_upper.clone();
-    // Schwarz reflection: F(z̄)=F̄(z). Symmetrize the initial guess so the
-    // iteration starts on the natural-Kouznetsov manifold.
+    // Schwarz reflection: F(z̄)=F̄(z). For real bases, symmetrize the initial
+    // guess so the iteration starts on the natural-Kouznetsov manifold. For
+    // complex bases the symmetry is broken (conjugate of `b^z` is not `b^z̄`),
+    // so we skip this step.
     let phase_start = std::time::Instant::now();
-    symmetrize_schwarz(&mut initial, prec);
+    if use_schwarz {
+        symmetrize_schwarz(&mut initial, prec);
+    }
     if debug_phase {
-        eprintln!("kouz phase: symmetrize done ({:.2}s)", phase_start.elapsed().as_secs_f64());
+        eprintln!(
+            "kouz phase: symmetrize done ({:.2}s, use_schwarz={})",
+            phase_start.elapsed().as_secs_f64(),
+            use_schwarz
+        );
     }
     let phase_start = std::time::Instant::now();
     // Default solver: Levenberg-Marquardt Newton-Kantorovich. Newton's
@@ -134,14 +179,17 @@ pub fn tetrate_kouznetsov(
     let samples = if std::env::var_os("TET_KOUZ_ANDERSON").is_some() {
         iterate_anderson(
             initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
+            use_schwarz,
         )?
     } else if std::env::var_os("TET_KOUZ_PICARD").is_some() {
         iterate_picard(
             initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
+            use_schwarz,
         )?
     } else {
         iterate_newton(
             initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
+            use_schwarz,
         )?
     };
     if debug_phase {
@@ -266,22 +314,11 @@ fn find_normalization_shift(
     Ok(c)
 }
 
-fn require_real_positive_above_eta(b: &Complex, prec: u32) -> Result<(), String> {
-    if !b.imag().is_zero() {
-        return Err("Kouznetsov: implementation restricted to real bases".into());
-    }
-    if !b.real().is_sign_positive() || b.real().is_zero() {
-        return Err("Kouznetsov: requires b > 0".into());
-    }
-    let inv_e = Float::with_val(prec, Float::with_val(prec, 1u32).exp_ref()).recip();
-    let eta_val = Float::with_val(prec, inv_e.exp_ref());
-    if *b.real() <= eta_val {
-        return Err(format!(
-            "Kouznetsov: requires b > e^(1/e) ≈ 1.444667; got b ≈ {:.6}",
-            b.real().to_f64()
-        ));
-    }
-    Ok(())
+/// True iff `b` is a real positive number (Im(b)=0, Re(b)>0). Real positive
+/// bases admit Schwarz reflection symmetry `F(z̄) = F̄(z)`; everything else
+/// (real negative, imaginary, general complex) does not.
+fn is_real_positive(b: &Complex) -> bool {
+    b.imag().is_zero() && b.real().is_sign_positive() && !b.real().is_zero()
 }
 
 fn arg_abs_f64(z: &Complex, prec: u32) -> f64 {
@@ -409,23 +446,33 @@ fn build_trapezoidal_weights(t_max: &Float, n: usize, prec: u32) -> Vec<Float> {
 // regime, so K=10 is far inside the safe range.
 // =====================================================================
 
-/// `|B_{2k}| / (2k)` as exact rational, for k=1..=12 (covers the EM truncation
-/// we'd ever need at digit counts up to ~1000). Beyond k=12 numerators outgrow
-/// `u64`; if the dispatcher ever picks K>12, extend with `rug::Integer`.
-fn em_coef_rational(k: usize) -> Option<(u64, u64)> {
+/// `|B_{2k}| / (2k)` as an exact rational, expressed as `(numerator_str,
+/// denominator_str)` so we can fit Bernoulli numerators that overflow `u64`
+/// (k ≥ 18 do). Strings are parsed into `rug::Integer` at use time. Covers
+/// k=1..=20, which is enough margin to hit `10^-(digits+3)` floor up to
+/// digits ≈ 100 with `h ~ 10^-2`.
+fn em_coef_rational(k: usize) -> Option<(&'static str, &'static str)> {
     match k {
-        1 => Some((1, 12)),
-        2 => Some((1, 120)),
-        3 => Some((1, 252)),
-        4 => Some((1, 240)),
-        5 => Some((1, 132)),
-        6 => Some((691, 32760)),
-        7 => Some((1, 12)),
-        8 => Some((3617, 8160)),
-        9 => Some((43867, 14364)),
-        10 => Some((174611, 6600)),
-        11 => Some((854513, 3036)),
-        12 => Some((236364091, 65520)),
+        1 => Some(("1", "12")),
+        2 => Some(("1", "120")),
+        3 => Some(("1", "252")),
+        4 => Some(("1", "240")),
+        5 => Some(("1", "132")),
+        6 => Some(("691", "32760")),
+        7 => Some(("1", "12")),
+        8 => Some(("3617", "8160")),
+        9 => Some(("43867", "14364")),
+        10 => Some(("174611", "6600")),
+        11 => Some(("854513", "3036")),
+        12 => Some(("236364091", "65520")),
+        13 => Some(("8553103", "156")),
+        14 => Some(("23749461029", "24360")),
+        15 => Some(("8615841276005", "429660")),
+        16 => Some(("7709321041217", "16320")),
+        17 => Some(("2577687858367", "204")),
+        18 => Some(("26315271553053477373", "69090840")),
+        19 => Some(("2929993913841559", "228")),
+        20 => Some(("261082718496449122051", "541200")),
         _ => None,
     }
 }
@@ -445,16 +492,21 @@ fn em_coef_rational(k: usize) -> Option<(u64, u64)> {
 ///
 /// `TET_KOUZ_NO_EM=1` returns 0 (skip EM entirely) for A/B testing;
 /// `TET_KOUZ_EM_K=<n>` overrides for diagnostics.
-fn em_n_terms(_h: f64, _t_max: f64, _digits: u64) -> usize {
+///
+/// Auto-pick: each additional EM term reduces the boundary-floor residual by
+/// ~2.5 decades (empirical at b=2, h ≈ 10^{-2}). K=12 reaches ~10^{-48} for
+/// digits=50; we need digits+3 of headroom, so scale K with digits beyond 30.
+fn em_n_terms(_h: f64, _t_max: f64, digits: u64) -> usize {
     if std::env::var_os("TET_KOUZ_NO_EM").is_some() {
         return 0;
     }
     if let Ok(s) = std::env::var("TET_KOUZ_EM_K") {
         if let Ok(k) = s.parse::<usize>() {
-            return k.min(12);
+            return k.min(20);
         }
     }
-    12
+    let extra = (digits.saturating_sub(30) / 5) as usize;
+    (12 + extra).min(20)
 }
 
 /// Pre-bake `[ -i · |B_{2k}|/(2k) · h^{2k} ]` for k=1..=K. The `-i` factor
@@ -472,11 +524,15 @@ fn build_em_h_powers(h: &Float, n_terms: usize, prec: u32) -> Vec<Complex> {
     let mut h_pow = h_sq.clone();
     let mut out = Vec::with_capacity(n_terms);
     for k in 1..=n_terms {
-        let (num, den) =
-            em_coef_rational(k).expect("EM coefficient table exhausted (k > 12)");
+        let (num_str, den_str) =
+            em_coef_rational(k).expect("EM coefficient table exhausted (k > 20)");
+        let num_int = rug::Integer::from_str_radix(num_str, 10)
+            .expect("valid Bernoulli numerator literal");
+        let den_int = rug::Integer::from_str_radix(den_str, 10)
+            .expect("valid Bernoulli denominator literal");
         let coef_real = Float::with_val(
             prec,
-            Float::with_val(prec, num) / Float::with_val(prec, den),
+            Float::with_val(prec, &num_int) / Float::with_val(prec, &den_int),
         );
         let scaled = Float::with_val(prec, &coef_real * &h_pow);
         out.push(Complex::with_val(prec, &neg_i * &scaled));
@@ -582,16 +638,23 @@ fn initial_guess(
         let half_c = Complex::with_val(prec, (half.clone(), 0));
         cnum::pow_complex(b, &half_c, prec)
     };
-    let sqrt_b_re = Float::with_val(prec, sqrt_b.real()).to_f64();
-    // Hard cap at 2.0: Kouznetsov tables give F̃_b(0.5) values that for any
-    // real b ∈ (e^(1/e), ∞) stay roughly in [1.4, 2.0] (F̃ is highly convex
-    // so the half-way value tracks the *near-1* end, not the b end). Using
-    // sqrt_b directly e.g. for b=10 puts us at ≈3.16, and the b^F amplification
-    // on the right edge of the contour makes T(F) overshoot by ~10^1.16, which
-    // the iteration cannot recover from. Capping at 2 puts the initial guess
-    // in the same ballpark as the truth for any b > e^(1/e).
-    let target_mid_re = if sqrt_b_re < 2.0 { sqrt_b_re } else { 2.0 };
-    let target_mid = Complex::with_val(prec, (Float::with_val(prec, target_mid_re), 0));
+    // Hard cap on |target_mid|: Kouznetsov tables give F̃_b(0.5) values that
+    // for any real b ∈ (e^(1/e), ∞) stay roughly in [1.4, 2.0] (F̃ is highly
+    // convex so the half-way value tracks the *near-1* end, not the b end).
+    // Using sqrt_b directly e.g. for b=10 puts us at ≈3.16, and the b^F
+    // amplification on the right edge of the contour makes T(F) overshoot by
+    // ~10^1.16, which the iteration cannot recover from. Capping at magnitude
+    // 2 puts the initial guess in the same ballpark as the truth for any
+    // base, real or complex. We cap by magnitude (not real part) so complex
+    // bases — whose √b is generically not on the real axis — get a non-zero
+    // target.
+    let sqrt_b_abs = Float::with_val(prec, sqrt_b.abs_ref()).to_f64();
+    let target_mid = if sqrt_b_abs <= 2.0 {
+        sqrt_b.clone()
+    } else {
+        let scale = Float::with_val(prec, 2.0f64 / sqrt_b_abs);
+        Complex::with_val(prec, &sqrt_b * &scale)
+    };
     let mid = {
         let two = Float::with_val(prec, 2u32);
         let sum = Complex::with_val(prec, l_upper + l_lower);
@@ -762,6 +825,7 @@ fn iterate_anderson(
     ln_b: &Complex,
     prec: u32,
     digits: u64,
+    use_schwarz: bool,
 ) -> Result<Vec<Complex>, String> {
     let n = initial.len();
     let n_int = n - 2; // number of interior samples that actually iterate
@@ -1005,7 +1069,9 @@ fn iterate_anderson(
             x_new.push(c);
         }
         x_new.push(x[n - 1].clone());
-        symmetrize_schwarz(&mut x_new, prec);
+        if use_schwarz {
+            symmetrize_schwarz(&mut x_new, prec);
+        }
         x = x_new;
     }
     Err(format!(
@@ -1029,6 +1095,7 @@ fn iterate_picard(
     ln_b: &Complex,
     prec: u32,
     digits: u64,
+    use_schwarz: bool,
 ) -> Result<Vec<Complex>, String> {
     let n = initial.len();
     let max_iters = 2000usize;
@@ -1112,7 +1179,9 @@ fn iterate_picard(
             x_new.push(Complex::with_val(prec, &lhs + &rhs));
         }
         x_new.push(x[n - 1].clone());
-        symmetrize_schwarz(&mut x_new, prec);
+        if use_schwarz {
+            symmetrize_schwarz(&mut x_new, prec);
+        }
         x = x_new;
     }
     Err(format!(
@@ -1168,6 +1237,7 @@ fn iterate_newton(
     ln_b: &Complex,
     prec: u32,
     digits: u64,
+    use_schwarz: bool,
 ) -> Result<Vec<Complex>, String> {
     let n = initial.len();
     let max_iters = 60usize;
@@ -1384,10 +1454,12 @@ fn iterate_newton(
             // Re-pin boundaries (defensive: scale may not have been applied
             // exactly to those rows if the solve had pivoting noise) and
             // re-impose Schwarz reflection to keep iterates on the natural
-            // F's symmetry manifold.
+            // F's symmetry manifold (real-base regime only).
             x_trial[0] = l_lower.clone();
             x_trial[n - 1] = l_upper.clone();
-            symmetrize_schwarz(&mut x_trial, prec);
+            if use_schwarz {
+                symmetrize_schwarz(&mut x_trial, prec);
+            }
             let f_trial = apply_t_fft(
                 &x_trial, nodes, weights, t_max, l_upper, l_lower, ln_b, &kernels, prec,
             );

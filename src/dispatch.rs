@@ -100,6 +100,13 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
             })
         }
         regions::Region::OutsideShellThronGeneral(d) => {
+            // Try Schröder at the repelling fixed point first (cheap when it
+            // works). The generalized Kouznetsov path exists in
+            // `kouznetsov.rs` (no Schwarz symmetry, fixed points pulled from
+            // both W₀ and W₋₁ branches) but is not wired in: Paulsen-Cowgill-
+            // style branch selection / conformal mapping is required to place
+            // the two fixed points on opposite contour edges for general
+            // complex `b`, and that work is research-grade and pending.
             match schroder::tetrate_schroder(b, h, d, prec) {
                 Ok(v) => Ok(v),
                 Err(why) => Err(unsupported_msg(

@@ -101,23 +101,31 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
         }
         regions::Region::OutsideShellThronGeneral(d) => {
             // Try Schröder at the repelling fixed point first (cheap when it
-            // works). The generalized Kouznetsov path exists in
-            // `kouznetsov.rs` (no Schwarz symmetry, fixed points pulled from
-            // both W₀ and W₋₁ branches) but is not wired in: Paulsen-Cowgill-
-            // style branch selection / conformal mapping is required to place
-            // the two fixed points on opposite contour edges for general
-            // complex `b`, and that work is research-grade and pending.
-            match schroder::tetrate_schroder(b, h, d, prec) {
-                Ok(v) => Ok(v),
-                Err(why) => Err(unsupported_msg(
+            // works). For slightly-off-real bases, fall through to the
+            // generalized Kouznetsov path: `is_real_positive(b)` switches off
+            // Schwarz symmetry, and the partner fixed point is found by
+            // Newton iteration starting from `conj(L_+)` (the analytic
+            // continuation of the real-base conjugate pair). For truly
+            // complex bases the two fixed points may fall in the same
+            // half-plane, in which case Kouznetsov errors out cleanly —
+            // those bases need Paulsen-Cowgill conformal mapping which is
+            // not implemented here.
+            if let Ok(v) = schroder::tetrate_schroder(b, h, d, prec) {
+                dprint("Schröder succeeded at repelling fixed point");
+                return Ok(v);
+            }
+            dprint("Schröder unavailable; trying Newton-Kouznetsov for complex base");
+            kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits).map_err(|why| {
+                unsupported_msg(
                     "general complex base outside Shell-Thron",
                     &format!(
-                        "Schröder regular tetration not applicable here ({}); \
-                         Paulsen-Cowgill is not implemented in this build",
+                        "Schröder regular tetration not applicable, and \
+                         Newton-Kantorovich Kouznetsov Cauchy iteration \
+                         failed: {}",
                         why
                     ),
-                )),
-            }
+                )
+            })
         }
     }
 }

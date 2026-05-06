@@ -108,6 +108,24 @@ fn t422_real_ten_via_kouznetsov() {
     check_functional_eq("10", "0", "0.3", "0", 10, 3.0);
 }
 
+// ---------- Slightly-complex bases (Newton-from-conjugate fixed-point) ----
+// For b just off the real positive axis, the Kouznetsov rectangle still works
+// once Schwarz symmetry is dropped and the partner fixed point is found by
+// Newton iteration starting from `conj(L_+)`. This avoids the W₋₁ branch-cut
+// jump that breaks the naive `-W₋₁(-ln b)/ln b` partner choice.
+
+#[test]
+fn t425_slightly_complex_base_kouznetsov() {
+    // b = 2 + 0.001i: barely off the real axis, should converge cleanly.
+    check_functional_eq("2", "0.001", "0.5", "0", 10, 3.0);
+}
+
+#[test]
+fn t426_moderately_complex_base_kouznetsov() {
+    // b = 2 + 0.1i: 10% imaginary part. Still on the natural-pair side.
+    check_functional_eq("2", "0.1", "0.5", "0", 10, 3.0);
+}
+
 // ---------- Cases that have no working algorithm (must error out) ----
 
 #[test]

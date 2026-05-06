@@ -87,20 +87,47 @@ pub fn tetrate_kouznetsov(
             (raw_conj, raw)
         }
     } else {
-        // Compute the two fixed points -W_k(-ln b)/ln b for k=0,-1.
+        // For complex bases the natural fixed-point pair is the analytic
+        // continuation from the real-base case: L_+ = -W₀(-ln b)/ln b is
+        // continuous, but its partner is NOT generally `-W₋₁(-ln b)/ln b`
+        // — that's a different W-branch sheet whose value can jump
+        // discontinuously as b crosses real (e.g. b=2+0.001i lands W₋₁ near
+        // 3.5+10.9i instead of the natural near-conjugate 0.825−1.566i).
+        //
+        // Instead, find the partner by Newton-iterating `b^z = z` from
+        // `conj(L_+)`. For real b this seed is already a fixed point (zero
+        // iterations); for slightly-complex b it converges to the natural
+        // near-conjugate fixed point in 5–20 iterations.
         let w0_val = lambertw::w0(&neg_ln_b, prec)?;
         let neg_w0 = Complex::with_val(prec, -&w0_val);
-        let l_w0 = Complex::with_val(prec, &neg_w0 / &ln_b);
-        let wm1_val = lambertw::wm1(&neg_ln_b, prec)?;
-        let neg_wm1 = Complex::with_val(prec, -&wm1_val);
-        let l_wm1 = Complex::with_val(prec, &neg_wm1 / &ln_b);
-        // Place the fixed point with larger Im as L_upper, smaller as L_lower.
-        let l_w0_im = Float::with_val(prec, l_w0.imag()).to_f64();
-        let l_wm1_im = Float::with_val(prec, l_wm1.imag()).to_f64();
-        if l_w0_im >= l_wm1_im {
-            (l_wm1, l_w0)
+        let l_plus = Complex::with_val(prec, &neg_w0 / &ln_b);
+        let seed = Complex::with_val(prec, l_plus.conj_ref());
+        let l_minus = newton_fixed_point(&ln_b, &seed, prec).map_err(|e| {
+            format!(
+                "Kouznetsov: could not find partner fixed point near conj(L_+): {}",
+                e
+            )
+        })?;
+        // Verify the two fixed points live in opposite half-planes — required
+        // for the rectangle Cauchy formula's top/bottom boundary conditions
+        // to be well-posed. If they collapse to the same half-plane, error
+        // cleanly: this is the regime that needs Paulsen-Cowgill conformal
+        // mapping, which is not implemented in this build.
+        let im_plus = Float::with_val(prec, l_plus.imag()).to_f64();
+        let im_minus = Float::with_val(prec, l_minus.imag()).to_f64();
+        if im_plus.signum() == im_minus.signum() && im_plus.abs() > 1e-12 && im_minus.abs() > 1e-12 {
+            return Err(format!(
+                "Kouznetsov: fixed-point pair (L_+ = {:.4}+{:.4}i, L_- = {:.4}+{:.4}i) lies in the same half-plane; the rectangle Cauchy formula requires opposite half-planes. Paulsen-Cowgill conformal mapping is required for this base and is not implemented.",
+                Float::with_val(prec, l_plus.real()).to_f64(),
+                im_plus,
+                Float::with_val(prec, l_minus.real()).to_f64(),
+                im_minus,
+            ));
+        }
+        if im_plus >= im_minus {
+            (l_minus, l_plus)
         } else {
-            (l_w0, l_wm1)
+            (l_plus, l_minus)
         }
     };
     // λ_upper = (ln b)·L_upper drives the contour decay rate.
@@ -319,6 +346,48 @@ fn find_normalization_shift(
 /// (real negative, imaginary, general complex) does not.
 fn is_real_positive(b: &Complex) -> bool {
     b.imag().is_zero() && b.real().is_sign_positive() && !b.real().is_zero()
+}
+
+/// Find a fixed point of `b^z = z` by Newton iteration starting from `seed`.
+///
+/// Used to locate `L_lower` for non-real bases by starting from
+/// `conj(L_upper)`. For real bases, conj(L_upper) is exact (zero iterations).
+/// For slightly-complex bases the conjugate is close to a true fixed point
+/// and Newton converges quickly; this is the natural analytic continuation
+/// of the real case and avoids the W₋₁ branch-cut discontinuity that
+/// `-W₋₁(-ln b)/ln b` exhibits for slightly-off-real bases.
+///
+/// f(z)  = b^z - z
+/// f'(z) = b^z · ln_b - 1
+fn newton_fixed_point(
+    ln_b: &Complex,
+    seed: &Complex,
+    prec: u32,
+) -> Result<Complex, String> {
+    let one = Complex::with_val(prec, (1, 0));
+    // Target |f| < 2^-(prec - 16); leave a small guard so the loop terminates.
+    let target_log2: i32 = -((prec as i32).saturating_sub(16));
+    let target_tol = Float::with_val(prec, Float::with_val(prec, 1.0) >> -target_log2);
+    let mut z = seed.clone();
+    for _ in 0..200 {
+        let arg = Complex::with_val(prec, &z * ln_b);
+        let bz = Complex::with_val(prec, arg.exp_ref());
+        let f = Complex::with_val(prec, &bz - &z);
+        let fabs = Float::with_val(prec, f.abs_ref());
+        if fabs < target_tol {
+            return Ok(z);
+        }
+        let fp = {
+            let t = Complex::with_val(prec, &bz * ln_b);
+            Complex::with_val(prec, &t - &one)
+        };
+        if Float::with_val(prec, fp.abs_ref()).to_f64() < 1e-30 {
+            return Err("Newton fixed-point: derivative vanished".into());
+        }
+        let delta = Complex::with_val(prec, &f / &fp);
+        z -= &delta;
+    }
+    Err("Newton fixed-point: did not converge in 200 iterations".into())
 }
 
 fn arg_abs_f64(z: &Complex, prec: u32) -> f64 {

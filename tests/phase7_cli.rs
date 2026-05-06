@@ -98,19 +98,20 @@ fn t707_schroder_path_cli() {
 }
 
 #[test]
-fn t708_unsupported_base_errors() {
-    // b = e is outside Shell-Thron real-positive; Schröder bails on σ̃ radius
-    // and no continuous algorithm is available in this build. Per design, the
-    // CLI errors out (exit 1) with a clear "unsupported case" message rather
-    // than silently returning a wrong-but-plausible linear-approx number.
+fn t708_real_e_via_kouznetsov_cli() {
+    // b = e at non-integer height — Schröder's σ̃-shift can't reach 1−L from
+    // L for this base, so the dispatcher routes to the Newton-Kantorovich
+    // Kouznetsov path. Verify the CLI exits success and the value is in the
+    // ballpark of the published Kneser tetration value `e^^0.5 ≈ 1.6463`.
     let out = run(&["20", "2.71828182845904523536", "0", "0.5", "0"]);
-    assert!(!out.status.success(), "expected non-zero exit");
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("unsupported case"),
-        "expected unsupported-case error, stderr: {}",
-        stderr
+        out.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let re = stdout.lines().next().unwrap_or("");
+    assert!(re.starts_with("1.6"), "got {}", re);
 }
 
 #[test]

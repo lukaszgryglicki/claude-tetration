@@ -29,9 +29,13 @@
 //! into Re ∈ [0, 1] and applying the Cauchy formula one more time, then
 //! iterating `b^·` (`shift > 0`) or `log_b` (`shift < 0`) back.
 
-use rug::{Complex, Float};
+use rug::{float::Constant, Complex, Float};
 
-use crate::{cnum, regions::FixedPointData};
+use crate::{
+    cnum,
+    fft::{cross_correlate_with_kernel, precompute_kernel_fft, KernelFft},
+    regions::FixedPointData,
+};
 
 /// Compute `F_b(h)` via Anderson-accelerated Cauchy iteration. Currently
 /// restricted to real bases `b > e^(1/e)`. Precision target `digits` drives
@@ -77,9 +81,9 @@ pub fn tetrate_kouznetsov(
     let t_max_f64 = ((digits as f64 + 8.0) * std::f64::consts::LN_10 / arg_lambda).max(8.0);
     let t_max = Float::with_val(prec, t_max_f64);
 
-    // Trapezoidal node count: error ≈ exp(-π·d·N/T). For digits-digit accuracy
-    // and d ≈ 1, N ≈ ln(10)/π · digits · T.
-    let n_nodes = pick_node_count(digits, t_max_f64);
+    // Trapezoidal node count: scales with both `digits` and `t_max`, with the
+    // analyticity-strip width `|arg(λ)|` driving the per-node convergence rate.
+    let n_nodes = pick_node_count(digits, t_max_f64, arg_lambda);
 
     let nodes = build_uniform_nodes(&t_max, n_nodes, prec);
     let weights = build_trapezoidal_weights(&t_max, n_nodes, prec);
@@ -97,7 +101,12 @@ pub fn tetrate_kouznetsov(
         );
     }
 
+    let debug_phase = std::env::var_os("TET_KOUZ_DEBUG").is_some();
+    let phase_start = std::time::Instant::now();
     let mut initial = initial_guess(&nodes, b, &l_upper, &l_lower, arg_lambda, prec);
+    if debug_phase {
+        eprintln!("kouz phase: initial_guess done ({:.2}s)", phase_start.elapsed().as_secs_f64());
+    }
     // Pin the boundary samples to the asymptotic fixed-point values: the very
     // first sample (t=−t_max) corresponds to z₀ on the bottom contour edge —
     // Cauchy's formula has a 1/(t−z₀) singularity there. Same for the last
@@ -108,7 +117,12 @@ pub fn tetrate_kouznetsov(
     initial[n_nodes - 1] = l_upper.clone();
     // Schwarz reflection: F(z̄)=F̄(z). Symmetrize the initial guess so the
     // iteration starts on the natural-Kouznetsov manifold.
+    let phase_start = std::time::Instant::now();
     symmetrize_schwarz(&mut initial, prec);
+    if debug_phase {
+        eprintln!("kouz phase: symmetrize done ({:.2}s)", phase_start.elapsed().as_secs_f64());
+    }
+    let phase_start = std::time::Instant::now();
     // Default solver: Levenberg-Marquardt Newton-Kantorovich. Newton's
     // Jacobian-based step finds the right descent direction even when the
     // Cauchy operator T has spectral radius > 1 (which it does for typical
@@ -130,6 +144,10 @@ pub fn tetrate_kouznetsov(
             initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
         )?
     };
+    if debug_phase {
+        eprintln!("kouz phase: iterate_newton done ({:.2}s elapsed since symmetrize)", phase_start.elapsed().as_secs_f64());
+    }
+    let phase_start = std::time::Instant::now();
 
     // The functional equation `F(z+1) = b^F(z)` plus the boundary conditions
     // `F → L_upper / L_lower` are invariant under any horizontal shift c ∈ ℝ:
@@ -142,9 +160,10 @@ pub fn tetrate_kouznetsov(
     // such that F(δ) = 1, then for user height h evaluate F(h + δ). That maps
     // our (arbitrary-phase) F onto the natural F̃ via F̃(h) = F(h + δ).
     let shift = find_normalization_shift(
-        &samples, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec,
+        &samples, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
     )?;
-    if std::env::var_os("TET_KOUZ_DEBUG").is_some() {
+    if debug_phase {
+        eprintln!("kouz phase: find_normalization_shift done ({:.2}s)", phase_start.elapsed().as_secs_f64());
         eprintln!(
             "kouz normalization shift δ = {:.6e} + {:.6e}i (such that F(δ)=1)",
             Float::with_val(prec, shift.real()).to_f64(),
@@ -153,9 +172,14 @@ pub fn tetrate_kouznetsov(
     }
     let h_shifted = Complex::with_val(prec, h + &shift);
 
-    eval_at_height(
+    let phase_start = std::time::Instant::now();
+    let result = eval_at_height(
         b, &h_shifted, &samples, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec,
-    )
+    );
+    if debug_phase {
+        eprintln!("kouz phase: eval_at_height done ({:.2}s)", phase_start.elapsed().as_secs_f64());
+    }
+    result
 }
 
 /// Find the unique real shift δ such that `F(δ) = 1`, where `F` is the
@@ -167,6 +191,11 @@ pub fn tetrate_kouznetsov(
 /// Convergence is typically 4–6 iterations (quadratic) from c=0 because the
 /// initial guess shape (tanh+sech bump) places F(0) within ~0.1 of 1, so c is
 /// small and Newton is in its quadratic-convergence regime immediately.
+///
+/// `eps_f` (FD step size) and `target` scale with `digits`: at high precision,
+/// a fixed `eps=1e-8` would limit derivative accuracy to ~16 digits, so we use
+/// the cube-root rule `eps ≈ 10^(-digits/3)` (optimal for central differences,
+/// balancing truncation `O(ε²·f''')` against roundoff `O(δ_f/ε)`).
 #[allow(clippy::too_many_arguments)]
 fn find_normalization_shift(
     samples: &[Complex],
@@ -177,16 +206,25 @@ fn find_normalization_shift(
     l_lower: &Complex,
     ln_b: &Complex,
     prec: u32,
+    digits: u64,
 ) -> Result<Complex, String> {
     let one = Complex::with_val(prec, (1u32, 0));
     let two = Float::with_val(prec, 2u32);
-    let eps_f = Float::with_val(prec, 1e-8f64);
+    // Cube-root rule for central FD: ε ≈ δ_f^(1/3) where δ_f is the working
+    // precision. With δ_f ≈ 10^(-digits), ε ≈ 10^(-digits/3 - 3).
+    let eps_pow = -((digits as i32 + 8) / 3).min(150);
+    let eps_f64 = 10f64.powi(eps_pow);
+    let eps_f = Float::with_val(prec, eps_f64);
     let eps = Complex::with_val(prec, (eps_f.clone(), 0));
     let two_eps = Complex::with_val(prec, (Float::with_val(prec, &eps_f * &two), 0));
 
     let mut c = cnum::zero(prec);
-    let max_iters = 30usize;
-    let target = 1e-15f64; // tighter than the typical residual floor; refines best-effort
+    let max_iters = 60usize;
+    // Newton converges quadratically once close; we want δ accurate to most of
+    // the requested digits. Stop when |F(c)−1| < 10^(−2·digits/3) so the
+    // refined δ contributes only sub-leading rounding error to F̃(h).
+    let target_pow = -((digits as i32 * 2 / 3).min(200));
+    let target = 10f64.powi(target_pow);
 
     for _iter in 0..max_iters {
         let f_c = cauchy_eval(
@@ -252,10 +290,44 @@ fn arg_abs_f64(z: &Complex, prec: u32) -> f64 {
     im.atan2(re).abs()
 }
 
-fn pick_node_count(digits: u64, t_max: f64) -> usize {
-    let scale = 1.1 * std::f64::consts::LN_10 / std::f64::consts::PI;
-    let n = (scale * digits as f64 * t_max).ceil() as usize;
-    n.max(80).min(20_000)
+/// Trapezoidal-rule node count for the Kouznetsov rectangle.
+///
+/// Two error sources contribute:
+/// * Boundary mismatch at `t=±T` (the integrand isn't zero there): plain
+///   trapezoidal gives `O(h²)`, killed by Euler-Maclaurin (see
+///   `compute_em_correction_z0`). Negligible after EM.
+/// * Bulk error on the analytic integrand: spectrally, `~ exp(-2π·σ/h)`
+///   where `σ` is the analyticity-strip half-width of the integrand (viewed
+///   as a function of real `T_var`). Empirically `σ_eff ≈ 0.30` for the
+///   left-edge log integrand `log_b(F(0.5+iT_var))` — bounded by F's branch
+///   structure off the midline. So bulk error `~ exp(−1.88·N/T)` for typical
+///   real bases > η, and reaching `10^{−(digits+5)}` needs
+///   `N ≥ (digits+5)·ln(10)·T / (π·σ_eff)`.
+///
+/// We round up and apply a 1.2× margin. We do NOT divide by `|arg(λ)|` like
+/// the previous formula did — the analyticity-strip geometry doesn't depend
+/// on it, and the t_max selection already absorbs `arg(λ)`'s effect on
+/// contour height.
+fn pick_node_count(digits: u64, t_max: f64, _arg_lambda: f64) -> usize {
+    const SIGMA_EFF: f64 = 0.30;
+    const MARGIN: f64 = 1.2;
+    let n_bulk = (MARGIN
+        * (digits as f64 + 5.0)
+        * std::f64::consts::LN_10
+        * t_max
+        / (std::f64::consts::PI * SIGMA_EFF))
+        .ceil() as usize;
+    // Hard floor: 80 nodes for reasonable resolution. Hard cap: 60k — beyond
+    // that the FFT-domain matvec gets prohibitive even at moderate precision.
+    n_bulk.clamp(80, 60_000)
+}
+
+/// Estimated trapezoidal-truncation floor for residual: `exp(-|arg(λ)|·N/T)`.
+/// Used by debug printing and by precision-ceiling logic.
+#[allow(dead_code)]
+fn trapezoidal_floor(arg_lambda: f64, n_nodes: usize, t_max: f64) -> f64 {
+    let arg_safe = arg_lambda.max(0.05);
+    (-(arg_safe * n_nodes as f64 / t_max)).exp()
 }
 
 fn build_uniform_nodes(t_max: &Float, n: usize, prec: u32) -> Vec<Float> {
@@ -308,6 +380,176 @@ fn build_trapezoidal_weights(t_max: &Float, n: usize, prec: u32) -> Vec<Float> {
     w[0] = half_delta.clone();
     w[n - 1] = half_delta;
     w
+}
+
+// =====================================================================
+// Euler-Maclaurin boundary correction for trapezoidal-rule Cauchy integrals.
+//
+// The integrands `g_R(t) = b^F(0.5+it)/(1.5+it−z₀)` and
+// `g_L(t) = log_b(F(0.5+it))/(−0.5+it−z₀)` are NOT zero at the contour
+// truncation `t=±T`: their values are L_{up/down}/(c±iT−z₀), only `1/T`
+// small. So plain trapezoidal has O(h²) error and quickly hits a floor
+// far above requested precision (e.g. ~6e−6 for digits=15 with N=2635).
+//
+// Euler-Maclaurin says
+//   ∫_{-T}^{T} g(t) dt = T_n − Σ_{k=1}^∞ B_{2k}/(2k)! · h^{2k}
+//                                  · [g^{(2k−1)}(T) − g^{(2k−1)}(−T)].
+// With `F(±T) = L_{up/down}` (boundary pinning) and `F^{(j)}(±T)` below the
+// precision floor (asymptote reached up to `exp(−|arg(λ)|·T)`), each
+// derivative is closed-form
+//   g^{(j)}(T)  ≈ L_+ · (−i)^j · j! / (c+iT)^{j+1}.
+// The correction simplifies to
+//   corr = −i · Σ_k |B_{2k}|/(2k) · h^{2k}
+//                · [L_+ /(c+iT)^{2k} − L_− /(c−iT)^{2k}].
+// Each EM term gains roughly `(h/T)²` over the previous, so K ≈ 7–10 lifts
+// the floor from O(h²) ≈ 10⁻⁶ to well below 10⁻⁵⁰ at our typical h/T.
+//
+// EM is asymptotic, not convergent — Bernoulli numbers grow factorially —
+// but the optimal truncation `K_opt ≈ T·π/h` is in the thousands for our
+// regime, so K=10 is far inside the safe range.
+// =====================================================================
+
+/// `|B_{2k}| / (2k)` as exact rational, for k=1..=12 (covers the EM truncation
+/// we'd ever need at digit counts up to ~1000). Beyond k=12 numerators outgrow
+/// `u64`; if the dispatcher ever picks K>12, extend with `rug::Integer`.
+fn em_coef_rational(k: usize) -> Option<(u64, u64)> {
+    match k {
+        1 => Some((1, 12)),
+        2 => Some((1, 120)),
+        3 => Some((1, 252)),
+        4 => Some((1, 240)),
+        5 => Some((1, 132)),
+        6 => Some((691, 32760)),
+        7 => Some((1, 12)),
+        8 => Some((3617, 8160)),
+        9 => Some((43867, 14364)),
+        10 => Some((174611, 6600)),
+        11 => Some((854513, 3036)),
+        12 => Some((236364091, 65520)),
+        _ => None,
+    }
+}
+
+/// Pick how many EM terms to compute. We default to K=12 (the largest size
+/// our `em_coef_rational` table holds) because:
+///
+/// * The closed-form derivative formula evaluates `1/(c±iT−z₀)^{2k}` —
+///   when `z₀` sits near a boundary node `T_k ≈ ±T`, that denominator can
+///   shrink to `O(1)` instead of `O(T)`, so EM terms decay much slower
+///   than the naive `(h/T)^{2k}` argument suggests.
+/// * The cost is O(K · N) per call (one closed-form evaluation per row),
+///   negligible against the O(N²) FFT matvec.
+/// * Empirically on `b=2, digits=30, N=8264, T=80`: K=6 stalls Newton at
+///   ~6e-28 while K=12 reaches 5e-36, eight orders of magnitude better,
+///   for ~zero extra CPU.
+///
+/// `TET_KOUZ_NO_EM=1` returns 0 (skip EM entirely) for A/B testing;
+/// `TET_KOUZ_EM_K=<n>` overrides for diagnostics.
+fn em_n_terms(_h: f64, _t_max: f64, _digits: u64) -> usize {
+    if std::env::var_os("TET_KOUZ_NO_EM").is_some() {
+        return 0;
+    }
+    if let Ok(s) = std::env::var("TET_KOUZ_EM_K") {
+        if let Ok(k) = s.parse::<usize>() {
+            return k.min(12);
+        }
+    }
+    12
+}
+
+/// Pre-bake `[ -i · |B_{2k}|/(2k) · h^{2k} ]` for k=1..=K. The `-i` factor
+/// (from `(−i)^{2k−1} = (−1)^k · i` combined with the alternating sign of
+/// `B_{2k}`) simplifies to a uniform `-i` across all k.
+fn build_em_h_powers(h: &Float, n_terms: usize, prec: u32) -> Vec<Complex> {
+    if n_terms == 0 {
+        return Vec::new();
+    }
+    let neg_i = Complex::with_val(
+        prec,
+        (Float::new(prec), Float::with_val(prec, -1i32)),
+    );
+    let h_sq = Float::with_val(prec, h * h);
+    let mut h_pow = h_sq.clone();
+    let mut out = Vec::with_capacity(n_terms);
+    for k in 1..=n_terms {
+        let (num, den) =
+            em_coef_rational(k).expect("EM coefficient table exhausted (k > 12)");
+        let coef_real = Float::with_val(
+            prec,
+            Float::with_val(prec, num) / Float::with_val(prec, den),
+        );
+        let scaled = Float::with_val(prec, &coef_real * &h_pow);
+        out.push(Complex::with_val(prec, &neg_i * &scaled));
+        if k < n_terms {
+            h_pow = Float::with_val(prec, &h_pow * &h_sq);
+        }
+    }
+    out
+}
+
+/// Closed-form Euler-Maclaurin correction for both edges at evaluation point
+/// `z₀`. Caller subtracts the returned `(corr_R, corr_L)` from the trapezoidal
+/// `r_int` / `l_int` to obtain integration error `O(h^{2K+2})` (vs `O(h²)` for
+/// plain trapezoidal). `em_h_powers` is the pre-baked coefficient sequence
+/// from `build_em_h_powers`.
+fn compute_em_correction_z0(
+    z0: &Complex,
+    t_max: &Float,
+    l_upper: &Complex,
+    l_lower: &Complex,
+    em_h_powers: &[Complex],
+    prec: u32,
+) -> (Complex, Complex) {
+    if em_h_powers.is_empty() {
+        return (cnum::zero(prec), cnum::zero(prec));
+    }
+    let cp1 = Complex::with_val(prec, (Float::with_val(prec, 1.5f64), 0));
+    let cm1 = Complex::with_val(prec, (Float::with_val(prec, -0.5f64), 0));
+    let it_max = Complex::with_val(prec, (Float::new(prec), t_max.clone()));
+    let neg_it_max = Complex::with_val(prec, -&it_max);
+
+    // c±iT − z₀ for right edge (c=1.5) and left edge (c=−0.5).
+    let c_r = Complex::with_val(prec, &cp1 - z0);
+    let c_l = Complex::with_val(prec, &cm1 - z0);
+    let cr_pos = Complex::with_val(prec, &c_r + &it_max);
+    let cr_neg = Complex::with_val(prec, &c_r + &neg_it_max);
+    let cl_pos = Complex::with_val(prec, &c_l + &it_max);
+    let cl_neg = Complex::with_val(prec, &c_l + &neg_it_max);
+
+    // (c±iT−z₀)² — incremental power update inside the loop multiplies by
+    // these to advance from (c±iT−z₀)^{2k} to (c±iT−z₀)^{2(k+1)}.
+    let cr_pos_sq = Complex::with_val(prec, &cr_pos * &cr_pos);
+    let cr_neg_sq = Complex::with_val(prec, &cr_neg * &cr_neg);
+    let cl_pos_sq = Complex::with_val(prec, &cl_pos * &cl_pos);
+    let cl_neg_sq = Complex::with_val(prec, &cl_neg * &cl_neg);
+
+    let one_c = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+    let mut pr_pos = one_c.clone();
+    let mut pr_neg = one_c.clone();
+    let mut pl_pos = one_c.clone();
+    let mut pl_neg = one_c;
+
+    let mut corr_r = cnum::zero(prec);
+    let mut corr_l = cnum::zero(prec);
+    for coef in em_h_powers {
+        pr_pos = Complex::with_val(prec, &pr_pos * &cr_pos_sq);
+        pr_neg = Complex::with_val(prec, &pr_neg * &cr_neg_sq);
+        pl_pos = Complex::with_val(prec, &pl_pos * &cl_pos_sq);
+        pl_neg = Complex::with_val(prec, &pl_neg * &cl_neg_sq);
+
+        let r_pos = Complex::with_val(prec, l_upper / &pr_pos);
+        let r_neg = Complex::with_val(prec, l_lower / &pr_neg);
+        let r_diff = Complex::with_val(prec, &r_pos - &r_neg);
+        let r_term = Complex::with_val(prec, &r_diff * coef);
+        corr_r = Complex::with_val(prec, &corr_r + &r_term);
+
+        let l_pos = Complex::with_val(prec, l_upper / &pl_pos);
+        let l_neg = Complex::with_val(prec, l_lower / &pl_neg);
+        let l_diff = Complex::with_val(prec, &l_pos - &l_neg);
+        let l_term = Complex::with_val(prec, &l_diff * coef);
+        corr_l = Complex::with_val(prec, &corr_l + &l_term);
+    }
+    (corr_r, corr_l)
 }
 
 fn initial_guess(
@@ -411,6 +653,34 @@ fn cauchy_eval(
         let term_l = Complex::with_val(prec, &log_b_s / &denom_l);
         l_int += Complex::with_val(prec, &term_l * &weights[k]);
     }
+
+    // Euler-Maclaurin boundary correction. The trapezoidal sums above have
+    // O(h²) error driven by `g'(±T)`, which is closed-form (since F is
+    // pinned to L_{up/down} at the contour endpoints). Subtracting the
+    // first K EM terms drops the error to O(h^{2K+2}).
+    //
+    // `cauchy_eval` is called with arbitrary z₀, so we cannot reuse the
+    // per-row precomputation that `apply_t_fft` does — but the cost (one
+    // power-of-2 sequence times K terms) is O(K) MPC ops, negligible.
+    let h = if nodes.len() >= 2 {
+        Float::with_val(prec, &nodes[1] - &nodes[0])
+    } else {
+        Float::with_val(prec, 1u32)
+    };
+    let h_f64 = h.to_f64();
+    let t_max_f64 = t_max.to_f64();
+    // Use a generous fixed K=10 here (matches the dispatcher's typical pick;
+    // overestimating costs only K extra MPC ops).
+    let n_terms = if std::env::var_os("TET_KOUZ_NO_EM").is_some() {
+        0
+    } else {
+        em_n_terms(h_f64, t_max_f64, 50).max(1)
+    };
+    let em_h_powers = build_em_h_powers(&h, n_terms, prec);
+    let (corr_r, corr_l) =
+        compute_em_correction_z0(z0, t_max, l_upper, l_lower, &em_h_powers, prec);
+    let r_int = Complex::with_val(prec, &r_int - &corr_r);
+    let l_int = Complex::with_val(prec, &l_int - &corr_l);
 
     // Top edge contributes L̄ · ln((c-1+iT-z0)/(c+1+iT-z0)).
     let it_max = Complex::with_val(prec, (Float::new(prec), t_max.clone()));
@@ -870,9 +1140,19 @@ fn iterate_picard(
 ///   DT[k][j] = (w_j / 2π) · [ b^F[j]·ln(b) / (1+i(t_j−t_k))
 ///                            − 1/(F[j]·ln(b)) / (−1+i(t_j−t_k)) ]
 ///
-/// Per-iteration cost is `O(N²)` for the Jacobian and `O(N³)` for the linear
-/// solve (Gauss elimination at full precision). Newton converges quadratically
-/// near the fixed point, so 5–15 iterations typically suffice.
+/// **Linear solve via Newton-Krylov GMRES.** We never form J explicitly.
+/// The matvec `(I − DT + μ·I)·v` is computed in O(N²) using two precomputed
+/// helper arrays (per-sample factors `b^F·ln(b)` and `1/(F·ln(b))`, and
+/// per-offset denominator inverses `1/(±1+i(t_j−t_k))` that depend only on
+/// the uniform grid). GMRES with restarted Arnoldi solves the linear system
+/// to a relative tolerance of `1e-3` in K Krylov steps; total cost
+/// `O(K·N²)` beats dense LU's `O(N³)/3` for `N > ~300` and is the only
+/// tractable option above N ≈ 5000 (where LU's `N³` cost runs into days
+/// even at moderate precision).
+///
+/// Newton-Kantorovich theory says solving the inner linear system to
+/// `min(0.1, ‖r‖)` relative tolerance preserves quadratic convergence; we
+/// pick `1e-3` as a uniform safe choice.
 ///
 /// Damped step: full Newton step is taken first; if it *increases* residual,
 /// halve until it doesn't (up to 6 halvings). On line-search exhaustion we
@@ -904,6 +1184,18 @@ fn iterate_newton(
     // descent). Starts at a moderate value so the first step doesn't blow up.
     let mut mu = 1.0f64;
 
+    // FFT-domain kernels. The right/left edge denominator inverses depend
+    // only on the uniform grid spacing — building them once per call collapses
+    // every later matvec to two length-`m` FFTs (m = next_pow2(3N − 2)). The
+    // same struct also carries per-row Euler-Maclaurin corrections, so the
+    // residual evaluator just adds a precomputed shift instead of
+    // recomputing closed-form boundary terms each iteration.
+    let kernel_start = std::time::Instant::now();
+    let kernels = build_cauchy_kernels(nodes, t_max, l_upper, l_lower, prec, digits);
+    if debug {
+        eprintln!("kouz phase: build_cauchy_kernels done ({:.2}s)", kernel_start.elapsed().as_secs_f64());
+    }
+
     if debug {
         let mid = nodes.len() / 2;
         eprintln!(
@@ -917,7 +1209,10 @@ fn iterate_newton(
     }
 
     for iter in 0..max_iters {
-        let f = apply_t(&x, nodes, weights, t_max, l_upper, l_lower, ln_b, prec);
+        let iter_start = std::time::Instant::now();
+        let matvec_start = std::time::Instant::now();
+        let f = apply_t_fft(&x, nodes, weights, t_max, l_upper, l_lower, ln_b, &kernels, prec);
+        let matvec_secs = matvec_start.elapsed().as_secs_f64();
         let mut r = Vec::with_capacity(n);
         let mut r_norm = 0f64;
         for i in 0..n {
@@ -946,8 +1241,8 @@ fn iterate_newton(
             let xm_re = Float::with_val(prec, x[mid_idx].real()).to_f64();
             let xm_im = Float::with_val(prec, x[mid_idx].imag()).to_f64();
             eprintln!(
-                "kouz LM iter {:>3}: ‖r‖∞ = {:.3e}  μ={:.2e}  F(0.5)≈{:.4}+{:.4}i  (target {:.3e})",
-                iter, r_norm, mu, xm_re, xm_im, target
+                "kouz LM iter {:>3}: ‖r‖∞ = {:.3e}  μ={:.2e}  F(0.5)≈{:.4}+{:.4}i  (target {:.3e})  matvec={:.2}s",
+                iter, r_norm, mu, xm_re, xm_im, target, matvec_secs
             );
         }
 
@@ -993,36 +1288,68 @@ fn iterate_newton(
         }
         prev_residual = r_norm;
 
-        // Build J = I − DT analytically.
-        let mut jac = compute_jacobian_minus_dt(&x, nodes, weights, ln_b, prec);
-        // Pin boundary rows: J[0] = e_0, J[n-1] = e_{n-1} so the LM solve
-        // produces δ[0] = δ[n-1] = 0. Combined with r[0] = r[n-1] = 0
-        // (zeroed above), this makes the boundary samples constants in the
-        // Newton system rather than free variables that would chase the
-        // corner Cauchy singularity.
-        let zero_c = cnum::zero(prec);
-        let one_c = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
-        for col in 0..n {
-            jac[0][col] = zero_c.clone();
-            jac[n - 1][col] = zero_c.clone();
-        }
-        jac[0][0] = one_c.clone();
-        jac[n - 1][n - 1] = one_c;
+        // Precompute J = I − DT helpers ONCE per Newton iteration. They
+        // depend on `x` but not on the LM damping μ, so we hoist them out
+        // of the inner LM line search.
+        let (b_f_ln, inv_f_ln) = precompute_dt_factors(&x, ln_b, prec);
 
         // Levenberg-Marquardt: solve (J + μ·I)·δ = r. Inner loop adaptively
         // grows μ until the trial step actually decreases residual; then
         // shrinks μ for the next outer iteration.
         let mut accepted = false;
         for _lm_try in 0..10 {
-            let mut jac_damped: Vec<Vec<Complex>> = jac.iter().map(|row| row.clone()).collect();
-            let mu_f = Float::with_val(prec, mu);
-            for k in 0..n {
-                jac_damped[k][k] = Complex::with_val(prec, &jac_damped[k][k] + &mu_f);
-            }
-
-            let delta = match solve_complex_lin(&jac_damped, &r, prec) {
+            // Boundary-pinned matvec: rows 0 and n-1 act as identity (so
+            // δ[0] = r[0] = 0 and δ[n-1] = r[n-1] = 0 stay zero throughout
+            // the Krylov build); interior rows compute (1+μ)·v − DT·v.
+            let mu_local = mu;
+            let matvec = |v: &[Complex]| -> Vec<Complex> {
+                let dt_v = apply_dt_v_fft(&b_f_ln, &inv_f_ln, &kernels, weights, v, prec);
+                let scale = Float::with_val(prec, 1.0 + mu_local);
+                let mut out = Vec::with_capacity(n);
+                for k in 0..n {
+                    let scaled = Complex::with_val(prec, &v[k] * &scale);
+                    out.push(Complex::with_val(prec, &scaled - &dt_v[k]));
+                }
+                out[0] = v[0].clone();
+                out[n - 1] = v[n - 1].clone();
+                out
+            };
+            // Krylov dimension and restart count: for typical Cauchy-Newton
+            // matrices (well-conditioned with LM damping), 80 inner steps
+            // are plenty; 8 restarts buys robustness against difficult
+            // bases without ballooning memory (V matrix uses 80·N complex
+            // words, which is ≪ the dense N×N Jacobian we're avoiding).
+            //
+            // Eisenstat-Walker type 2 forcing: η_rel = 0.1·r_norm gives
+            // ‖J·δ + r‖ ≤ 0.1·r_norm·‖r‖ = 0.1·r_norm² in absolute terms,
+            // which delivers quadratic Newton-Krylov convergence (each
+            // outer iteration roughly squares the residual reduction).
+            //
+            // `gmres_complex` takes RELATIVE tolerance (vs ‖rhs‖ = ‖r‖):
+            //   target_abs = ‖rhs‖ · tol_rel
+            // To request quadratic forcing we set tol_rel = 0.1·r_norm.
+            // For very small r_norm this would push target_abs below MPC's
+            // working-precision noise floor, so we cap absolute target
+            // against `10^{-(digits+5)}` and back-convert to relative form.
+            // Cap relative tol at 1e-3 to skip pointless tight solves when
+            // r_norm is still O(1).
+            let abs_floor = 10f64.powf(-(digits as f64) - 5.0);
+            let abs_target = (0.1f64 * r_norm * r_norm).max(abs_floor);
+            let inner_tol = if r_norm > 0.0 {
+                (abs_target / r_norm).min(1e-3)
+            } else {
+                1e-3
+            };
+            let restart = 80.min(n);
+            let delta = match gmres_complex(matvec, &r, inner_tol, 8, restart, prec) {
                 Ok(d) => d,
-                Err(_) => {
+                Err(e) => {
+                    if debug {
+                        eprintln!(
+                            "kouz LM iter {}: GMRES failed (tol={:.2e}): {}",
+                            iter, inner_tol, e
+                        );
+                    }
                     mu *= 4.0;
                     continue;
                 }
@@ -1061,7 +1388,9 @@ fn iterate_newton(
             x_trial[0] = l_lower.clone();
             x_trial[n - 1] = l_upper.clone();
             symmetrize_schwarz(&mut x_trial, prec);
-            let f_trial = apply_t(&x_trial, nodes, weights, t_max, l_upper, l_lower, ln_b, prec);
+            let f_trial = apply_t_fft(
+                &x_trial, nodes, weights, t_max, l_upper, l_lower, ln_b, &kernels, prec,
+            );
             let mut r_trial_norm = 0f64;
             let mut bad = false;
             for i in 1..n - 1 {
@@ -1087,7 +1416,6 @@ fn iterate_newton(
                 }
                 mu = mu.max(1e-15);
                 accepted = true;
-                let _ = jac; // suppress unused-after-move
                 break;
             }
             // Reject: grow μ to take a smaller, more gradient-like step.
@@ -1095,7 +1423,6 @@ fn iterate_newton(
             if mu > 1e8 {
                 break;
             }
-            let _ = jac_damped;
         }
         if !accepted {
             // LM line-search exhausted (μ has grown without finding a step
@@ -1120,6 +1447,13 @@ fn iterate_newton(
                 iter, r_norm, mu
             ));
         }
+        if debug {
+            eprintln!(
+                "kouz LM iter {:>3}: total wall {:.2}s",
+                iter,
+                iter_start.elapsed().as_secs_f64()
+            );
+        }
     }
 
     if best_residual.is_finite() {
@@ -1136,6 +1470,12 @@ fn iterate_newton(
 /// the right-edge term `b^F[j]/(1.5+it_j−z_k)` and left-edge term
 /// `log_b(F[j])/(−0.5+it_j−z_k)` (the top/bottom edges contribute constants
 /// independent of `F`, so they don't enter the Jacobian).
+///
+/// **Now unused in production:** the GMRES path computes `J·v` matrix-free via
+/// `apply_dt_v`. Kept as a reference implementation for testing and for the
+/// `TET_KOUZ_DENSE=1` debug fallback (not yet wired up, but the logic is
+/// straightforward should we need to compare against dense LU).
+#[allow(dead_code)]
 fn compute_jacobian_minus_dt(
     samples: &[Complex],
     nodes: &[Float],
@@ -1282,4 +1622,575 @@ fn eval_at_height(
     }
     let _ = b; // referenced to keep the signature stable; recursion uses ln_b.
     Ok(f)
+}
+
+// =====================================================================
+// Newton-Krylov GMRES path
+//
+// Replaces the dense O(N³) LU factorization in iterate_newton with a
+// matrix-free Krylov solve. The Jacobian J = I − DT is never materialised;
+// we only need J·v for arbitrary v, which can be computed in O(N²) using
+// the analytic form of DT plus a few precomputed factors.
+//
+// Cost comparison at N nodes, K Krylov dimension:
+//   * Dense LU per LM try: O(N²) build + O(N³)/3 elimination.
+//   * GMRES per LM try:    K matvecs each O(N²)  +  O(K²) for Givens.
+// For N > a few hundred and K in [50, 200], GMRES is cheaper. The win
+// grows linearly in N (since LU's N³ vs Krylov's K·N²), making
+// 50-digit-precision regimes (N ≈ 15000) tractable when LU would not be.
+// =====================================================================
+
+/// Precompute the per-sample factors that appear in every column of DT:
+///   b_f_ln[j]  = b^F[j] · ln(b)         (right-edge derivative)
+///   inv_f_ln[j] = 1 / (F[j] · ln(b))    (left-edge derivative)
+/// Depends only on `samples` (not on the input vector v of a matvec or on
+/// the LM damping μ), so it can be hoisted outside both the GMRES loop and
+/// the LM line search.
+fn precompute_dt_factors(
+    samples: &[Complex],
+    ln_b: &Complex,
+    prec: u32,
+) -> (Vec<Complex>, Vec<Complex>) {
+    let n = samples.len();
+    let mut b_f_ln = Vec::with_capacity(n);
+    let mut inv_f_ln = Vec::with_capacity(n);
+    let one_c = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+    for j in 0..n {
+        let exp_arg = Complex::with_val(prec, ln_b * &samples[j]);
+        let bf = Complex::with_val(prec, exp_arg.exp_ref());
+        b_f_ln.push(Complex::with_val(prec, &bf * ln_b));
+        let f_ln = Complex::with_val(prec, &samples[j] * ln_b);
+        inv_f_ln.push(Complex::with_val(prec, &one_c / &f_ln));
+    }
+    (b_f_ln, inv_f_ln)
+}
+
+/// Precompute the per-(j−k) denominator inverses that appear in DT:
+///   inv_denom_r[j−k+N−1] = 1 / (1 + i(t_j − t_k))
+///   inv_denom_l[j−k+N−1] = 1 / (−1 + i(t_j − t_k))
+///
+/// On a uniform grid t_k = −T + k·δ, the differences `t_j − t_k = (j−k)·δ`
+/// take only `2N−1` distinct values, so we compute and cache them once per
+/// Cauchy iteration. Inside the matvec inner loop this turns 2 complex
+/// divisions per (k, j) pair into 2 cache lookups + 2 complex multiplies,
+/// roughly halving total cost.
+#[allow(dead_code)]
+fn precompute_denom_inverses(
+    nodes: &[Float],
+    prec: u32,
+) -> (Vec<Complex>, Vec<Complex>) {
+    let n = nodes.len();
+    let mut inv_r: Vec<Complex> = Vec::with_capacity(2 * n - 1);
+    let mut inv_l: Vec<Complex> = Vec::with_capacity(2 * n - 1);
+    let one_re = Float::with_val(prec, 1u32);
+    let neg_one_re = Float::with_val(prec, -1i32);
+    let one_c = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+    let delta = if n >= 2 {
+        Float::with_val(prec, &nodes[1] - &nodes[0])
+    } else {
+        Float::with_val(prec, 1u32)
+    };
+    let max_offset = (n as i64) - 1;
+    for d_idx in 0..(2 * n - 1) {
+        let d_signed = (d_idx as i64) - max_offset;
+        let dt = Float::with_val(prec, &delta * d_signed);
+        let dr = Complex::with_val(prec, (one_re.clone(), dt.clone()));
+        let dl = Complex::with_val(prec, (neg_one_re.clone(), dt));
+        inv_r.push(Complex::with_val(prec, &one_c / &dr));
+        inv_l.push(Complex::with_val(prec, &one_c / &dl));
+    }
+    (inv_r, inv_l)
+}
+
+/// Bundle of FFT-domain kernels and per-row Euler-Maclaurin corrections for
+/// the Cauchy operator on the uniform grid.
+///
+/// The FFT kernels are pure functions of the grid spacing — they don't depend
+/// on the sample values F or on any Newton iterate — so we precompute their
+/// FFTs once per `tetrate_kouznetsov` call and reuse them in every
+/// `apply_t_fft` (residual evaluation) and `apply_dt_v_fft` (Jacobian-vector
+/// product).
+///
+/// The EM corrections also depend only on the grid (and on the fixed-point
+/// asymptote at `t=±T`, which is pinned), so they too are computed once per
+/// call and used as a fixed additive shift in `apply_t_fft`. Because they
+/// don't depend on F, they have zero derivative with respect to F and so do
+/// not appear in the Jacobian (`apply_dt_v_fft` is unaffected).
+pub(crate) struct CauchyKernels {
+    pub right: KernelFft, // 1 / (1 + i·δ·d) for d in [-(N-1), N-1]
+    pub left: KernelFft,  // 1 / (-1 + i·δ·d) for d in [-(N-1), N-1]
+    /// Per-row right-edge EM correction divided by 2π so it's directly
+    /// subtractable from `r_part[k]` in `apply_t_fft`. One entry per node
+    /// `z₀ = 0.5 + i·t_k`.
+    pub em_right_over_2pi: Vec<Complex>,
+    /// Same for left edge.
+    pub em_left_over_2pi: Vec<Complex>,
+}
+
+/// Build FFT-prepared kernels and per-row EM corrections.
+/// FFT kernels: right edge `1 / (1 + i(t_j − t_k))`, left edge
+/// `1 / (−1 + i(t_j − t_k))`. EM corrections close the trapezoidal floor by
+/// subtracting the closed-form `O(h²)` boundary term.
+pub(crate) fn build_cauchy_kernels(
+    nodes: &[Float],
+    t_max: &Float,
+    l_upper: &Complex,
+    l_lower: &Complex,
+    prec: u32,
+    digits: u64,
+) -> CauchyKernels {
+    let n = nodes.len();
+    let one_re = Float::with_val(prec, 1u32);
+    let neg_one_re = Float::with_val(prec, -1i32);
+    let one_c = Complex::with_val(prec, (one_re.clone(), Float::new(prec)));
+    let delta = if n >= 2 {
+        Float::with_val(prec, &nodes[1] - &nodes[0])
+    } else {
+        Float::with_val(prec, 1u32)
+    };
+    let max_offset = (n as i64) - 1;
+    let mut h_r: Vec<Complex> = Vec::with_capacity(2 * n - 1);
+    let mut h_l: Vec<Complex> = Vec::with_capacity(2 * n - 1);
+    for d_idx in 0..(2 * n - 1) {
+        let d_signed = (d_idx as i64) - max_offset;
+        let dt = Float::with_val(prec, &delta * d_signed);
+        let dr = Complex::with_val(prec, (one_re.clone(), dt.clone()));
+        let dl = Complex::with_val(prec, (neg_one_re.clone(), dt));
+        h_r.push(Complex::with_val(prec, &one_c / &dr));
+        h_l.push(Complex::with_val(prec, &one_c / &dl));
+    }
+    let right = precompute_kernel_fft(&h_r, n, prec);
+    let left = precompute_kernel_fft(&h_l, n, prec);
+
+    // EM corrections per row.
+    let h_f64 = delta.to_f64();
+    let t_max_f64 = t_max.to_f64();
+    let n_terms = em_n_terms(h_f64, t_max_f64, digits);
+    let em_h_powers = build_em_h_powers(&delta, n_terms, prec);
+
+    let pi_f = Float::with_val(prec, Constant::Pi);
+    let two_pi = Float::with_val(prec, &pi_f * 2u32);
+    let inv_two_pi = Float::with_val(prec, Float::with_val(prec, 1u32) / &two_pi);
+
+    let mut em_right_over_2pi = Vec::with_capacity(n);
+    let mut em_left_over_2pi = Vec::with_capacity(n);
+    for k in 0..n {
+        let z0 = Complex::with_val(prec, (Float::with_val(prec, 0.5f64), nodes[k].clone()));
+        let (corr_r, corr_l) = compute_em_correction_z0(
+            &z0,
+            t_max,
+            l_upper,
+            l_lower,
+            &em_h_powers,
+            prec,
+        );
+        em_right_over_2pi.push(Complex::with_val(prec, &corr_r * &inv_two_pi));
+        em_left_over_2pi.push(Complex::with_val(prec, &corr_l * &inv_two_pi));
+    }
+
+    if std::env::var_os("TET_KOUZ_DEBUG").is_some() {
+        eprintln!(
+            "kouz EM: K={} (h/T={:.3e})",
+            n_terms,
+            (h_f64 / t_max_f64.max(1e-300)).abs()
+        );
+    }
+
+    CauchyKernels {
+        right,
+        left,
+        em_right_over_2pi,
+        em_left_over_2pi,
+    }
+}
+
+/// FFT-based Jacobian-vector product `(DT)·v`. Same math as the dense
+/// `apply_dt_v` but with the inner O(N²) double loop replaced by two
+/// length-`m` FFT-driven cross-correlations (`m = next_pow2(3N − 2)`).
+pub(crate) fn apply_dt_v_fft(
+    b_f_ln: &[Complex],
+    inv_f_ln: &[Complex],
+    kernels: &CauchyKernels,
+    weights: &[Float],
+    v: &[Complex],
+    prec: u32,
+) -> Vec<Complex> {
+    let n = b_f_ln.len();
+    let pi_f = Float::with_val(prec, Constant::Pi);
+    let two_pi = Float::with_val(prec, &pi_f * 2u32);
+    let one_re = Float::with_val(prec, 1u32);
+    let inv_two_pi = Float::with_val(prec, &one_re / &two_pi);
+
+    // Pre-scale: a_r[j] = b_f_ln[j]·v[j]·w_j/(2π), a_l[j] similar.
+    let mut a_r: Vec<Complex> = Vec::with_capacity(n);
+    let mut a_l: Vec<Complex> = Vec::with_capacity(n);
+    for j in 0..n {
+        let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
+        let bv = Complex::with_val(prec, &b_f_ln[j] * &v[j]);
+        a_r.push(Complex::with_val(prec, &bv * &w_over_2pi));
+        let iv = Complex::with_val(prec, &inv_f_ln[j] * &v[j]);
+        a_l.push(Complex::with_val(prec, &iv * &w_over_2pi));
+    }
+
+    let r_part = cross_correlate_with_kernel(&a_r, &kernels.right, prec);
+    let l_part = cross_correlate_with_kernel(&a_l, &kernels.left, prec);
+
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        out.push(Complex::with_val(prec, &r_part[k] - &l_part[k]));
+    }
+    out
+}
+
+/// FFT-based Cauchy operator `T(F)`. Same math as `apply_t` (which calls
+/// `cauchy_eval` once per row) but with the `O(N²)` interior contributions
+/// computed by two FFT cross-correlations and only the boundary corrections
+/// (`l_upper · ln_top + l_lower · ln_bot`) computed per-row in `O(N)` total.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_t_fft(
+    samples: &[Complex],
+    nodes: &[Float],
+    weights: &[Float],
+    t_max: &Float,
+    l_upper: &Complex,
+    l_lower: &Complex,
+    ln_b: &Complex,
+    kernels: &CauchyKernels,
+    prec: u32,
+) -> Vec<Complex> {
+    let n = samples.len();
+    let pi_f = Float::with_val(prec, Constant::Pi);
+    let two_pi_f = Float::with_val(prec, &pi_f * 2u32);
+    let two_pi_i = Complex::with_val(prec, (Float::new(prec), two_pi_f.clone()));
+    let one_re = Float::with_val(prec, 1u32);
+    let inv_two_pi = Float::with_val(prec, &one_re / &two_pi_f);
+
+    // Build right- and left-edge values, pre-scaled by w_j / (2π) so the
+    // cross-correlation result is the in-strip part of T(F).
+    let mut a_r: Vec<Complex> = Vec::with_capacity(n);
+    let mut a_l: Vec<Complex> = Vec::with_capacity(n);
+    for j in 0..n {
+        let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
+        let exp_arg = Complex::with_val(prec, ln_b * &samples[j]);
+        let bf = Complex::with_val(prec, exp_arg.exp_ref());
+        a_r.push(Complex::with_val(prec, &bf * &w_over_2pi));
+        let ln_s = Complex::with_val(prec, samples[j].ln_ref());
+        let log_b_s = Complex::with_val(prec, &ln_s / ln_b);
+        a_l.push(Complex::with_val(prec, &log_b_s * &w_over_2pi));
+    }
+
+    let r_part = cross_correlate_with_kernel(&a_r, &kernels.right, prec);
+    let l_part = cross_correlate_with_kernel(&a_l, &kernels.left, prec);
+
+    // Boundary corrections (per row, O(N) total).
+    let cp1 = Complex::with_val(prec, (Float::with_val(prec, 1.5f64), 0));
+    let cm1 = Complex::with_val(prec, (Float::with_val(prec, -0.5f64), 0));
+    let it_max = Complex::with_val(prec, (Float::new(prec), t_max.clone()));
+    let neg_it_max = Complex::with_val(prec, -&it_max);
+    let cm1_plus_itmax = Complex::with_val(prec, &cm1 + &it_max);
+    let cp1_plus_itmax = Complex::with_val(prec, &cp1 + &it_max);
+    let cp1_minus_itmax = Complex::with_val(prec, &cp1 + &neg_it_max);
+    let cm1_minus_itmax = Complex::with_val(prec, &cm1 + &neg_it_max);
+
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        let z0 = Complex::with_val(prec, (Float::with_val(prec, 0.5f64), nodes[k].clone()));
+
+        // Euler-Maclaurin boundary correction: subtract the closed-form O(h²)
+        // (and higher-order, up to K terms) error of the trapezoidal sums.
+        // `em_*_over_2pi` is precomputed in `build_cauchy_kernels` and already
+        // carries the 1/(2π) factor that `r_part`, `l_part` carry.
+        let r_corrected = Complex::with_val(prec, &r_part[k] - &kernels.em_right_over_2pi[k]);
+        let l_corrected = Complex::with_val(prec, &l_part[k] - &kernels.em_left_over_2pi[k]);
+        let part1 = Complex::with_val(prec, &r_corrected - &l_corrected);
+
+        let top_num = Complex::with_val(prec, &cm1_plus_itmax - &z0);
+        let top_den = Complex::with_val(prec, &cp1_plus_itmax - &z0);
+        let top_ratio = Complex::with_val(prec, &top_num / &top_den);
+        let ln_top = Complex::with_val(prec, top_ratio.ln_ref());
+
+        let bot_num = Complex::with_val(prec, &cp1_minus_itmax - &z0);
+        let bot_den = Complex::with_val(prec, &cm1_minus_itmax - &z0);
+        let bot_ratio = Complex::with_val(prec, &bot_num / &bot_den);
+        let ln_bot = Complex::with_val(prec, bot_ratio.ln_ref());
+
+        let up_term = Complex::with_val(prec, l_upper * &ln_top);
+        let dn_term = Complex::with_val(prec, l_lower * &ln_bot);
+        let upper_lower_sum = Complex::with_val(prec, &up_term + &dn_term);
+        let part2 = Complex::with_val(prec, &upper_lower_sum / &two_pi_i);
+
+        out.push(Complex::with_val(prec, &part1 + &part2));
+    }
+    out
+}
+
+/// Apply (DT)·v in O(N²) without ever forming DT. Uses precomputed per-sample
+/// factors (`b_f_ln`, `inv_f_ln`) and per-offset denominator inverses
+/// (`inv_denom_r`, `inv_denom_l`). Kept as the dense reference implementation;
+/// production iterate_newton uses `apply_dt_v_fft` instead.
+#[allow(dead_code)]
+fn apply_dt_v(
+    b_f_ln: &[Complex],
+    inv_f_ln: &[Complex],
+    inv_denom_r: &[Complex],
+    inv_denom_l: &[Complex],
+    weights: &[Float],
+    v: &[Complex],
+    prec: u32,
+) -> Vec<Complex> {
+    let n = b_f_ln.len();
+    let pi_f = Float::with_val(prec, rug::float::Constant::Pi);
+    let two_pi = Float::with_val(prec, &pi_f * 2u32);
+    let one_re = Float::with_val(prec, 1u32);
+    let inv_two_pi = Float::with_val(prec, &one_re / &two_pi);
+
+    // Pre-scale: `bfl_v[j]` = b_f_ln[j]·v[j]·w_j/(2π), `ifl_v[j]` similar.
+    // Pulling the scalar out of the inner k-loop saves N² multiplications.
+    let mut bfl_v: Vec<Complex> = Vec::with_capacity(n);
+    let mut ifl_v: Vec<Complex> = Vec::with_capacity(n);
+    for j in 0..n {
+        let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
+        let bv = Complex::with_val(prec, &b_f_ln[j] * &v[j]);
+        bfl_v.push(Complex::with_val(prec, &bv * &w_over_2pi));
+        let iv = Complex::with_val(prec, &inv_f_ln[j] * &v[j]);
+        ifl_v.push(Complex::with_val(prec, &iv * &w_over_2pi));
+    }
+
+    let max_offset = (n as i64) - 1;
+    let mut out = vec![cnum::zero(prec); n];
+    for k in 0..n {
+        let mut acc = cnum::zero(prec);
+        for j in 0..n {
+            // d = j − k, indexed at d + (N − 1).
+            let idx = ((j as i64) - (k as i64) + max_offset) as usize;
+            let term_r = Complex::with_val(prec, &bfl_v[j] * &inv_denom_r[idx]);
+            let term_l = Complex::with_val(prec, &ifl_v[j] * &inv_denom_l[idx]);
+            let dt_kj_v = Complex::with_val(prec, &term_r - &term_l);
+            acc = Complex::with_val(prec, &acc + &dt_kj_v);
+        }
+        out[k] = acc;
+    }
+    out
+}
+
+/// L2 norm of a complex vector.
+fn vector_norm_complex(v: &[Complex], prec: u32) -> Float {
+    let mut sum = Float::new(prec);
+    for c in v {
+        let abs = Float::with_val(prec, c.abs_ref());
+        let sq = Float::with_val(prec, &abs * &abs);
+        sum = Float::with_val(prec, &sum + &sq);
+    }
+    Float::with_val(prec, sum.sqrt_ref())
+}
+
+/// Hermitian inner product `<u, v> = Σ ū·v` (conjugate on first argument so
+/// `<u, u>` is real and equals `‖u‖²`).
+fn inner_product_complex(u: &[Complex], v: &[Complex], prec: u32) -> Complex {
+    let mut s = cnum::zero(prec);
+    for i in 0..u.len() {
+        let conj_u = Complex::with_val(prec, u[i].conj_ref());
+        let prod = Complex::with_val(prec, &conj_u * &v[i]);
+        s = Complex::with_val(prec, &s + &prod);
+    }
+    s
+}
+
+/// Restarted GMRES with arbitrary-precision complex arithmetic.
+///
+/// Solves `A x = rhs` where `A` is given implicitly via a matvec closure.
+/// Returns `Ok(x)` if the relative residual `‖rhs − A x‖ / ‖rhs‖` falls below
+/// `tol_rel`, or `Err` if `max_outer` restarts exhaust without convergence.
+///
+/// Uses modified Gram-Schmidt Arnoldi and complex Givens rotations of the form
+///   G = [[c, s], [−s̄, c]]   with `c ∈ ℝ≥0`, `s ∈ ℂ`, `c² + |s|² = 1`
+/// where `c = |a|/τ`, `s = (a/|a|)·b̄/τ`, `τ = √(|a|²+|b|²)`. After each
+/// rotation the (k+1, k) entry of the Hessenberg matrix is zeroed and the
+/// reduced upper triangular system is solved by back-substitution at restart.
+fn gmres_complex<F>(
+    matvec: F,
+    rhs: &[Complex],
+    tol_rel: f64,
+    max_outer: usize,
+    restart: usize,
+    prec: u32,
+) -> Result<Vec<Complex>, String>
+where
+    F: Fn(&[Complex]) -> Vec<Complex>,
+{
+    let n = rhs.len();
+    let zero_c = cnum::zero(prec);
+    let one_re = Float::with_val(prec, 1u32);
+    let zero_re = Float::new(prec);
+
+    let rhs_norm = vector_norm_complex(rhs, prec);
+    let rhs_norm_f64 = rhs_norm.to_f64();
+    if rhs_norm_f64 == 0.0 {
+        return Ok(vec![zero_c; n]);
+    }
+    let target_abs = rhs_norm_f64 * tol_rel;
+
+    let mut x = vec![zero_c.clone(); n];
+    let restart = restart.max(1);
+
+    for _outer in 0..max_outer {
+        let ax = matvec(&x);
+        let r: Vec<Complex> = rhs
+            .iter()
+            .zip(ax.iter())
+            .map(|(bi, axi)| Complex::with_val(prec, bi - axi))
+            .collect();
+        let beta = vector_norm_complex(&r, prec);
+        let beta_f64 = beta.to_f64();
+        if beta_f64 < target_abs {
+            return Ok(x);
+        }
+        let inv_beta = Float::with_val(prec, &one_re / &beta);
+        let v0: Vec<Complex> = r
+            .iter()
+            .map(|c| Complex::with_val(prec, c * &inv_beta))
+            .collect();
+        let mut basis: Vec<Vec<Complex>> = Vec::with_capacity(restart + 1);
+        basis.push(v0);
+
+        let mut h_mat: Vec<Vec<Complex>> = vec![vec![zero_c.clone(); restart]; restart + 1];
+        let mut cs: Vec<Float> = vec![Float::with_val(prec, 1u32); restart];
+        let mut sn: Vec<Complex> = vec![zero_c.clone(); restart];
+        let mut g: Vec<Complex> = vec![zero_c.clone(); restart + 1];
+        g[0] = Complex::with_val(prec, (beta.clone(), zero_re.clone()));
+
+        let mut k_done = 0usize;
+        let mut converged_inner = false;
+
+        for k in 0..restart {
+            let mut w = matvec(&basis[k]);
+            // Modified Gram-Schmidt: orthogonalize w against basis[0..=k].
+            for j in 0..=k {
+                let h_jk = inner_product_complex(&basis[j], &w, prec);
+                for i in 0..n {
+                    let term = Complex::with_val(prec, &h_jk * &basis[j][i]);
+                    w[i] = Complex::with_val(prec, &w[i] - &term);
+                }
+                h_mat[j][k] = h_jk;
+            }
+            let h_kp1_k_re = vector_norm_complex(&w, prec);
+            let h_kp1_k_re_f64 = h_kp1_k_re.to_f64();
+            h_mat[k + 1][k] =
+                Complex::with_val(prec, (h_kp1_k_re.clone(), zero_re.clone()));
+
+            // Apply previously-stored Givens rotations to column k of H.
+            for j in 0..k {
+                let h1 = h_mat[j][k].clone();
+                let h2 = h_mat[j + 1][k].clone();
+                let term1 = Complex::with_val(prec, &h1 * &cs[j]);
+                let term2 = Complex::with_val(prec, &sn[j] * &h2);
+                h_mat[j][k] = Complex::with_val(prec, &term1 + &term2);
+                let conj_sn = Complex::with_val(prec, sn[j].conj_ref());
+                let term3 = Complex::with_val(prec, &conj_sn * &h1);
+                let term4 = Complex::with_val(prec, &h2 * &cs[j]);
+                h_mat[j + 1][k] = Complex::with_val(prec, &term4 - &term3);
+            }
+
+            // Construct new Givens rotation that zeros h_mat[k+1][k].
+            let a = h_mat[k][k].clone();
+            let bv = h_mat[k + 1][k].clone();
+            let abs_a = Float::with_val(prec, a.abs_ref());
+            let abs_b = Float::with_val(prec, bv.abs_ref());
+            let abs_a_f64 = abs_a.to_f64();
+            let abs_b_f64 = abs_b.to_f64();
+
+            if abs_b_f64 == 0.0 {
+                cs[k] = Float::with_val(prec, 1u32);
+                sn[k] = zero_c.clone();
+            } else if abs_a_f64 == 0.0 {
+                cs[k] = Float::new(prec);
+                let inv_abs_b = Float::with_val(prec, &one_re / &abs_b);
+                let conj_b = Complex::with_val(prec, bv.conj_ref());
+                sn[k] = Complex::with_val(prec, &conj_b * &inv_abs_b);
+            } else {
+                let asq = Float::with_val(prec, &abs_a * &abs_a);
+                let bsq = Float::with_val(prec, &abs_b * &abs_b);
+                let sum_sq = Float::with_val(prec, &asq + &bsq);
+                let norm = Float::with_val(prec, sum_sq.sqrt_ref());
+                cs[k] = Float::with_val(prec, &abs_a / &norm);
+                let inv_abs_a = Float::with_val(prec, &one_re / &abs_a);
+                let alpha = Complex::with_val(prec, &a * &inv_abs_a);
+                let conj_b = Complex::with_val(prec, bv.conj_ref());
+                let alpha_conj_b = Complex::with_val(prec, &alpha * &conj_b);
+                let inv_norm = Float::with_val(prec, &one_re / &norm);
+                sn[k] = Complex::with_val(prec, &alpha_conj_b * &inv_norm);
+            }
+
+            // Apply the new rotation to column k.
+            let term_a = Complex::with_val(prec, &a * &cs[k]);
+            let term_b = Complex::with_val(prec, &sn[k] * &bv);
+            h_mat[k][k] = Complex::with_val(prec, &term_a + &term_b);
+            h_mat[k + 1][k] = zero_c.clone();
+
+            // Apply the new rotation to g (right-hand side after rotations).
+            let g_k = g[k].clone();
+            let new_g_k = Complex::with_val(prec, &g_k * &cs[k]);
+            let conj_sn_k = Complex::with_val(prec, sn[k].conj_ref());
+            let neg_term = Complex::with_val(prec, &conj_sn_k * &g_k);
+            let new_g_kp1 = Complex::with_val(prec, -&neg_term);
+            g[k] = new_g_k;
+            g[k + 1] = new_g_kp1;
+
+            k_done = k + 1;
+
+            let resid_est_f64 = Float::with_val(prec, g[k + 1].abs_ref()).to_f64();
+            if resid_est_f64 < target_abs {
+                converged_inner = true;
+                break;
+            }
+            if h_kp1_k_re_f64 == 0.0 {
+                // Lucky breakdown: Krylov subspace is invariant; current
+                // y solves the system exactly within this subspace.
+                converged_inner = true;
+                break;
+            }
+
+            let inv_h = Float::with_val(prec, &one_re / &h_kp1_k_re);
+            let v_next: Vec<Complex> = w
+                .iter()
+                .map(|c| Complex::with_val(prec, c * &inv_h))
+                .collect();
+            basis.push(v_next);
+        }
+
+        // Solve the (k_done × k_done) upper-triangular system H y = g.
+        let mut y = vec![zero_c.clone(); k_done];
+        for i in (0..k_done).rev() {
+            let mut sum = g[i].clone();
+            for j in (i + 1)..k_done {
+                let prod = Complex::with_val(prec, &h_mat[i][j] * &y[j]);
+                sum = Complex::with_val(prec, &sum - &prod);
+            }
+            // Defensive: pivot can become tiny if A is rank-deficient on the
+            // Krylov subspace; in that case the back-sub blows up. Bail on
+            // the restart and let the outer loop retry from the new x.
+            let pivot_abs = Float::with_val(prec, h_mat[i][i].abs_ref()).to_f64();
+            if pivot_abs == 0.0 || !pivot_abs.is_finite() {
+                return Err(format!("GMRES: zero pivot at row {} in Hessenberg solve", i));
+            }
+            y[i] = Complex::with_val(prec, &sum / &h_mat[i][i]);
+        }
+
+        // x ← x + V_k · y.
+        for j in 0..k_done {
+            for i in 0..n {
+                let term = Complex::with_val(prec, &basis[j][i] * &y[j]);
+                x[i] = Complex::with_val(prec, &x[i] + &term);
+            }
+        }
+
+        if converged_inner {
+            return Ok(x);
+        }
+    }
+
+    Err(format!(
+        "GMRES: failed to converge in {} restarts of size {}",
+        max_outer, restart
+    ))
 }

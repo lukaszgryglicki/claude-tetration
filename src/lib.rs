@@ -8,6 +8,7 @@
 
 pub mod cnum;
 pub mod dispatch;
+pub mod fft;
 pub mod integer_height;
 pub mod kouznetsov;
 pub mod lambertw;

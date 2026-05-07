@@ -15,8 +15,10 @@ Output (on stdout):
   Two lines: real part on line 1, imaginary part on line 2.
 
 Diagnostics:
-  Set TET_DEBUG=1 in the environment to print algorithm choice and
-  iteration diagnostics on stderr.
+  Algorithm choice and per-iteration diagnostics print to stderr by
+  default. Set SILENT=1 (or t/true/y/yes/on) in the environment to
+  suppress all stderr output and produce only the final result on
+  stdout.
 
 Examples:
   tet 50 2 0 3 0          # 2^^3 = 16, 50 digits

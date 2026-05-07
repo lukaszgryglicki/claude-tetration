@@ -21,7 +21,7 @@ use rug::Complex;
 use crate::{cnum, integer_height, kouznetsov, regions, schroder};
 
 fn debug_enabled() -> bool {
-    std::env::var_os("TET_DEBUG").is_some_and(|v| !v.is_empty() && v != "0")
+    cnum::verbose()
 }
 
 fn dprint(s: &str) {

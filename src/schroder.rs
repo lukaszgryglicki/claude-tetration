@@ -80,7 +80,62 @@ pub fn tetrate_schroder(
     prec: u32,
 ) -> Result<Complex, String> {
     let state = setup_schroder(b, fp_data, prec)?;
-    eval_schroder(&state, h)
+    let f_h = eval_schroder(&state, h)?;
+    validate_functional_equation(&state, h, &f_h, prec)?;
+    Ok(f_h)
+}
+
+/// Post-validate `F(h)` by checking the functional equation
+/// `F(h+1) = b^F(h)` numerically. The σ̃ Taylor series can converge inside
+/// the heuristic `safe_radius` yet still evaluate to a wrong value when the
+/// actual radius of convergence of `σ⁻¹` is smaller (this happens for real
+/// bases just below η, where `|λ| → 1`). The functional equation is the
+/// gold-standard correctness check: if it fails, we know `F(h)` is wrong
+/// even though the algorithm reported success.
+fn validate_functional_equation(
+    state: &SchroderState,
+    h: &Complex,
+    f_h: &Complex,
+    prec: u32,
+) -> Result<(), String> {
+    let one = cnum::one(prec);
+    let h_plus_one = Complex::with_val(prec, h + &one);
+    let f_h_plus_one = eval_schroder(state, &h_plus_one)?;
+
+    // b^F(h) = exp(F(h) · ln b)
+    let exponent = Complex::with_val(prec, f_h * &state.ln_b);
+    let b_pow_f_h = Complex::with_val(prec, exponent.exp_ref());
+
+    let diff = Complex::with_val(prec, &f_h_plus_one - &b_pow_f_h);
+    let diff_abs = Float::with_val(prec, diff.abs_ref()).to_f64();
+    let f_abs = Float::with_val(prec, f_h_plus_one.abs_ref()).to_f64().max(1.0);
+    let rel = diff_abs / f_abs;
+
+    // Tolerance: 1e-6 absolute / relative is generous enough that a working
+    // 20-digit Schröder eval easily passes, but catches the corruption band
+    // where the wrong value differs by O(1) or more.
+    let tol = 1e-6;
+    if !rel.is_finite() || rel > tol {
+        if cnum::verbose() {
+            eprintln!(
+                "schröder validation FAILED: |F(h+1) − b^F(h)| = {:.3e}, |F(h+1)| ≈ {:.3e}, rel = {:.3e}",
+                diff_abs, f_abs, rel
+            );
+        }
+        return Err(format!(
+            "Schröder series evaluation failed validation: \
+             |F(h+1) − b^F(h)| / max(|F(h+1)|, 1) = {:.3e} exceeds {:.0e} \
+             — Taylor series likely outside true radius of convergence (|λ|={:.4})",
+            rel, tol, state.lam_abs
+        ));
+    }
+    if cnum::verbose() {
+        eprintln!(
+            "schröder validation OK: |F(h+1) − b^F(h)| / max(|F(h+1)|, 1) = {:.3e}",
+            rel
+        );
+    }
+    Ok(())
 }
 
 /// Build the Schröder state for base `b`. All the heavy lifting (σ̃ Taylor
@@ -136,7 +191,7 @@ pub fn setup_schroder(
     let ln_b = Complex::with_val(prec, b.ln_ref());
     let safe_radius = 0.5 * w0_abs.max(0.5);
 
-    if std::env::var_os("TET_SCHRODER_DEBUG").is_some() {
+    if cnum::verbose() {
         let s1_abs = Float::with_val(prec, s1.abs_ref()).to_f64();
         eprintln!(
             "schröder setup: |λ|={:.6} |1−L|={:.6} |s1|={:.6} safe={:.6} N={}",
@@ -202,7 +257,7 @@ pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
     let inv_t_shifted = eval_series(&state.sigma_inv, &t_shifted, prec);
     let mut f = Complex::with_val(prec, &state.l + &inv_t_shifted);
 
-    if std::env::var_os("TET_SCHRODER_DEBUG").is_some() {
+    if cnum::verbose() {
         let t_sh = Float::with_val(prec, t_shifted.abs_ref()).to_f64();
         let f_sh = Float::with_val(prec, f.abs_ref()).to_f64();
         eprintln!("schröder eval: k={} |t_shifted|={:.6} |F(h+k)|={:.6}", k, t_sh, f_sh);
@@ -510,7 +565,7 @@ fn eval_sigma_with_shift(
         return Ok(sigma_at_curr);
     }
 
-    if std::env::var_os("TET_SCHRODER_DEBUG").is_some() {
+    if cnum::verbose() {
         eprintln!(
             "schröder: σ̃-shift converged after {} {} steps (|λ|={:.6})",
             n_shifts,

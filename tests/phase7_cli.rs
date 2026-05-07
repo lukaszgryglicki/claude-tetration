@@ -116,16 +116,31 @@ fn t708_real_e_via_kouznetsov_cli() {
 
 #[test]
 fn t709_debug_diagnostics() {
-    // TET_DEBUG=1 should add `tet: ...` lines.
-    let out = Command::new(binary_path())
+    // Verbose-by-default: stderr should contain `tet: …` diagnostics when SILENT
+    // is unset (or falsy). Setting SILENT=1 should suppress all stderr output
+    // and produce only the 2-line numeric result on stdout.
+    let out_verbose = Command::new(binary_path())
         .args(["20", "1.4142135623730950488", "0", "0.5", "0"])
-        .env("TET_DEBUG", "1")
+        .env_remove("SILENT")
         .output()
         .expect("spawn");
-    assert!(out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("tet:"), "expected debug output, got: {}", stderr);
-    assert!(stderr.contains("region = "), "expected region in debug, got: {}", stderr);
+    assert!(out_verbose.status.success());
+    let stderr = String::from_utf8_lossy(&out_verbose.stderr);
+    assert!(stderr.contains("tet:"), "expected default verbose output, got: {}", stderr);
+    assert!(stderr.contains("region = "), "expected region in verbose output, got: {}", stderr);
+
+    let out_silent = Command::new(binary_path())
+        .args(["20", "1.4142135623730950488", "0", "0.5", "0"])
+        .env("SILENT", "1")
+        .output()
+        .expect("spawn");
+    assert!(out_silent.status.success());
+    let silent_err = String::from_utf8_lossy(&out_silent.stderr);
+    assert!(
+        silent_err.is_empty(),
+        "expected no stderr under SILENT=1, got: {}",
+        silent_err
+    );
 }
 
 #[test]

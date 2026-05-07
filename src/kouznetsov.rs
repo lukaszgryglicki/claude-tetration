@@ -168,7 +168,7 @@ pub fn setup_kouznetsov(
             //   2. smallest |k| (closest to canonical Kneser pair).
             const W_K_SEARCH: &[i32] = &[-1, 1, -2, 2, -3, 3, -4, 4, -5, 5];
             const MIN_IM_STRIP: f64 = 0.05;
-            let debug_wk = std::env::var_os("TET_KOUZ_DEBUG").is_some();
+            let debug_wk = cnum::verbose();
             let mut candidates: Vec<(i32, Complex, f64)> = Vec::new();
             for &k in W_K_SEARCH {
                 let wk_val = match lambertw::wk(&neg_ln_b, k, prec) {
@@ -257,7 +257,7 @@ pub fn setup_kouznetsov(
     let nodes = build_uniform_nodes(&t_max, n_nodes, prec);
     let weights = build_trapezoidal_weights(&t_max, n_nodes, prec);
 
-    if std::env::var_os("TET_KOUZ_DEBUG").is_some() {
+    if cnum::verbose() {
         eprintln!(
             "kouz setup: |arg(λ)|={:.4}  t_max={:.2}  n_nodes={}  L_upper={:.4}+{:.4}i  L_lower={:.4}+{:.4}i",
             arg_lambda,
@@ -270,7 +270,7 @@ pub fn setup_kouznetsov(
         );
     }
 
-    let debug_phase = std::env::var_os("TET_KOUZ_DEBUG").is_some();
+    let debug_phase = cnum::verbose();
     let phase_start = std::time::Instant::now();
     let mut initial = initial_guess(&nodes, b, &l_upper, &l_lower, arg_lambda, prec);
     if debug_phase {
@@ -418,7 +418,7 @@ fn find_normalization_shift(
     let eps = Complex::with_val(prec, (eps_f.clone(), 0));
     let two_eps = Complex::with_val(prec, (Float::with_val(prec, &eps_f * &two), 0));
 
-    let debug_norm = std::env::var_os("TET_KOUZ_DEBUG").is_some();
+    let debug_norm = cnum::verbose();
 
     // Newton-Kantorovich step. Returns the best (c, |F(c)-1|) seen during
     // iteration. Two return cases:
@@ -983,21 +983,24 @@ fn initial_guess(
         let half_c = Complex::with_val(prec, (half.clone(), 0));
         cnum::pow_complex(b, &half_c, prec)
     };
-    // Hard cap on |target_mid|: Kouznetsov tables give F̃_b(0.5) values that
-    // for any real b ∈ (e^(1/e), ∞) stay roughly in [1.4, 2.0] (F̃ is highly
-    // convex so the half-way value tracks the *near-1* end, not the b end).
-    // Using sqrt_b directly e.g. for b=10 puts us at ≈3.16, and the b^F
-    // amplification on the right edge of the contour makes T(F) overshoot by
-    // ~10^1.16, which the iteration cannot recover from. Capping at magnitude
-    // 2 puts the initial guess in the same ballpark as the truth for any
-    // base, real or complex. We cap by magnitude (not real part) so complex
-    // bases — whose √b is generically not on the real axis — get a non-zero
-    // target.
+    // Cap on |target_mid|. Kneser tetration values give F̃_b(0.5) that grows
+    // ~ ln|b| for large real b (b=2 → 1.46, b=e → 1.65, b=10 → 2.13,
+    // b=100 → 4.21, …). Using sqrt_b directly puts us too far above the truth
+    // for b ≥ ~10 (e.g. √100 = 10 vs true 4.2), and the b^F amplification on
+    // the right edge of the contour drives T(F) into a wrong basin from there.
+    // A flat cap at 2 (the prior version) starts b=200+ on the wrong side of a
+    // saddle and the LM Newton ends up descending to F[mid]≈−0.75. Cap at
+    // `max(2, ln|b|)` instead — a strictly closer initial guess to the Kneser
+    // truth for every real b, while keeping small-b behavior unchanged. We cap
+    // by magnitude (not real part) so complex bases — whose √b is generically
+    // not on the real axis — get a non-zero target.
     let sqrt_b_abs = Float::with_val(prec, sqrt_b.abs_ref()).to_f64();
-    let target_mid = if sqrt_b_abs <= 2.0 {
+    let b_abs = Float::with_val(prec, b.abs_ref()).to_f64();
+    let cap = b_abs.ln().max(0.0).max(2.0);
+    let target_mid = if sqrt_b_abs <= cap {
         sqrt_b.clone()
     } else {
-        let scale = Float::with_val(prec, 2.0f64 / sqrt_b_abs);
+        let scale = Float::with_val(prec, cap / sqrt_b_abs);
         Complex::with_val(prec, &sqrt_b * &scale)
     };
     let mid = {
@@ -1176,7 +1179,7 @@ fn iterate_anderson(
     let n_int = n - 2; // number of interior samples that actually iterate
     let max_iters = 400usize;
     let target = 10f64.powf(-(digits as f64) - 3.0);
-    let debug = std::env::var_os("TET_KOUZ_DEBUG").is_some();
+    let debug = cnum::verbose();
 
     let depth: usize = std::env::var("TET_KOUZ_ANDERSON_DEPTH")
         .ok()
@@ -1445,7 +1448,7 @@ fn iterate_picard(
     let n = initial.len();
     let max_iters = 2000usize;
     let target = 10f64.powf(-(digits as f64) - 3.0);
-    let debug = std::env::var_os("TET_KOUZ_DEBUG").is_some();
+    let debug = cnum::verbose();
 
     // Mixing parameter. α=1 is pure Picard. Smaller values (0.05–0.3) under-
     // relax to handle T's spectral radius near 1 in some directions.
@@ -1591,7 +1594,7 @@ fn iterate_newton(
     // residual.
     let max_iters = 40usize;
     let target = 10f64.powf(-(digits as f64) - 3.0);
-    let debug = std::env::var_os("TET_KOUZ_DEBUG").is_some();
+    let debug = cnum::verbose();
 
     let mut x = initial;
     let mut prev_residual = f64::INFINITY;
@@ -1674,19 +1677,14 @@ fn iterate_newton(
         }
 
         if r_norm.is_nan() || !r_norm.is_finite() {
-            if best_residual.is_finite() {
-                if debug {
-                    eprintln!(
-                        "kouz LM: residual non-finite at iter {}; returning best ({:.3e})",
-                        iter, best_residual
-                    );
-                }
-                return Ok(best_x);
+            if debug {
+                eprintln!(
+                    "kouz LM: residual non-finite at iter {}; best so far {:.3e}",
+                    iter, best_residual
+                );
             }
-            return Err(format!(
-                "Kouznetsov Newton: residual became non-finite at iter {}",
-                iter
-            ));
+            return validate_best_residual(best_residual, digits, use_schwarz, "residual became non-finite")
+                .map(|_| best_x);
         }
         if r_norm < best_residual {
             best_residual = r_norm;
@@ -1708,11 +1706,12 @@ fn iterate_newton(
             if best_residual > 0.1 * slow_progress_anchor {
                 if debug {
                     eprintln!(
-                        "kouz LM: slow-progress stagnation at iter {} (anchor {:.3e} -> best {:.3e}, <10x in 15 iters); returning best",
+                        "kouz LM: slow-progress stagnation at iter {} (anchor {:.3e} -> best {:.3e}, <10x in 15 iters)",
                         iter, slow_progress_anchor, best_residual
                     );
                 }
-                return Ok(best_x);
+                return validate_best_residual(best_residual, digits, use_schwarz, "slow-progress stagnation")
+                    .map(|_| best_x);
             }
             slow_progress_anchor = best_residual;
             slow_progress_anchor_iter = iter;
@@ -1726,11 +1725,12 @@ fn iterate_newton(
             if stagnation > 8 {
                 if debug {
                     eprintln!(
-                        "kouz LM: stagnated at iter {} (residual {:.3e}, likely discretization floor); returning best ({:.3e})",
+                        "kouz LM: stagnated at iter {} (residual {:.3e}, likely discretization floor); best {:.3e}",
                         iter, r_norm, best_residual
                     );
                 }
-                return Ok(best_x);
+                return validate_best_residual(best_residual, digits, use_schwarz, "per-iter stagnation")
+                    .map(|_| best_x);
             }
         } else {
             stagnation = 0;
@@ -1744,9 +1744,13 @@ fn iterate_newton(
 
         // Levenberg-Marquardt: solve (J + μ·I)·δ = r. Inner loop adaptively
         // grows μ until the trial step actually decreases residual; then
-        // shrinks μ for the next outer iteration.
+        // shrinks μ for the next outer iteration. 25 trials is enough to
+        // grow μ from 1e-15 (deep-Newton end) all the way to ~1e0 (full
+        // gradient-descent regime) — which lets large-base cases like
+        // b=200 escape transient saddles where the "natural" Newton step
+        // overshoots into a worse basin.
         let mut accepted = false;
-        for _lm_try in 0..10 {
+        for _lm_try in 0..25 {
             // Boundary-pinned matvec: rows 0 and n-1 act as identity (so
             // δ[0] = r[0] = 0 and δ[n-1] = r[n-1] = 0 stay zero throughout
             // the Krylov build); interior rows compute (1+μ)·v − DT·v.
@@ -1883,20 +1887,14 @@ fn iterate_newton(
             // and Newton has nowhere left to go. Return the best iterate so
             // the dispatcher can deliver an answer at the discretization-
             // limited precision rather than failing the whole call.
-            if best_residual.is_finite() {
-                if debug {
-                    eprintln!(
-                        "kouz LM: no descent step at iter {} (μ={:.2e}); returning best ({:.3e})",
-                        iter, mu, best_residual
-                    );
-                }
-                return Ok(best_x);
+            if debug {
+                eprintln!(
+                    "kouz LM: no descent step at iter {} (μ={:.2e}); best residual {:.3e}",
+                    iter, mu, best_residual
+                );
             }
-            return Err(format!(
-                "Kouznetsov LM: failed to find a descent step at iter {} \
-                 (residual {:.3e}, μ={:.2e})",
-                iter, r_norm, mu
-            ));
+            return validate_best_residual(best_residual, digits, use_schwarz, "no descent step")
+                .map(|_| best_x);
         }
         if debug {
             eprintln!(
@@ -1907,13 +1905,52 @@ fn iterate_newton(
         }
     }
 
-    if best_residual.is_finite() {
-        return Ok(best_x);
+    validate_best_residual(
+        best_residual,
+        digits,
+        use_schwarz,
+        &format!("did not converge in {} iterations", max_iters),
+    )
+    .map(|_| best_x)
+}
+
+/// Decide whether `best_residual` from a non-converged LM run is close enough
+/// to the discretization floor that returning it as a best-effort answer is
+/// honest, or whether it represents a catastrophic failure (wrong basin /
+/// numerical garbage) and we should refuse to return a wrong answer.
+///
+/// Two regimes:
+///   * `use_schwarz = true` (real-positive bases > e^(1/e)): the iteration
+///     should converge cleanly because Schwarz reflection halves the unknowns
+///     and pins the symmetry. Failure to drop residual below ~10^(-digits/3)
+///     means LM ended in a wrong basin (e.g. b=200 settling at F[mid]≈−0.75
+///     with residual 0.5, which then produces a numerical-garbage F̃(0.5)).
+///     Threshold is `10^(-digits/3)` clamped to `[1e-6, 1e-3]`.
+///   * `use_schwarz = false` (complex / negative-real / unit-circle bases):
+///     the iteration is harder — Newton may stall at a discretization floor
+///     well above zero while the Cauchy reconstruction at user heights is
+///     still smooth and satisfies `F(z+1) = b^F(z)` to many digits. Be more
+///     permissive: accept best-effort up to residual ~5, refusing only the
+///     truly catastrophic cases (non-finite, residual ≥ 5).
+fn validate_best_residual(
+    best_residual: f64,
+    digits: u64,
+    use_schwarz: bool,
+    reason: &str,
+) -> Result<(), String> {
+    let threshold = if use_schwarz {
+        10f64.powf(-(digits as f64) / 3.0).clamp(1e-6, 1e-3)
+    } else {
+        5.0
+    };
+    if best_residual.is_finite() && best_residual <= threshold {
+        Ok(())
+    } else {
+        Err(format!(
+            "Kouznetsov Newton did not converge ({reason}); best residual {best_residual:.3e} \
+             exceeds acceptance threshold {threshold:.3e} for {digits} digits"
+        ))
     }
-    Err(format!(
-        "Kouznetsov Newton: did not converge in {} iterations (last residual {:.3e})",
-        max_iters, prev_residual
-    ))
 }
 
 /// Build `J = I − DT` for the Cauchy operator. `DT[k][j]` is the partial
@@ -2265,7 +2302,7 @@ pub(crate) fn build_cauchy_kernels(
         em_left_over_2pi.push(Complex::with_val(prec, &corr_l * &inv_two_pi));
     }
 
-    if std::env::var_os("TET_KOUZ_DEBUG").is_some() {
+    if cnum::verbose() {
         eprintln!(
             "kouz EM: K={} (h/T={:.3e})",
             n_terms,

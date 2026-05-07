@@ -3,6 +3,29 @@
 
 use rug::{Complex, Float, Integer};
 
+/// Verbosity gate. Diagnostics print to stderr by default; set `SILENT=1` (or
+/// `t`/`true`/`y`/`yes`) to suppress all per-iteration output and produce only
+/// the final result on stdout. Designed for the CLI tool: under-the-hood
+/// algorithm probing during long runs is the common case, and the silent
+/// switch is for the rare case where stderr noise interferes with scripting.
+pub fn verbose() -> bool {
+    !silent()
+}
+
+fn silent() -> bool {
+    match std::env::var("SILENT") {
+        Ok(v) => is_truthy(&v),
+        Err(_) => false,
+    }
+}
+
+fn is_truthy(s: &str) -> bool {
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "1" | "t" | "true" | "y" | "yes" | "on"
+    )
+}
+
 /// Convert decimal-digit precision to MPC precision bits, including a guard band
 /// that absorbs cumulative rounding loss in iterative algorithms.
 ///

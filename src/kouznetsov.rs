@@ -1636,15 +1636,15 @@ fn iterate_newton(
         eprintln!("kouz phase: build_cauchy_kernels done ({:.2}s)", kernel_start.elapsed().as_secs_f64());
     }
 
+    let mid_idx = nodes.len() / 2;
     if debug {
-        let mid = nodes.len() / 2;
         eprintln!(
             "kouz LM start: n={} mid_idx={} mid_t={} F[mid]={}+{}i",
             nodes.len(),
-            mid,
-            Float::with_val(prec, &nodes[mid]).to_f64(),
-            Float::with_val(prec, x[mid].real()).to_f64(),
-            Float::with_val(prec, x[mid].imag()).to_f64(),
+            mid_idx,
+            Float::with_val(prec, &nodes[mid_idx]).to_f64(),
+            Float::with_val(prec, x[mid_idx].real()).to_f64(),
+            Float::with_val(prec, x[mid_idx].imag()).to_f64(),
         );
     }
 
@@ -1677,7 +1677,6 @@ fn iterate_newton(
             // b=e the natural Kouznetsov F_e(0.5) ≈ 1.6463. Knowing whether x
             // is converging toward this value tells us if we're in the right
             // basin of attraction.
-            let mid_idx = nodes.len() / 2;
             let xm_re = Float::with_val(prec, x[mid_idx].real()).to_f64();
             let xm_im = Float::with_val(prec, x[mid_idx].imag()).to_f64();
             eprintln!(

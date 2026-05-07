@@ -48,6 +48,23 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
         return integer_height::tetrate_integer(b, n, prec);
     }
 
+    // ---- Schwarz reflection for Im(b) < 0 ----
+    // The canonical Kneser tetration satisfies F_b(h) = conj(F_{b̄}(h̄)).
+    // The Kouznetsov initial-guess shape (target_mid = √b sits in the upper
+    // half-plane) and the Newton normalization-shift basin are tuned for the
+    // Im(b) ≥ 0 orientation; flipping b into the lower half-plane mirrors the
+    // strip and drives the shift Newton to spurious large-|c| roots far from
+    // the origin (e.g. b=-3.6-0.4i landed at δ=1.5−9.5i instead of the small
+    // δ=-0.5+0.25i that conjugacy demands). Reduce to the canonical
+    // orientation by conjugating both inputs and the result.
+    if !b.imag().is_zero() && b.imag().is_sign_negative() {
+        dprint("Schwarz reflection: Im(b)<0, dispatching as conj(F_{b̄}(h̄))");
+        let b_conj = Complex::with_val(prec, b.conj_ref());
+        let h_conj = Complex::with_val(prec, h.conj_ref());
+        let result = tetrate(&b_conj, &h_conj, prec, digits)?;
+        return Ok(Complex::with_val(prec, result.conj_ref()));
+    }
+
     // ---- Region classification (drives algorithm choice) ----
     let region = regions::classify(b, prec)?;
     dprint(&format!("region = {}", region.name()));

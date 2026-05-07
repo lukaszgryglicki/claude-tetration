@@ -49,33 +49,52 @@ logic specific to b<0.
 
 ## C. Pure-imaginary bases  (b = i·y, y ≠ 0)
 
-Small magnitudes work; medium and large hang. Initial guess based on linear
-interpolation between L̄ and L on the imaginary axis becomes singular when
-arg(λ) sits near ±π/2, and the LM solver wanders.
+Boundary at `|b_im| ≈ 1.4` (where `|λ| crosses 0.95`):
+- `|b_im| ≤ 1.3` → Schröder works (Shell-Thron interior).
+- `|b_im| ≥ 1.4` → routes to Newton-Kouznetsov (boundary band) which
+  converges to a wrong-basin attractor.
+
+Diagnosis: from initial guess `F̃[mid] = √b ≈ 0.87 + 0.87i`, the LM
+descent walks `F̃[mid]` toward `0+0i` (a degenerate fixed point of the
+discretized Cauchy operator). Residual ‖r‖∞ stalls at ~5×10⁻⁸ around
+iter 40 before Newton can reach quadratic convergence — this is a
+genuine local minimum of the discretized residual, not the Kneser
+solution. The non-Schwarz path lacks a basin guard analogous to the
+real-positive `f_mid_re < 0` rejection.
+
+Fix path forward: either (a) continuation from a known-good base
+(Schröder seed at `|b_im|=1.3`, refined for the target via Kouznetsov
+with the seed as initial guess), or (b) Paulsen-Cowgill conformal
+mapping (the canonical algorithm for off-real bases), or (c) basin
+guard rejecting `|F̃[mid]| < 0.5·|target_mid|` for non-Schwarz.
 
 | b_re | b_im | h_re | h_im | mode |
 |---|---|---|---|---|
 | 0 | 0.5 | 0.5 | 0 | OK (returns ≈ 0.821 + 0.990i) |
 | 0 | 1 | 0.5 | 0 | OK (returns 1.167 + 0.735i) |
+| 0 | 1.1 | 0.5 | 0 | OK (1.171 + 0.693i) |
+| 0 | 1.2 | 0.5 | 0 | OK (1.159 + 0.658i) |
+| 0 | 1.3 | 0.5 | 0 | OK (1.130 + 0.629i) |
+| 0 | 1.4 | 0.5 | 0 | HANG (boundary band, wrong-basin LM descent) |
 | 0 | 1.5 | 0.5 | 0 | HANG |
 | 0 | 5 | 0.5 | 0 | HANG |
 | 0 | -3 | 0.5 | 0 | HANG |
-| 0 | 2 | 1 | 0.5 | — |
+| 0 | 2 | 1 | 0.5 | HANG |
 
 ---
 
-## D. Complex bases far from real axis
+## D. Complex bases far from real axis  — **MOSTLY RESOLVED**
 
-`b = a + bi` with large `|Im(b)|` relative to `|Re(b)|`. Same fixed-point
-geometry issues as pure-imaginary; the conformal map / contour deformation
-needed for these is not yet implemented.
+`b = a + bi` with large `|Im(b)|` relative to `|Re(b)|`. The Newton-
+Kouznetsov path now converges quadratically for these once it gets past
+the initial linear-descent phase. Just need ≥3-min timeout at 20 digits.
 
 | b_re | b_im | h_re | h_im | mode |
 |---|---|---|---|---|
-| 1.2 | 3.5 | 0.5 | 0 | HANG |
-| 0.5 | 2 | 0.5 | 0 | HANG |
-| -1 | 1 | 0.5 | 0 | HANG |
-| 2 | 5 | 0 | 0.5 | HANG |
+| 1.2 | 3.5 | 0.5 | 0 | OK (0.2024 + 0.5434i, ~3-4 min at 20 digits) |
+| 0.5 | 2 | 0.5 | 0 | OK (0.2498 + 0.5270i) |
+| -1 | 1 | 0.5 | 0 | HANG (Re(b)<0 — see Class B) |
+| 2 | 5 | 0 | 0.5 | TBD |
 
 ---
 
@@ -180,7 +199,16 @@ Resolved: every Schröder result is now post-validated via
 
 | b_re | b_im | h_re | h_im | before | after |
 |---|---|---|---|---|---|
-| 50 | 0 | 0.5 | 0 | inf | ERR (validation catches overflow) |
+| 50 | 0 | 0.5 | 0 | inf | OK (large-base cap formula now converges Kouznetsov) |
+
+### I.3 Schröder degenerate F≡L solution — now caught by anchor check
+
+Schröder's σ̃-shift can collapse to F(z)=L (the trivial fixed-point
+solution): `b^L=L` makes the functional-equation check pass trivially,
+so a separate anchor check `F(0)=1` is required to detect this.
+Resolved at `schroder.rs:tetrate_schroder` — every result is now
+anchor-validated via `|F(0) − 1| < 1e-6` before functional-equation
+post-validation.
 
 ---
 

@@ -983,20 +983,27 @@ fn initial_guess(
         let half_c = Complex::with_val(prec, (half.clone(), 0));
         cnum::pow_complex(b, &half_c, prec)
     };
-    // Cap on |target_mid|. Kneser tetration values give F̃_b(0.5) that grows
-    // ~ ln|b| for large real b (b=2 → 1.46, b=e → 1.65, b=10 → 2.13,
-    // b=100 → 4.21, …). Using sqrt_b directly puts us too far above the truth
-    // for b ≥ ~10 (e.g. √100 = 10 vs true 4.2), and the b^F amplification on
-    // the right edge of the contour drives T(F) into a wrong basin from there.
-    // A flat cap at 2 (the prior version) starts b=200+ on the wrong side of a
-    // saddle and the LM Newton ends up descending to F[mid]≈−0.75. Cap at
-    // `max(2, ln|b|)` instead — a strictly closer initial guess to the Kneser
-    // truth for every real b, while keeping small-b behavior unchanged. We cap
-    // by magnitude (not real part) so complex bases — whose √b is generically
-    // not on the real axis — get a non-zero target.
+    // Cap on |target_mid|. Empirically, the converged F̃[mid] = F̃(0+0i) for
+    // the natural Kneser solution sits in [0.6, 1.4] across the profiled real-
+    // positive bases (b=2 → 1.25, b=5 → 0.73, b=10 → 1.10, b=50 → 0.69,
+    // b=100 → 1.40, b=200 → 1.30, b=500 → 0.70, b=1000 → 1.03). The published
+    // F_b(0.5) values are different (F_b(0.5) = F̃(0.5+δ) with shift δ chosen
+    // so F̃(δ)=1) and grow ~ln(b), but it's F̃[mid] that controls the initial
+    // basin selection.
+    //
+    // Initial-guess sensitivity is real: cap=1.5 lets b≤200 converge but b≥500
+    // descends to a wrong-basin attractor near F̃[mid]≈0; cap=1.0 lets b≥50
+    // converge but flips b=10 into a different wrong basin (F̃[mid]≈0.09).
+    // The Kneser basin's "attractor radius" along this axis shrinks as b grows.
+    //
+    // Smoothly decreasing cap from 1.5 (small b) to 0.7 (huge b) tracks the
+    // boundary: cap = clamp(1.5 − 0.1·max(0, ln|b|−2), 0.7, 1.5). Anchor at
+    // b=e^2 (no shrinkage), shrinks 0.1 per unit increase in ln|b| above 2.
+    // We cap by magnitude (not real part) so complex bases — whose √b is
+    // generically off the real axis — get a non-zero target.
     let sqrt_b_abs = Float::with_val(prec, sqrt_b.abs_ref()).to_f64();
     let b_abs = Float::with_val(prec, b.abs_ref()).to_f64();
-    let cap = b_abs.ln().max(0.0).max(2.0);
+    let cap: f64 = (1.5 - 0.1 * (b_abs.ln() - 2.0).max(0.0)).clamp(0.7, 1.5);
     let target_mid = if sqrt_b_abs <= cap {
         sqrt_b.clone()
     } else {
@@ -1588,11 +1595,14 @@ fn iterate_newton(
     use_schwarz: bool,
 ) -> Result<Vec<Complex>, String> {
     let n = initial.len();
-    // 40-iter cap: real-positive bases converge quadratically in ~25 iters
-    // even at 50+ digits; slow-progress check (every 15 iters from iter 10)
-    // catches non-canonical W_k cases at iter ~25-40 with the best-so-far
-    // residual.
-    let max_iters = 40usize;
+    // 80-iter cap: small/medium bases converge quadratically in ~10-15 iters
+    // and never approach the cap. Larger bases (b≥50) sit in linear-descent
+    // for ~30-50 iters before Newton kicks in and finishes in 2-3 quadratic
+    // iters. The slow-progress check (every 15 iters from iter 10) catches
+    // non-canonical W_k cases earlier with the best-so-far residual, so the
+    // cap only matters for the slow-but-eventually-converging large-base
+    // regime.
+    let max_iters = 80usize;
     let target = 10f64.powf(-(digits as f64) - 3.0);
     let debug = cnum::verbose();
 
@@ -1843,6 +1853,23 @@ fn iterate_newton(
             if use_schwarz {
                 symmetrize_schwarz(&mut x_trial, prec);
             }
+            // Cheap basin guard: for real-positive bases > e^(1/e), the natural
+            // Kneser F is real and POSITIVE on Re(z)=0. If the trial step
+            // pushes F[mid] negative, we have crossed into a wrong basin
+            // (e.g. settling at F[mid]≈−0.7 with a local-but-not-global
+            // residual minimum). Reject the step BEFORE the expensive
+            // apply_t_fft / residual computation — this saves ~1 matvec per
+            // bad LM trial, which matters because large bases trigger many
+            // such trials per outer iteration.
+            let mid_idx = n / 2;
+            let f_mid_re_trial = Float::with_val(prec, x_trial[mid_idx].real()).to_f64();
+            if use_schwarz && f_mid_re_trial < 0.0 {
+                mu *= 4.0;
+                if mu > 1e8 {
+                    break;
+                }
+                continue;
+            }
             let f_trial = apply_t_fft(
                 &x_trial, nodes, weights, t_max, l_upper, l_lower, ln_b, &kernels, prec,
             );
@@ -1859,6 +1886,7 @@ fn iterate_newton(
                     r_trial_norm = m;
                 }
             }
+
             if !bad && r_trial_norm < r_norm {
                 x = x_trial;
                 // Successful step: shrink μ aggressively when we beat the

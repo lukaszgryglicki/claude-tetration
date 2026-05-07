@@ -79,9 +79,12 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
             // Kantorovich Cauchy iteration still converges, just with a taller
             // contour. Try Schröder, then Kouznetsov; only error if both fail.
             // For truly parabolic |λ|=1 the band needs Paulsen-Cowgill.
-            if let Ok(v) = schroder::tetrate_schroder(b, h, d, prec) {
-                dprint("Schröder succeeded at boundary band");
-                return Ok(v);
+            match schroder::tetrate_schroder(b, h, d, prec) {
+                Ok(v) => {
+                    dprint("Schröder succeeded at boundary band");
+                    return Ok(v);
+                }
+                Err(e) => dprint(&format!("Schröder failed at boundary band: {}", e)),
             }
             dprint("Schröder unavailable in boundary band; trying Newton-Kouznetsov");
             kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits).map_err(|why| {

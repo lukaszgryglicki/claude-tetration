@@ -80,6 +80,22 @@ pub fn tetrate_schroder(
     prec: u32,
 ) -> Result<Complex, String> {
     let state = setup_schroder(b, fp_data, prec)?;
+    // Anchor check: F(0)=1 must hold mathematically. If σ̃(1−L) collapses to
+    // numerical zero (degeneracy near boundary band) then σ̃⁻¹(0)=0 and the
+    // formula returns F(z)=L for all z. b^L=L makes the functional-equation
+    // check below pass trivially, so we need this independent anchor.
+    let zero = cnum::zero(prec);
+    let f_zero = eval_schroder(&state, &zero)?;
+    let one_c = cnum::one(prec);
+    let anchor_diff = Complex::with_val(prec, &f_zero - &one_c);
+    let anchor_err = Float::with_val(prec, anchor_diff.abs_ref()).to_f64();
+    if !anchor_err.is_finite() || anchor_err > 1e-6 {
+        return Err(format!(
+            "Schröder anchor check failed: F(0) = {} (expected 1.0); \
+             σ̃-shift likely produced degenerate fixed-point solution F≡L",
+            f_zero
+        ));
+    }
     let f_h = eval_schroder(&state, h)?;
     validate_functional_equation(&state, h, &f_h, prec)?;
     Ok(f_h)

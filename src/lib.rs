@@ -32,6 +32,16 @@ pub fn tetrate_str(
     if digits == 0 {
         return Err("precision must be a positive integer".into());
     }
+    // Reject precisions that would overflow MPC's 32-bit prec_t (≈1.3 billion
+    // digits) before calling `digits_to_bits` (which would panic). Anything
+    // beyond ~10⁷ digits is also impractical: MPFR allocations dominate.
+    const MAX_DIGITS: u64 = 1_000_000_000;
+    if digits > MAX_DIGITS {
+        return Err(format!(
+            "precision {} digits exceeds maximum {} (MPC representable range)",
+            digits, MAX_DIGITS
+        ));
+    }
     let prec = cnum::digits_to_bits(digits);
     let b = cnum::parse_complex(base_re, base_im, prec)?;
     let h = cnum::parse_complex(height_re, height_im, prec)?;

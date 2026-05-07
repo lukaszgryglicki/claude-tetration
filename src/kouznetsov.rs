@@ -2055,6 +2055,32 @@ fn eval_at_height(
     let shift = re_h.floor() as i64;
     let h_strip = Complex::with_val(prec, h - shift);
 
+    // Asymptotic regime: when |Im(h_strip)| exceeds the Cauchy contour height
+    // t_max, h is outside the rectangle and the Cauchy formula is invalid (it
+    // would integrate to ~0 by holomorphy, or NaN at the boundary). The
+    // natural Kneser-Kouznetsov F has well-defined limits:
+    //   F(z) → L_upper as Im(z) → +∞
+    //   F(z) → L_lower as Im(z) → −∞
+    // and the residual decays like exp(−|Im(z)|·|arg(λ)|), so for Im outside
+    // ±t_max the asymptote is accurate to the requested precision (since
+    // t_max was chosen as (digits+8)·ln(10)/|arg(λ)|).
+    //
+    // After picking the asymptote we still apply the b^· (or log_b) recursion
+    // for the `shift` integer Re-translation. Since L_upper / L_lower are
+    // fixed points of b^·, b^L = L, so the recursion is a no-op in exact
+    // arithmetic — but we run it anyway for symmetry with the in-strip path.
+    let im_h_strip = Float::with_val(prec, h_strip.imag()).to_f64();
+    let t_max_f64 = t_max.to_f64();
+    if im_h_strip > t_max_f64 {
+        // Above the contour: F(z) → L_upper. Since b^L_upper = L_upper
+        // (fixed-point identity), iterating b^· `shift` times is a no-op in
+        // exact arithmetic and only injects rounding noise — return L_upper
+        // directly. Same logic for the lower asymptote.
+        return Ok(l_upper.clone());
+    }
+    if im_h_strip < -t_max_f64 {
+        return Ok(l_lower.clone());
+    }
     let f_strip = cauchy_eval(
         &h_strip, samples, nodes, weights, t_max, l_upper, l_lower, ln_b, prec,
     );

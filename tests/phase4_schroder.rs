@@ -8,7 +8,7 @@
 
 use rug::{Complex, Float};
 
-use tetration::{cnum, dispatch};
+use tetration::{cnum, dispatch, regions, schroder};
 
 fn parse(re: &str, im: &str, prec: u32) -> Complex {
     cnum::parse_complex(re, im, prec).unwrap()
@@ -121,6 +121,37 @@ fn t351_continuity_at_two() {
     let diff = Complex::with_val(prec, &f_int - &f_near);
     let da = abs(&diff, prec).to_f64();
     assert!(da < 1e-9, "F(2) − F(2−1e-11) ≈ {}, expected < 1e-9", da);
+}
+
+#[test]
+fn t370_setup_eval_matches_direct() {
+    // Cached setup + eval must produce bit-identical results to the direct
+    // `tetrate_schroder` wrapper across many heights for the same base. This
+    // is what grid_runner relies on for its 100× speedup at digits ≥ 20.
+    let digits = 30u64;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("1.2", "-0.4", prec);
+    let region = regions::classify(&b, prec).expect("classify");
+    let fp = match &region {
+        regions::Region::ShellThronInterior(d) => d,
+        other => panic!("expected ShellThronInterior, got {}", other.name()),
+    };
+    let state = schroder::setup_schroder(&b, fp, prec).expect("setup");
+    let heights = ["0.5", "1.5", "-0.5", "0.7", "-1.3"];
+    for h_str in &heights {
+        for h_im_str in &["0", "0.3", "-0.7"] {
+            let h = parse(h_str, h_im_str, prec);
+            let direct = schroder::tetrate_schroder(&b, &h, fp, prec).expect("direct");
+            let cached = schroder::eval_schroder(&state, &h).expect("cached");
+            let diff = Complex::with_val(prec, &direct - &cached);
+            let da = abs(&diff, prec).to_f64();
+            assert!(
+                da < 1e-50,
+                "cache mismatch at h=({},{}): direct={:?} cached={:?} |Δ|={:.3e}",
+                h_str, h_im_str, direct, cached, da
+            );
+        }
+    }
 }
 
 #[test]

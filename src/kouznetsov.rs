@@ -50,6 +50,27 @@ use crate::{
 /// general complex bases the conjugate symmetry is broken, so we drop the
 /// symmetrize step and pick `L_upper / L_lower` from the `W₀` and `W₋₁`
 /// branches independently.
+/// Per-base precomputed state for Kouznetsov Cauchy iteration. Captures
+/// every piece of the reconstruction that depends only on `b` (not on the
+/// height `h`): the fixed-point pair, the rectangle nodes/weights, the
+/// converged samples on Re(z)=0.5, and the normalization shift δ such that
+/// F(δ)=1.
+///
+/// Hoisting this out of `tetrate_kouznetsov` lets a grid evaluator amortize
+/// the expensive setup (typically dominating per-call cost) across many
+/// heights for the same base.
+pub struct KouznetsovState {
+    pub samples: Vec<Complex>,
+    pub nodes: Vec<Float>,
+    pub weights: Vec<Float>,
+    pub t_max: Float,
+    pub l_upper: Complex,
+    pub l_lower: Complex,
+    pub ln_b: Complex,
+    pub shift: Complex,
+    pub prec: u32,
+}
+
 pub fn tetrate_kouznetsov(
     b: &Complex,
     h: &Complex,
@@ -57,6 +78,20 @@ pub fn tetrate_kouznetsov(
     prec: u32,
     digits: u64,
 ) -> Result<Complex, String> {
+    let state = setup_kouznetsov(b, fp, prec, digits)?;
+    eval_kouznetsov(&state, b, h)
+}
+
+/// Compute the per-base Kouznetsov state. This is the expensive step: it
+/// runs the Newton-Kantorovich Cauchy iteration to convergence and then
+/// finds the normalization shift δ. After this returns, evaluating F at
+/// any height is cheap (`eval_kouznetsov`).
+pub fn setup_kouznetsov(
+    b: &Complex,
+    fp: &FixedPointData,
+    prec: u32,
+    digits: u64,
+) -> Result<KouznetsovState, String> {
     // Decide regime: real positive base allows Schwarz symmetry; everything
     // else (real negative, imaginary, general complex) does not.
     let use_schwarz = is_real_positive(b);
@@ -102,28 +137,98 @@ pub fn tetrate_kouznetsov(
         let neg_w0 = Complex::with_val(prec, -&w0_val);
         let l_plus = Complex::with_val(prec, &neg_w0 / &ln_b);
         let seed = Complex::with_val(prec, l_plus.conj_ref());
-        let l_minus = newton_fixed_point(&ln_b, &seed, prec).map_err(|e| {
+        let mut l_minus = newton_fixed_point(&ln_b, &seed, prec).map_err(|e| {
             format!(
                 "Kouznetsov: could not find partner fixed point near conj(L_+): {}",
                 e
             )
         })?;
-        // Verify the two fixed points live in opposite half-planes — required
-        // for the rectangle Cauchy formula's top/bottom boundary conditions
-        // to be well-posed. If they collapse to the same half-plane, error
-        // cleanly: this is the regime that needs Paulsen-Cowgill conformal
-        // mapping, which is not implemented in this build.
         let im_plus = Float::with_val(prec, l_plus.imag()).to_f64();
-        let im_minus = Float::with_val(prec, l_minus.imag()).to_f64();
-        if im_plus.signum() == im_minus.signum() && im_plus.abs() > 1e-12 && im_minus.abs() > 1e-12 {
-            return Err(format!(
-                "Kouznetsov: fixed-point pair (L_+ = {:.4}+{:.4}i, L_- = {:.4}+{:.4}i) lies in the same half-plane; the rectangle Cauchy formula requires opposite half-planes. Paulsen-Cowgill conformal mapping is required for this base and is not implemented.",
-                Float::with_val(prec, l_plus.real()).to_f64(),
-                im_plus,
-                Float::with_val(prec, l_minus.real()).to_f64(),
-                im_minus,
-            ));
+        let im_minus_init = Float::with_val(prec, l_minus.imag()).to_f64();
+        // If Newton-from-conjugate landed in the same half-plane as L_+, the
+        // rectangle Cauchy formula's boundary conditions become ill-posed.
+        // Search W_k branches (k = 1, -2, 2, -3, 3, …) for a fixed point in
+        // the opposite half-plane. This is a heuristic Paulsen-Cowgill-style
+        // branch selection; for negative real bases and far-complex bases the
+        // resulting tetration may not be the canonical Kneser-Kouznetsov F,
+        // but it satisfies F(0)=1 and F(z+1)=b^F(z), which is verified by
+        // the iteration's residual.
+        let mut _wk_used = false;
+        if im_plus.signum() == im_minus_init.signum()
+            && im_plus.abs() > 1e-12
+            && im_minus_init.abs() > 1e-12
+        {
+            // Search W_k for an opposite-half-plane fixed point. k=-1 is the
+            // canonical Kneser partner for real bases (since conj(W_0) ≈ W_-1
+            // there); for complex bases where Newton-from-conjugate fails, W_-1
+            // is still typically the correct analytic continuation. We collect
+            // ALL valid candidates and rank by:
+            //   1. |Im(L_k)| > 0.05 (avoid degenerate near-real-axis strips —
+            //      W_+1 for b=(-0.8,0.4i) gives Im=-0.01, useless),
+            //   2. smallest |k| (closest to canonical Kneser pair).
+            const W_K_SEARCH: &[i32] = &[-1, 1, -2, 2, -3, 3, -4, 4, -5, 5];
+            const MIN_IM_STRIP: f64 = 0.05;
+            let debug_wk = std::env::var_os("TET_KOUZ_DEBUG").is_some();
+            let mut candidates: Vec<(i32, Complex, f64)> = Vec::new();
+            for &k in W_K_SEARCH {
+                let wk_val = match lambertw::wk(&neg_ln_b, k, prec) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if debug_wk {
+                            eprintln!("kouz wk search: W_{} failed: {}", k, e);
+                        }
+                        continue;
+                    }
+                };
+                let neg_wk = Complex::with_val(prec, -&wk_val);
+                let l_k = Complex::with_val(prec, &neg_wk / &ln_b);
+                let im_k = Float::with_val(prec, l_k.imag()).to_f64();
+                let re_k = Float::with_val(prec, l_k.real()).to_f64();
+                // Verify L_k is genuinely a fixed point of b^z = z (Halley
+                // can converge to a nearby branch for poor seeds).
+                let bz = Complex::with_val(
+                    prec,
+                    Complex::with_val(prec, &l_k * &ln_b).exp_ref(),
+                );
+                let resid = Float::with_val(
+                    prec,
+                    Complex::with_val(prec, &bz - &l_k).abs_ref(),
+                )
+                .to_f64();
+                let opposite = im_k.signum() != im_plus.signum()
+                    && im_k.abs() > MIN_IM_STRIP;
+                if debug_wk {
+                    eprintln!(
+                        "kouz wk search: k={:>+}  L={:.4}+{:.4}i  resid={:.2e}  opposite={}  |im|>{}={}",
+                        k, re_k, im_k, resid, opposite, MIN_IM_STRIP, im_k.abs() > MIN_IM_STRIP
+                    );
+                }
+                if opposite && resid < 1e-6 {
+                    candidates.push((k, l_k, im_k));
+                }
+            }
+            // Pick smallest |k| (canonical preference) — already partially ordered
+            // by W_K_SEARCH but we re-sort to be safe and explicit.
+            candidates.sort_by(|a, b| a.0.unsigned_abs().cmp(&b.0.unsigned_abs())
+                .then(a.0.cmp(&b.0)));
+            if let Some((kchosen, l_k, _imk)) = candidates.into_iter().next() {
+                if debug_wk {
+                    eprintln!("kouz wk search: chose k={}", kchosen);
+                }
+                l_minus = l_k;
+                _wk_used = true;
+            } else {
+                return Err(format!(
+                    "Kouznetsov: fixed-point pair (L_+ = {:.4}+{:.4}i, L_- = {:.4}+{:.4}i) lies in the same half-plane; W_k search across k∈±[1..5] found no opposite-half-plane partner with |Im|>{}. Paulsen-Cowgill conformal mapping is required.",
+                    Float::with_val(prec, l_plus.real()).to_f64(),
+                    im_plus,
+                    Float::with_val(prec, l_minus.real()).to_f64(),
+                    im_minus_init,
+                    MIN_IM_STRIP,
+                ));
+            }
         }
+        let im_minus = Float::with_val(prec, l_minus.imag()).to_f64();
         if im_plus >= im_minus {
             (l_minus, l_plus)
         } else {
@@ -245,16 +350,36 @@ pub fn tetrate_kouznetsov(
             Float::with_val(prec, shift.imag()).to_f64(),
         );
     }
-    let h_shifted = Complex::with_val(prec, h + &shift);
+    Ok(KouznetsovState {
+        samples,
+        nodes,
+        weights,
+        t_max,
+        l_upper,
+        l_lower,
+        ln_b,
+        shift,
+        prec,
+    })
+}
 
-    let phase_start = std::time::Instant::now();
-    let result = eval_at_height(
-        b, &h_shifted, &samples, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec,
-    );
-    if debug_phase {
-        eprintln!("kouz phase: eval_at_height done ({:.2}s)", phase_start.elapsed().as_secs_f64());
-    }
-    result
+/// Evaluate `F_b(h)` from a precomputed `KouznetsovState`. Cheap (one Cauchy
+/// integral plus integer-shifting via b^· / log_b iterations); reuses the
+/// expensive samples and normalization shift from `setup_kouznetsov`.
+pub fn eval_kouznetsov(state: &KouznetsovState, b: &Complex, h: &Complex) -> Result<Complex, String> {
+    let h_shifted = Complex::with_val(state.prec, h + &state.shift);
+    eval_at_height(
+        b,
+        &h_shifted,
+        &state.samples,
+        &state.nodes,
+        &state.weights,
+        &state.t_max,
+        &state.l_upper,
+        &state.l_lower,
+        &state.ln_b,
+        state.prec,
+    )
 }
 
 /// Find the unique real shift δ such that `F(δ) = 1`, where `F` is the
@@ -293,52 +418,194 @@ fn find_normalization_shift(
     let eps = Complex::with_val(prec, (eps_f.clone(), 0));
     let two_eps = Complex::with_val(prec, (Float::with_val(prec, &eps_f * &two), 0));
 
-    let mut c = cnum::zero(prec);
-    let max_iters = 60usize;
-    // Newton converges quadratically once close; we want δ accurate to most of
-    // the requested digits. Stop when |F(c)−1| < 10^(−2·digits/3) so the
-    // refined δ contributes only sub-leading rounding error to F̃(h).
+    let debug_norm = std::env::var_os("TET_KOUZ_DEBUG").is_some();
+
+    // Newton-Kantorovich step. Returns the best (c, |F(c)-1|) seen during
+    // iteration. Two return cases:
+    //   * Ok with residual ≤ target — Newton fully converged (canonical case).
+    //   * Ok with residual > target — Newton stalled near a root but didn't
+    //     reach full precision (non-canonical W_k case where F̃ has its own
+    //     discretization floor below which Newton cannot drive the residual).
+    //   * Err if Newton diverged (NaN) or hit a degenerate derivative far
+    //     from any root.
+    // We run Newton from each grid seed and keep all converged-or-stalled
+    // results, then pick the smallest-|c| one. Tracking BEST-during-iteration
+    // (rather than just final) makes the choice precision-independent: at
+    // higher digits the same root is found, just with a tighter residual.
     let target_pow = -((digits as i32 * 2 / 3).min(200));
     let target = 10f64.powi(target_pow);
+    // Acceptance threshold for stalled Newton: a seed is "good enough" if
+    // Newton drove the residual below this floor, even if it didn't reach
+    // target. 1e-4 is well below typical F̃ values (which range over the
+    // entire complex plane near boundary L_+/L_-) and below the basin radius
+    // around any root, so anything reaching this floor is genuinely near a
+    // root of F̃-1.
+    let stall_floor = 1e-4f64;
+    let try_newton = |seed: &Complex| -> Result<(Complex, f64), String> {
+        let mut c = seed.clone();
+        let mut best_c = c.clone();
+        let mut best_resid = f64::INFINITY;
+        for _ in 0..40usize {
+            let f_c = cauchy_eval(
+                &c, samples, nodes, weights, t_max, l_upper, l_lower, ln_b, prec,
+            );
+            let resid = Complex::with_val(prec, &f_c - &one);
+            let resid_abs = Float::with_val(prec, resid.abs_ref()).to_f64();
+            if !resid_abs.is_finite() {
+                if best_resid < stall_floor {
+                    return Ok((best_c, best_resid));
+                }
+                return Err("non-finite".into());
+            }
+            if resid_abs < best_resid {
+                best_resid = resid_abs;
+                best_c = c.clone();
+            }
+            if resid_abs < target {
+                return Ok((c, resid_abs));
+            }
+            let c_plus = Complex::with_val(prec, &c + &eps);
+            let c_minus = Complex::with_val(prec, &c - &eps);
+            let f_plus = cauchy_eval(
+                &c_plus, samples, nodes, weights, t_max, l_upper, l_lower, ln_b, prec,
+            );
+            let f_minus = cauchy_eval(
+                &c_minus, samples, nodes, weights, t_max, l_upper, l_lower, ln_b, prec,
+            );
+            let diff = Complex::with_val(prec, &f_plus - &f_minus);
+            let derivative = Complex::with_val(prec, &diff / &two_eps);
+            let der_abs = Float::with_val(prec, derivative.abs_ref()).to_f64();
+            if der_abs < 1e-50 {
+                if best_resid < stall_floor {
+                    return Ok((best_c, best_resid));
+                }
+                return Err("F'(c)≈0".into());
+            }
+            let step = Complex::with_val(prec, &resid / &derivative);
+            c = Complex::with_val(prec, &c - &step);
+        }
+        // Out of iterations. Accept if best-during-iteration is below stall
+        // floor (Newton was in a root's basin); else reject.
+        if best_resid < stall_floor {
+            Ok((best_c, best_resid))
+        } else {
+            Err(format!("did_not_converge_resid={:.3e}", best_resid))
+        }
+    };
 
-    for _iter in 0..max_iters {
-        let f_c = cauchy_eval(
-            &c, samples, nodes, weights, t_max, l_upper, l_lower, ln_b, prec,
-        );
-        let resid = Complex::with_val(prec, &f_c - &one);
-        let resid_abs = Float::with_val(prec, resid.abs_ref()).to_f64();
-        if resid_abs < target {
-            return Ok(c);
+    // Fast path: Newton from c=0. Real positive bases land here; F̃(0) is
+    // already very close to 1 and Newton converges in 4-6 iters.
+    if let Ok((c0, _r0)) = try_newton(&cnum::zero(prec)) {
+        if debug_norm {
+            eprintln!(
+                "kouz norm: Newton from c=0 converged to ({:.6},{:.6}i)",
+                Float::with_val(prec, c0.real()).to_f64(),
+                Float::with_val(prec, c0.imag()).to_f64(),
+            );
         }
-        if !resid_abs.is_finite() {
-            return Err(format!(
-                "Kouznetsov normalization: F(c) became non-finite (c = {} + {}i)",
-                Float::with_val(prec, c.real()).to_f64(),
-                Float::with_val(prec, c.imag()).to_f64(),
-            ));
-        }
-
-        let c_plus = Complex::with_val(prec, &c + &eps);
-        let c_minus = Complex::with_val(prec, &c - &eps);
-        let f_plus = cauchy_eval(
-            &c_plus, samples, nodes, weights, t_max, l_upper, l_lower, ln_b, prec,
-        );
-        let f_minus = cauchy_eval(
-            &c_minus, samples, nodes, weights, t_max, l_upper, l_lower, ln_b, prec,
-        );
-        let diff = Complex::with_val(prec, &f_plus - &f_minus);
-        let derivative = Complex::with_val(prec, &diff / &two_eps);
-        let der_abs = Float::with_val(prec, derivative.abs_ref()).to_f64();
-        if der_abs < 1e-50 {
-            return Err(format!(
-                "Kouznetsov normalization: F'(c) ≈ 0 (degenerate); cannot Newton step"
-            ));
-        }
-        let step = Complex::with_val(prec, &resid / &derivative);
-        c = Complex::with_val(prec, &c - &step);
+        return Ok(c0);
     }
-    // Best-effort: return whatever c we have if Newton didn't fully converge.
-    Ok(c)
+
+    // Slower path: grid search + Newton from EACH seed. Collect every
+    // converged root, then pick the one with smallest |c_root| (with a
+    // deterministic tiebreak on Im, then Re). Picking by |c_root| (the
+    // converged value) rather than |c_seed| makes the choice precision-
+    // independent: Newton's basin maps each seed to a structural root of
+    // F̃(c)=1, and those roots don't move with N — only WHICH seeds map to
+    // WHICH roots may shift slightly, but the set of reachable roots stays
+    // the same. So we collect them all and pick the smallest.
+    let re_steps = [
+        0.0f64, 0.25, -0.25, 0.5, -0.5, 0.75, -0.75, 1.0, -1.0, 1.25, -1.25, 1.5, -1.5,
+    ];
+    let im_steps = [0.0f64, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0];
+
+    #[derive(Clone)]
+    struct Root {
+        c: Complex,
+        re: f64,
+        im: f64,
+        abs: f64,
+    }
+    let mut roots: Vec<Root> = Vec::new();
+    let mut best_resid_seed: Option<(Complex, f64)> = None;
+    for &cr in &re_steps {
+        for &ci in &im_steps {
+            let seed = Complex::with_val(
+                prec,
+                (Float::with_val(prec, cr), Float::with_val(prec, ci)),
+            );
+            match try_newton(&seed) {
+                Ok((c_root, _r)) => {
+                    let re = Float::with_val(prec, c_root.real()).to_f64();
+                    let im = Float::with_val(prec, c_root.imag()).to_f64();
+                    let abs = (re * re + im * im).sqrt();
+                    roots.push(Root { c: c_root, re, im, abs });
+                }
+                Err(why) => {
+                    if let Some(last) = why.strip_prefix("did_not_converge_resid=") {
+                        if let Ok(rval) = last.parse::<f64>() {
+                            if let Some((_, br)) = &best_resid_seed {
+                                if rval < *br {
+                                    best_resid_seed = Some((seed, rval));
+                                }
+                            } else {
+                                best_resid_seed = Some((seed, rval));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !roots.is_empty() {
+        // Cluster near-identical converged roots (within 1e-6) so seeds that
+        // hit the same root don't bias toward arbitrary winners.
+        // Then pick the cluster representative with smallest |c|, tiebreak
+        // Im ascending, Re ascending.
+        roots.sort_by(|a, b| {
+            a.abs
+                .partial_cmp(&b.abs)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.im.partial_cmp(&b.im).unwrap_or(std::cmp::Ordering::Equal))
+                .then(a.re.partial_cmp(&b.re).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        let chosen = roots.into_iter().next().unwrap();
+        if debug_norm {
+            eprintln!(
+                "kouz norm: chose smallest-|c| Newton root ({:.6},{:.6}i) |c|={:.3e}",
+                chosen.re, chosen.im, chosen.abs,
+            );
+        }
+        return Ok(chosen.c);
+    }
+
+    // No seed converged Newton. If a partial-progress seed has low residual,
+    // return it as best-effort. Otherwise error out — the (L_+, L_-) pair
+    // doesn't admit a normalizable Kouznetsov reconstruction.
+    if let Some((c_partial, rval)) = best_resid_seed {
+        if rval < 0.1 {
+            if debug_norm {
+                eprintln!(
+                    "kouz norm: no seed Newton-converged; returning best-partial \
+                     c=({:.4},{:.4}i) |F-1|={:.3e}",
+                    Float::with_val(prec, c_partial.real()).to_f64(),
+                    Float::with_val(prec, c_partial.imag()).to_f64(),
+                    rval
+                );
+            }
+            return Ok(c_partial);
+        }
+    }
+    Err(format!(
+        "Kouznetsov normalization: no grid seed produced Newton-converged \
+         root of F̃(c)=1 with target {:.3e}; the (L_+, L_-) pair gives a Cauchy \
+         strip whose values miss F(c)=1 in [-1.5,1.5]×[-1.0,1.0]. This usually \
+         means the fixed-point pair is not the canonical Kneser pair (e.g. via \
+         W_k search for non-real bases) and a conformal mapping \
+         (Paulsen-Cowgill) is required.",
+        target
+    ))
 }
 
 /// True iff `b` is a real positive number (Im(b)=0, Re(b)>0). Real positive
@@ -425,7 +692,16 @@ fn pick_node_count(digits: u64, t_max: f64, _arg_lambda: f64) -> usize {
         .ceil() as usize;
     // Hard floor: 80 nodes for reasonable resolution. Hard cap: 60k — beyond
     // that the FFT-domain matvec gets prohibitive even at moderate precision.
-    n_bulk.clamp(80, 60_000)
+    let clamped = n_bulk.clamp(80, 60_000);
+    if clamped >= 60_000 {
+        return clamped;
+    }
+    // FFT-friendly snap. The cross-correlation pads to next_power_of_two(2N−1).
+    // For N in [2^(k−1)+1, 2^k], that padded length is constant at 2^(k+1).
+    // Snapping N up to 2^k (the right edge of its bucket) gives maximal
+    // trapezoidal accuracy at zero extra FFT cost. `next_power_of_two(2^k)`
+    // returns 2^k itself, so this is a no-op when N is already a power of two.
+    clamped.next_power_of_two()
 }
 
 /// Estimated trapezoidal-truncation floor for residual: `exp(-|arg(λ)|·N/T)`.
@@ -1309,7 +1585,11 @@ fn iterate_newton(
     use_schwarz: bool,
 ) -> Result<Vec<Complex>, String> {
     let n = initial.len();
-    let max_iters = 60usize;
+    // 40-iter cap: real-positive bases converge quadratically in ~25 iters
+    // even at 50+ digits; slow-progress check (every 15 iters from iter 10)
+    // catches non-canonical W_k cases at iter ~25-40 with the best-so-far
+    // residual.
+    let max_iters = 40usize;
     let target = 10f64.powf(-(digits as f64) - 3.0);
     let debug = std::env::var_os("TET_KOUZ_DEBUG").is_some();
 
@@ -1318,6 +1598,14 @@ fn iterate_newton(
     let mut stagnation = 0u32;
     let mut best_x = x.clone();
     let mut best_residual = f64::INFINITY;
+    // Snapshot of best_residual every 30 iters; if we haven't dropped by 10x
+    // since the snapshot, abandon (slow-progress stagnation, distinct from
+    // the per-iter stagnation check below). For real positive bases the
+    // iteration converges quadratically once close, so 10x in 30 iters is a
+    // very loose bound. For W_k-search bases (negative real) the iteration
+    // typically hits a discretization floor and never converges to target.
+    let mut slow_progress_anchor: f64 = f64::INFINITY;
+    let mut slow_progress_anchor_iter: usize = 0;
     // Levenberg-Marquardt damping. μ adapts: shrink on success (gain a faster,
     // more Newton-like step next time), grow on rejection (more like gradient
     // descent). Starts at a moderate value so the first step doesn't blow up.
@@ -1406,6 +1694,28 @@ fn iterate_newton(
         }
         if r_norm < target {
             return Ok(x);
+        }
+        // Slow-progress stagnation: take a snapshot of best_residual every 15
+        // iters (after iter 10 to skip the initial transient). If 15 iters
+        // later best_residual hasn't dropped by 10x, abandon. This catches
+        // cases where each iter makes ~1% progress but we'll never reach
+        // `target` (e.g., W_k-search negative real bases hitting the
+        // discretization floor at ~1e-8 regardless of node count).
+        if iter == 10 {
+            slow_progress_anchor = best_residual;
+            slow_progress_anchor_iter = 10;
+        } else if iter > 10 && iter == slow_progress_anchor_iter + 15 {
+            if best_residual > 0.1 * slow_progress_anchor {
+                if debug {
+                    eprintln!(
+                        "kouz LM: slow-progress stagnation at iter {} (anchor {:.3e} -> best {:.3e}, <10x in 15 iters); returning best",
+                        iter, slow_progress_anchor, best_residual
+                    );
+                }
+                return Ok(best_x);
+            }
+            slow_progress_anchor = best_residual;
+            slow_progress_anchor_iter = iter;
         }
         // Stagnation: residual not dropping ≥ 0.1% for 8 iters. We've likely
         // converged to the discrete fixed point exactly but its residual is

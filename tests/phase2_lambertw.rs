@@ -4,10 +4,44 @@
 //! at multiple precisions, including 50, 200, and 2000 digits — and on tricky
 //! arguments near the branch point z = -1/e.
 
-use rug::{Complex, Float};
+use rug::{float::Constant, Complex, Float};
 
 use tetration::cnum;
 use tetration::lambertw;
+
+#[test]
+#[ignore]
+fn debug_wk_for_negative_two() {
+    let prec = 200u32;
+    let pi = Float::with_val(prec, Constant::Pi);
+    let ln2 = Float::with_val(prec, Float::with_val(prec, 2).ln_ref());
+    let ln_b = Complex::with_val(prec, (ln2, pi));
+    let neg_ln_b = Complex::with_val(prec, -&ln_b);
+    eprintln!("-ln(-2) = {:.6}+{:.6}i",
+        Float::with_val(prec, neg_ln_b.real()).to_f64(),
+        Float::with_val(prec, neg_ln_b.imag()).to_f64()
+    );
+    for &k in &[-3i32, -2, -1, 0, 1, 2, 3] {
+        match lambertw::wk(&neg_ln_b, k, prec) {
+            Ok(w) => {
+                let neg_w = Complex::with_val(prec, -&w);
+                let l = Complex::with_val(prec, &neg_w / &ln_b);
+                let bz_arg = Complex::with_val(prec, &l * &ln_b);
+                let bz = Complex::with_val(prec, bz_arg.exp_ref());
+                let resid = Float::with_val(prec, Complex::with_val(prec, &bz - &l).abs_ref()).to_f64();
+                eprintln!("W_{:>3}: w={:.4}+{:.4}i  L={:.4}+{:.4}i  resid={:.2e}",
+                    k,
+                    Float::with_val(prec, w.real()).to_f64(),
+                    Float::with_val(prec, w.imag()).to_f64(),
+                    Float::with_val(prec, l.real()).to_f64(),
+                    Float::with_val(prec, l.imag()).to_f64(),
+                    resid
+                );
+            }
+            Err(e) => eprintln!("W_{}: error: {}", k, e),
+        }
+    }
+}
 
 /// True iff `|w · e^w − z| < 2^{−tol_bits}` (relative to |z| if non-zero).
 fn check_residual(w: &Complex, z: &Complex, prec: u32, tol_bits: u32) -> Result<(), String> {

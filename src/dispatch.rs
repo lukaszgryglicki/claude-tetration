@@ -70,11 +70,32 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
         regions::Region::ShellThronInterior(d) => {
             schroder::tetrate_schroder(b, h, d, prec)
         }
-        regions::Region::ShellThronBoundary(_) => Err(unsupported_msg(
-            "Shell-Thron parabolic boundary band (|λ| ≈ 1)",
-            "no convergent algorithm in this band; Paulsen-Cowgill / Kouznetsov \
-             Cauchy iteration is required and not implemented in this build",
-        )),
+        regions::Region::ShellThronBoundary(d) => {
+            // The boundary band 0.95 ≤ |λ| ≤ 1.05 is the parabolic-fixed-point
+            // regime. Schröder regular tetration converges very slowly here
+            // (geometric rate `|λ|`, which is near 1) and typically bails. But
+            // for bases inside this band whose argλ is far enough from 0 — and
+            // whose fixed-point pair sits in opposite half-planes — Newton-
+            // Kantorovich Cauchy iteration still converges, just with a taller
+            // contour. Try Schröder, then Kouznetsov; only error if both fail.
+            // For truly parabolic |λ|=1 the band needs Paulsen-Cowgill.
+            if let Ok(v) = schroder::tetrate_schroder(b, h, d, prec) {
+                dprint("Schröder succeeded at boundary band");
+                return Ok(v);
+            }
+            dprint("Schröder unavailable in boundary band; trying Newton-Kouznetsov");
+            kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits).map_err(|why| {
+                unsupported_msg(
+                    "Shell-Thron parabolic boundary band (|λ| ≈ 1)",
+                    &format!(
+                        "Schröder regular tetration converges too slowly here, \
+                         and Newton-Kantorovich Kouznetsov Cauchy iteration \
+                         failed: {}",
+                        why
+                    ),
+                )
+            })
+        }
         regions::Region::OutsideShellThronRealPositive(d) => {
             // Schröder at the repelling fixed point handles bases unusually
             // close to the Shell-Thron boundary; for typical real bases

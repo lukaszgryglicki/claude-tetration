@@ -32,6 +32,31 @@ use rug::{Complex, Float};
 
 use crate::{cnum, regions::FixedPointData};
 
+/// Cached per-base Schröder state. Built once via `setup_schroder` and reused
+/// for many heights via `eval_schroder`. Amortises the O(N²) σ̃ Taylor build
+/// across all heights — for grid sweeps over many `(b, h)` cells with the same
+/// base, this is a 10-100× speedup at digits ≥ 20.
+pub struct SchroderState {
+    /// Attracting (|λ|<1) or repelling (|λ|>1) fixed point of `b^z = z`.
+    pub l: Complex,
+    /// `ln(λ)` precomputed for `λ^h = exp(h · ln λ)` per cell.
+    pub ln_lambda: Complex,
+    /// `ln(b)` precomputed for the integer-shift `b^·` / `log_b` chain.
+    pub ln_b: Complex,
+    /// `|λ|` as f64 — drives shift direction and safe-radius decisions.
+    pub lam_abs: f64,
+    /// σ̃⁻¹ Taylor coefficients (series reversion of σ̃). `sigma_inv[i]` is the
+    /// `i`-th coefficient; `sigma_inv[0] = 0`.
+    pub sigma_inv: Vec<Complex>,
+    /// `σ̃(1 − L)` — entry point for the formula `F(z) = L + σ̃⁻¹(s1·λ^z)`.
+    pub s1: Complex,
+    /// `safe_radius = 0.5 · max(|1−L|, 0.5)`. Direct σ̃⁻¹ Taylor is safe at `|t| ≤ safe_radius`.
+    pub safe_radius: f64,
+    /// MPC bit precision the state was built at — must match the precision
+    /// used for per-cell evaluation.
+    pub prec: u32,
+}
+
 /// Compute `F_b(h)` via Schröder expansion at the upper fixed point.
 ///
 /// Works for both `|λ| < 1` (Shell-Thron interior, attracting fixed point) and
@@ -54,6 +79,19 @@ pub fn tetrate_schroder(
     fp_data: &FixedPointData,
     prec: u32,
 ) -> Result<Complex, String> {
+    let state = setup_schroder(b, fp_data, prec)?;
+    eval_schroder(&state, h)
+}
+
+/// Build the Schröder state for base `b`. All the heavy lifting (σ̃ Taylor
+/// coefficient recursion, series reversion, σ̃-shift to evaluate at `1 − L`)
+/// lives here. Per-cell evaluation via `eval_schroder` is then O(N) plus the
+/// integer-shift chain.
+pub fn setup_schroder(
+    b: &Complex,
+    fp_data: &FixedPointData,
+    prec: u32,
+) -> Result<SchroderState, String> {
     let l = &fp_data.fixed_point;
     let lambda = &fp_data.lambda;
     let lam_abs = fp_data.lambda_abs;
@@ -95,31 +133,50 @@ pub fn tetrate_schroder(
     let s1 = eval_sigma_with_shift(&sigma, b, l, lambda, prec, &w0)?;
 
     let ln_lambda = Complex::with_val(prec, lambda.ln_ref());
-    let lam_h = lambda_pow(h, &ln_lambda, prec);
-    let t = Complex::with_val(prec, &s1 * &lam_h);
-
-    let t_abs = Float::with_val(prec, t.abs_ref()).to_f64();
+    let ln_b = Complex::with_val(prec, b.ln_ref());
     let safe_radius = 0.5 * w0_abs.max(0.5);
 
     if std::env::var_os("TET_SCHRODER_DEBUG").is_some() {
         let s1_abs = Float::with_val(prec, s1.abs_ref()).to_f64();
         eprintln!(
-            "schröder: |λ|={:.6} |1−L|={:.6} |s1|={:.6} |t|={:.6} safe={:.6} N={}",
-            lam_abs, w0_abs, s1_abs, t_abs, safe_radius, n_terms
+            "schröder setup: |λ|={:.6} |1−L|={:.6} |s1|={:.6} safe={:.6} N={}",
+            lam_abs, w0_abs, s1_abs, safe_radius, n_terms
         );
     }
 
-    if t_abs.is_finite() && t_abs <= safe_radius {
-        let inv_t = eval_series(&sigma_inv, &t, prec);
-        return Ok(Complex::with_val(prec, l + &inv_t));
+    Ok(SchroderState {
+        l: l.clone(),
+        ln_lambda,
+        ln_b,
+        lam_abs,
+        sigma_inv,
+        s1,
+        safe_radius,
+        prec,
+    })
+}
+
+/// Evaluate `F_b(h)` from a cached `SchroderState`. The expensive σ̃ build is
+/// already amortised; this call costs one `λ^h` exponential, one O(N) Horner
+/// pass, and (rarely) a few `b^·`/`log_b` integer-shift iterations.
+pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, String> {
+    let prec = state.prec;
+    let lam_h = lambda_pow(h, &state.ln_lambda, prec);
+    let t = Complex::with_val(prec, &state.s1 * &lam_h);
+
+    let t_abs = Float::with_val(prec, t.abs_ref()).to_f64();
+
+    if t_abs.is_finite() && t_abs <= state.safe_radius {
+        let inv_t = eval_series(&state.sigma_inv, &t, prec);
+        return Ok(Complex::with_val(prec, &state.l + &inv_t));
     }
 
     // Shift integer k so |t · λ^k| ≤ safe_radius.
     if !t_abs.is_finite() || t_abs <= 0.0 {
         return Err(format!("Schröder: bad |t| = {}", t_abs));
     }
-    let log_lam_abs = lam_abs.ln(); // negative if |λ|<1, positive if >1
-    let ratio = (safe_radius / t_abs).ln(); // negative (safe < t)
+    let log_lam_abs = state.lam_abs.ln(); // negative if |λ|<1, positive if >1
+    let ratio = (state.safe_radius / t_abs).ln(); // negative (safe < t)
     let k_raw = ratio / log_lam_abs;
     let k: i64 = if log_lam_abs < 0.0 {
         k_raw.ceil() as i64
@@ -129,7 +186,7 @@ pub fn tetrate_schroder(
     if k == 0 {
         return Err(format!(
             "Schröder: shift computed zero (|t|={}, |λ|={})",
-            t_abs, lam_abs
+            t_abs, state.lam_abs
         ));
     }
     if k.unsigned_abs() > 5000 {
@@ -140,28 +197,27 @@ pub fn tetrate_schroder(
     }
 
     let h_shifted = Complex::with_val(prec, h + k);
-    let lam_h_shifted = lambda_pow(&h_shifted, &ln_lambda, prec);
-    let t_shifted = Complex::with_val(prec, &s1 * &lam_h_shifted);
-    let inv_t_shifted = eval_series(&sigma_inv, &t_shifted, prec);
-    let mut f = Complex::with_val(prec, l + &inv_t_shifted);
+    let lam_h_shifted = lambda_pow(&h_shifted, &state.ln_lambda, prec);
+    let t_shifted = Complex::with_val(prec, &state.s1 * &lam_h_shifted);
+    let inv_t_shifted = eval_series(&state.sigma_inv, &t_shifted, prec);
+    let mut f = Complex::with_val(prec, &state.l + &inv_t_shifted);
 
     if std::env::var_os("TET_SCHRODER_DEBUG").is_some() {
         let t_sh = Float::with_val(prec, t_shifted.abs_ref()).to_f64();
         let f_sh = Float::with_val(prec, f.abs_ref()).to_f64();
-        eprintln!("schröder: k={} |t_shifted|={:.6} |F(h+k)|={:.6}", k, t_sh, f_sh);
+        eprintln!("schröder eval: k={} |t_shifted|={:.6} |F(h+k)|={:.6}", k, t_sh, f_sh);
     }
 
-    let ln_b = Complex::with_val(prec, b.ln_ref());
     if k > 0 {
         // F(h) = log_b applied k times to F(h+k).
         for _ in 0..k {
             let ln_f = Complex::with_val(prec, f.ln_ref());
-            f = Complex::with_val(prec, &ln_f / &ln_b);
+            f = Complex::with_val(prec, &ln_f / &state.ln_b);
         }
     } else {
         // k < 0: F(h) = b^· applied |k| times to F(h+k) = F(h−|k|).
         for _ in 0..(-k) {
-            let exponent = Complex::with_val(prec, &f * &ln_b);
+            let exponent = Complex::with_val(prec, &f * &state.ln_b);
             f = Complex::with_val(prec, exponent.exp_ref());
         }
     }

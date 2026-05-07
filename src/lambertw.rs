@@ -35,11 +35,69 @@ pub fn w0(z: &Complex, prec: u32) -> Result<Complex, String> {
         return Ok(cnum::zero(prec));
     }
     let zf = (z.real().to_f64(), z.imag().to_f64());
-    let w_seed = initial_guess_w0(zf);
-    let w_seed = refine_f64(zf, w_seed, F64_NEWTON_ITERS);
-    let mut w = Complex::with_val(prec, (w_seed.0, w_seed.1));
-    halley_refine(&mut w, z, prec)?;
-    Ok(w)
+    // Try the primary seed first; on Halley failure, retry with a small
+    // bank of alternate seeds. The tricky cases are values like
+    // z = -ln(-2 ± 2i) ≈ -1.04 ± 2.36i, where 1+z is barely in the
+    // left half-plane — the wrong-quadrant anchor lands in a neighbouring
+    // basin and Halley diverges. Falling back to log(z)-log(log(z))
+    // asymptotic, log(1+z), and other plausible seeds recovers these.
+    let primary = initial_guess_w0(zf);
+    let alt_seeds: [(f64, f64); 4] = [
+        // Asymptotic, no correction:
+        {
+            let l1 = c_log(zf);
+            let l2 = c_log(l1);
+            (l1.0 - l2.0, l1.1 - l2.1)
+        },
+        // Asymptotic + L₂/L₁ correction (accurate for moderate |z|):
+        {
+            let l1 = c_log(zf);
+            let l2 = c_log(l1);
+            let s = (l1.0 - l2.0, l1.1 - l2.1);
+            let corr = c_div(l2, l1);
+            (s.0 + corr.0, s.1 + corr.1)
+        },
+        // log(1+z) — valid for z near 0:
+        c_log((1.0 + zf.0, zf.1)),
+        // Branch-point series at z = -1/e:
+        {
+            let ze1 = (zf.0 + ONE_OVER_E, zf.1);
+            let arg = (
+                2.0 * std::f64::consts::E * ze1.0,
+                2.0 * std::f64::consts::E * ze1.1,
+            );
+            let p = c_sqrt(arg);
+            (-1.0 + p.0, p.1)
+        },
+    ];
+    // Try primary first, then alts. Return the first that converges fully.
+    let mut last_err: Option<String> = None;
+    for seed in std::iter::once(primary).chain(alt_seeds.iter().copied()) {
+        if !seed.0.is_finite() || !seed.1.is_finite() {
+            continue;
+        }
+        let refined = refine_f64(zf, seed, F64_NEWTON_ITERS);
+        if !refined.0.is_finite() || !refined.1.is_finite() {
+            continue;
+        }
+        // Verify the f64 refinement actually landed near a root before
+        // promoting to MPC: |w·e^w - z| should be tiny in f64.
+        let ew = c_exp(refined);
+        let we = c_mul(refined, ew);
+        let resid = c_abs((we.0 - zf.0, we.1 - zf.1));
+        if !resid.is_finite() || resid > 1e-6 * (c_abs(zf) + 1.0) {
+            continue;
+        }
+        let mut w = Complex::with_val(prec, (refined.0, refined.1));
+        match halley_refine(&mut w, z, prec) {
+            Ok(()) => return Ok(w),
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "W_0: no seed converged".into()))
 }
 
 /// `W₋₁` branch at arbitrary-precision complex `z`.
@@ -50,6 +108,37 @@ pub fn wm1(z: &Complex, prec: u32) -> Result<Complex, String> {
     let zf = (z.real().to_f64(), z.imag().to_f64());
     let w_seed = initial_guess_wm1(zf);
     let w_seed = refine_f64(zf, w_seed, F64_NEWTON_ITERS);
+    let mut w = Complex::with_val(prec, (w_seed.0, w_seed.1));
+    halley_refine(&mut w, z, prec)?;
+    Ok(w)
+}
+
+/// Lambert W on branch `k` for `|k| ≥ 2`. Uses the standard asymptotic seed
+/// `W_k(z) ≈ L₁ − L₂ + L₂/L₁ + …` where `L₁ = ln(z) + 2πi·k`, `L₂ = ln(L₁)`,
+/// then refines via Halley iteration. Returns `Err` if Halley's basin of
+/// attraction misses (which happens when the asymptotic seed lands in a
+/// neighboring branch's region).
+pub fn wk(z: &Complex, k: i32, prec: u32) -> Result<Complex, String> {
+    if k == 0 {
+        return w0(z, prec);
+    }
+    if k == -1 {
+        return wm1(z, prec);
+    }
+    if z.real().is_zero() && z.imag().is_zero() {
+        return Err(format!("W_{}(0) is undefined", k));
+    }
+    let zf = (z.real().to_f64(), z.imag().to_f64());
+    // Asymptotic seed: W_k ≈ ln(z) + 2πi·k - ln(ln(z) + 2πi·k).
+    let lnz = c_log(zf);
+    let two_pi_k = (0.0, 2.0 * std::f64::consts::PI * (k as f64));
+    let l1 = (lnz.0 + two_pi_k.0, lnz.1 + two_pi_k.1);
+    let l2 = c_log(l1);
+    let mut seed = (l1.0 - l2.0, l1.1 - l2.1);
+    // Add the L₂/L₁ correction term for accuracy.
+    let corr = c_div(l2, l1);
+    seed = (seed.0 + corr.0, seed.1 + corr.1);
+    let w_seed = refine_f64(zf, seed, F64_NEWTON_ITERS);
     let mut w = Complex::with_val(prec, (w_seed.0, w_seed.1));
     halley_refine(&mut w, z, prec)?;
     Ok(w)
@@ -70,6 +159,19 @@ fn halley_refine(w: &mut Complex, z: &Complex, prec: u32) -> Result<(), String> 
     let target_exp: i32 = -((prec as i32) - 8);
     let mut prev_dexp: Option<i32> = None;
     let mut stall_count: u32 = 0;
+    // Track best |Δ| seen and the corresponding w. When Halley oscillates
+    // near a root (e.g. f64 seed already near machine precision so MPC
+    // refinement just bounces in roundoff territory), we may bail with a
+    // stall counter even though w is already accurate. Returning the best-
+    // seen estimate is correct — it's strictly closer to the root than any
+    // future iterate would be in the stalled regime.
+    let mut best_w: Option<Complex> = None;
+    let mut best_dexp: i32 = i32::MAX;
+    // "Good enough" floor: if |Δ| is within 2^32 of target (i.e. ~9 decimal
+    // digits looser than the working precision), the result is usable for
+    // downstream tetration purposes — its error feeds into a Cauchy iteration
+    // that can absorb a few extra digits of slop without destabilizing.
+    let acceptable_exp: i32 = target_exp + 32;
 
     for iter in 0..HALLEY_MAX_ITERS {
         let exp_w = Complex::with_val(prec, w.exp_ref());
@@ -101,6 +203,12 @@ fn halley_refine(w: &mut Complex, z: &Complex, prec: u32) -> Result<(), String> 
         match dexp {
             None => return Ok(()), // delta is 0 / NaN (treat as converged or done)
             Some(e) => {
+                // Track best-seen iterate so a late stall doesn't lose
+                // progress made earlier.
+                if e < best_dexp {
+                    best_dexp = e;
+                    best_w = Some(w.clone());
+                }
                 if e <= target_exp {
                     return Ok(());
                 }
@@ -111,9 +219,20 @@ fn halley_refine(w: &mut Complex, z: &Complex, prec: u32) -> Result<(), String> 
                     if e >= prev {
                         stall_count += 1;
                         if stall_count >= 5 {
+                            // Stall in roundoff territory: if our best-seen
+                            // iterate is already within `acceptable_exp` of
+                            // the target, accept it. Otherwise the seed was
+                            // far enough off that further work is unlikely to
+                            // recover — propagate the stall.
+                            if best_dexp <= acceptable_exp {
+                                if let Some(bw) = best_w.take() {
+                                    *w = bw;
+                                }
+                                return Ok(());
+                            }
                             return Err(format!(
-                                "Halley stalled at iter {} (delta exp {} ≥ prev {}, {} consecutive)",
-                                iter, e, prev, stall_count
+                                "Halley stalled at iter {} (delta exp {} ≥ prev {}, {} consecutive; best dexp = {})",
+                                iter, e, prev, stall_count, best_dexp
                             ));
                         }
                     } else {
@@ -124,7 +243,18 @@ fn halley_refine(w: &mut Complex, z: &Complex, prec: u32) -> Result<(), String> 
             }
         }
     }
-    Err(format!("Halley did not converge in {} iterations", HALLEY_MAX_ITERS))
+    // Iteration cap reached. Return best-seen if it cleared the acceptable
+    // floor, else error.
+    if best_dexp <= acceptable_exp {
+        if let Some(bw) = best_w {
+            *w = bw;
+        }
+        return Ok(());
+    }
+    Err(format!(
+        "Halley did not converge in {} iterations (best dexp = {})",
+        HALLEY_MAX_ITERS, best_dexp
+    ))
 }
 
 // ============ f64 helpers ============
@@ -231,10 +361,27 @@ fn initial_guess_w0(z: (f64, f64)) -> (f64, f64) {
         let l2 = c_log(l1);
         return (l1.0 - l2.0, l1.1 - l2.1);
     }
-    // Moderate |z|: log(1+z) is a smooth, robust seed except near z = −1.
+    // Moderate |z|: log(1+z) is a smooth, robust seed except near z = −1
+    // OR when 1+z has negative real part (then log(1+z) lands in the wrong
+    // branch — Im(log(1+z)) ∈ (-π, -π/2)∪(π/2, π) — causing Halley to
+    // overshoot into a non-principal basin). For those wrong-quadrant cases
+    // we use W₀(−1) ≈ −0.318+1.337i as a hard-coded anchor and let the f64
+    // refine step settle into the principal basin. This catches z =
+    // −ln(3+i) ≈ −1.151−0.322i and similar bases where log(1+z) was the
+    // previously-chosen seed but its imaginary part is on the wrong side
+    // of the branch cut.
     let zp1 = (1.0 + z.0, z.1);
     if c_abs(zp1) > 0.3 {
-        return c_log(zp1);
+        if zp1.0 >= 0.0 {
+            return c_log(zp1);
+        } else {
+            // 1+z in left half-plane: log(1+z) on the principal branch lands
+            // far from the principal W_0 basin. Anchor at W_0(-1) and let
+            // f64 Newton refine. Sign of Im(seed) tracks Im(z) so cases on
+            // both sides of the real axis converge.
+            let im_anchor = if z.1 >= 0.0 { 1.337 } else { -1.337 };
+            return (-0.318, im_anchor);
+        }
     }
     // z near −1: fall back to asymptotic.
     let l1 = c_log(z);

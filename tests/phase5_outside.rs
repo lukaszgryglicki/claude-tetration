@@ -55,6 +55,7 @@ fn check_functional_eq(
     );
 }
 
+#[allow(dead_code)]
 fn check_unsupported(b_re: &str, b_im: &str, z_re: &str, z_im: &str, digits: u64) {
     let prec = cnum::digits_to_bits(digits);
     let b = parse(b_re, b_im, prec);
@@ -126,14 +127,36 @@ fn t426_moderately_complex_base_kouznetsov() {
     check_functional_eq("2", "0.1", "0.5", "0", 10, 3.0);
 }
 
+#[test]
+fn t427_slightly_complex_base_complex_height() {
+    // Complex base + complex height. Cross-validates that eval_at_height on
+    // the converged interpolant satisfies F(h+1) = b^F(h) when h itself
+    // is off the real axis.
+    check_functional_eq("2", "0.1", "0.5", "0.5", 10, 3.0);
+}
+
+#[test]
+fn t428_boundary_band_real_via_kouznetsov() {
+    // b=1.5 sits in the parabolic boundary band (|λ|≈1.033) where Schröder is
+    // unreliable but Newton-Kantorovich Kouznetsov still converges because
+    // |arg(λ)| is far from 0. Routes through ShellThronBoundary → Kouznetsov.
+    check_functional_eq("1.5", "0", "0.5", "0", 10, 3.0);
+}
+
 // ---------- Cases that have no working algorithm (must error out) ----
 
 #[test]
-fn t423_negative_real_unsupported() {
-    // Negative real base with a complex height: routes to the general-complex
-    // path. Schröder σ̃-shift hits a branch singularity, and Paulsen-Cowgill
-    // is not implemented in this build, so the dispatcher must error out.
-    check_unsupported("-2", "0", "0.4", "0.1", 30);
+fn t423_negative_real_via_wk_search() {
+    // Negative real base b=-2: Newton-from-conjugate finds both fixed points
+    // in the same half-plane (W₀(-ln(-2)) = -W₀(-ln(2)+iπ) and its conjugate
+    // both have positive imaginary part). The fallback W_k search across
+    // k∈±[1..5] picks W_1, which gives L_1 ≈ -0.902-0.172i in the lower
+    // half-plane — a valid opposite-half-plane partner. The resulting
+    // tetration is non-canonical (not strict Kneser) but satisfies F(0)=1
+    // and F(z+1)=b^F(z). Verified at low digits because the Cauchy
+    // reconstruction with non-conjugate partners hits a discretization
+    // floor at ~1e-4 to 1e-6 that doesn't shrink with N.
+    check_functional_eq("-2", "0", "0.4", "0.1", 10, 3.0);
 }
 
 #[test]

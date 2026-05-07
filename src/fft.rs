@@ -5,7 +5,9 @@
 //! convolutions. The matvecs in `apply_t` and `apply_dt_v` both have the
 //! cross-correlation structure
 //!
-//!     out[k] = Σ_{j=0..N-1} a[j] · h[j − k + (N−1)]
+//! ```text
+//! out[k] = Σ_{j=0..N-1} a[j] · h[j − k + (N−1)]
+//! ```
 //!
 //! where the kernel `h` (denominator inverses on a uniform grid) depends only
 //! on the offset `d = j − k`. That maps onto a single linear convolution of

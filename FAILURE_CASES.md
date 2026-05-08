@@ -83,18 +83,25 @@ guard rejecting `|F̃[mid]| < 0.5·|target_mid|` for non-Schwarz.
 
 ---
 
-## D. Complex bases far from real axis  — **MOSTLY RESOLVED**
+## D. Complex bases far from real axis  — **RESOLVED** (Im(b)≥0; Im(b)<0 covered by Schwarz)
 
 `b = a + bi` with large `|Im(b)|` relative to `|Re(b)|`. The Newton-
-Kouznetsov path now converges quadratically for these once it gets past
-the initial linear-descent phase. Just need ≥3-min timeout at 20 digits.
+Kouznetsov path converges quadratically for Im(b)≥0 cases once past the
+initial linear-descent phase (≥3-min at 20 digits). For Im(b)<0, the
+**Schwarz reflection** `F_b(h) = conj(F_{b̄}(h̄))` reduces to Im(b)>0.
+
+**Fix** (`dispatch.rs`): at entry, when Im(b)<0, dispatch via conjugate
+base and conjugate height, then conjugate the result. This is an exact
+mathematical identity for the canonical Kneser tetration, not an approximation.
 
 | b_re | b_im | h_re | h_im | mode |
 |---|---|---|---|---|
-| 1.2 | 3.5 | 0.5 | 0 | OK (0.2024 + 0.5434i, ~3-4 min at 20 digits) |
+| 1.2 | 3.5 | 0.5 | 0 | OK (0.2024 + 0.5434i, ~3-4 min) |
 | 0.5 | 2 | 0.5 | 0 | OK (0.2498 + 0.5270i) |
-| -1 | 1 | 0.5 | 0 | HANG (Re(b)<0 — see Class B) |
-| 2 | 5 | 0 | 0.5 | TBD |
+| -3.6 | -0.4 | 0.5 | 0 | **WAS HANG** → OK via Schwarz (~165s) |
+| -1.2 | -1.2 | 0.5 | 0 | **WAS HANG** → OK via Schwarz (~548s) |
+| -1 | 1 | 0.5 | 0 | ERR (Re(b)<0, Im(b)=0 → see Class B) |
+| 2 | 5 | 0 | 0.5 | OK |
 
 ---
 

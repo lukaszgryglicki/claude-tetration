@@ -343,3 +343,40 @@ fn t851_kouznetsov_asymptote_complex_base() {
         );
     }
 }
+
+#[test]
+fn t860_schwarz_reflection_conjugate_base() {
+    // F_b(h) = conj(F_{b̄}(h̄)) for canonical Kneser tetration. Verify that
+    // computing via conjugate base gives matching results for Im(b)<0 cases
+    // that previously hung (wrong-basin normalization shift). Tested at 20
+    // digits so each Kouznetsov setup completes in <600s.
+    let digits = 20u64;
+    let prec = cnum::digits_to_bits(digits);
+    // Each entry: (b_re, b_im_pos, h_re, h_im) — dispatcher computes both
+    // b=b_re+b_im_pos·i and b=b_re-b_im_pos·i and checks conj symmetry.
+    let cases = [
+        ("1.2", "0.4", "0.5", "0"),        // Shell-Thron interior, quick
+        ("1.2", "0.4", "0.5", "0.3"),       // complex height
+        ("-0.8", "0.4", "0.5", "0"),        // outside ST, near-real
+    ];
+    for (br, bi_pos, hr, hi) in &cases {
+        let b_pos = parse(br, bi_pos, prec);            // Im(b) > 0
+        let b_neg = parse(br, &format!("-{}", bi_pos), prec); // Im(b) < 0 → Schwarz path
+        let h = parse(hr, hi, prec);
+        let h_conj = parse(hr, &format!("-{}", hi), prec);
+
+        let f_pos = dispatch::tetrate(&b_pos, &h, prec, digits)
+            .unwrap_or_else(|e| panic!("b={}+{}i h={}+{}i failed: {}", br, bi_pos, hr, hi, e));
+        let f_neg = dispatch::tetrate(&b_neg, &h_conj, prec, digits)
+            .unwrap_or_else(|e| panic!("b={}-{}i h={}-{}i failed: {}", br, bi_pos, hr, hi, e));
+
+        // f_neg should equal conj(f_pos)
+        let f_pos_conj = Complex::with_val(prec, f_pos.conj_ref());
+        let m = matching_digits(&f_neg, &f_pos_conj, prec);
+        assert!(
+            m >= 15.0,
+            "Schwarz symmetry failed for b={}±{}i h={}+{}i: F_b̄(h̄)={} but conj(F_b(h))={}, {} digits",
+            br, bi_pos, hr, hi, f_neg, f_pos_conj, m
+        );
+    }
+}

@@ -21,13 +21,14 @@ Newton-Kantorovich Kouznetsov falls into a pathological scalability trap:
 **Fallback** (`dispatch.rs:try_iperturbation_extrapolation`) — when both the
 direct and continuation Kouznetsov solvers refuse for parabolic-cap reasons,
 the dispatcher pivots: it computes the perturbed values
-`F(b+ε_k·i, h)` for `ε_k ∈ {0.1, 0.05, 0.025}` (which take the
+`F(b+ε_k·i, h)` for `ε_k ∈ {0.1, 0.05, 0.025, 0.0125}` (which take the
 OutsideShellThronGeneral / Kouznetsov path successfully because |arg(λ)|
 there is no longer ≈ 0), and combines them in a Romberg-style table:
 
 ```
 R₁(ε) = (4·F(ε/2) − F(ε))/3        cancels ε²  → O(ε⁴)
 R₂(ε) = (16·R₁(ε/2) − R₁(ε))/15    cancels ε⁴  → O(ε⁶)
+R₃(ε) = (64·R₂(ε/2) − R₂(ε))/63    cancels ε⁶  → O(ε⁸)
 ```
 
 For real h, Schwarz reflection makes Re(F(b+iε)) even in ε and Im(F)
@@ -36,21 +37,23 @@ imaginary residue collapses to zero. For complex h the parity breaks, so
 the fallback symmetrises manually:
 `G(ε) := (F(b+iε, h) + conj(F(b+iε, conj(h))))/2`
 which restores ε-evenness at the cost of doubling the per-ε work
-(6 tetrate calls instead of 3).
+(8 tetrate calls instead of 4).
 
-Practical reach is **~6–9 useful digits** regardless of requested precision
-(Richardson cancellation amplifies noise from the perturbed evaluations).
+Practical reach is **~13–15 useful digits** regardless of requested precision
+(R₃ cancels through ε⁶, leaving theoretical residual ε⁸ ≈ 6e-16 at ε=0.0125).
+At b=1.4448 the empirical R₂(a)−R₂(b) leading discrepancy ≈ 3e-9 confirms
+the ε⁶ scale before R₃ extrapolation.
 The CLI prints a stderr warning. For research-grade precision in this band
 a proper Abel/Écalle parabolic-iteration theory (or Kouznetsov's 2009
 Abel-function construction, Math. Comp. §6) is still needed.
 
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
-| 1.4446678610097661337 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25716... + 0i |
-| 1.444667861009766 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25716... + 0i (t710) |
-| 1.4447 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25717... + 0i |
-| 1.4448 | 0 | 0.5 | 0 | OK (~9 digits via iε) | 1.25721... + 0i |
-| 1.4447 | 0 | 0.5 | 0.5 | OK (~9 digits via iε complex-h) | 1.29015 + 0.21136i |
+| 1.4446678610097661337 | 0 | 0.5 | 0 | OK (~13–15 digits via iε R₃) | 1.25715307505530... + 0i |
+| 1.444667861009766 | 0 | 0.5 | 0 | OK (~13–15 digits via iε R₃) | 1.25715... + 0i (t710) |
+| 1.4447 | 0 | 0.5 | 0 | OK (~13–15 digits via iε R₃) | 1.25717... + 0i |
+| 1.4448 | 0 | 0.5 | 0 | OK (~13–15 digits via iε R₃) | 1.25721102559315... + 0i |
+| 1.4447 | 0 | 0.5 | 0.5 | OK (~13–15 digits via iε R₃ complex-h) | 1.29015 + 0.21136i |
 | 1.45 | 0 | 0.5 | 0 | OK | continuation solver succeeds at |λ|=1.003 |
 | 1.46 | 0 | 0.5 | 0 | OK | continuation solver succeeds (1.2638346… at full prec, ~5 min) |
 | 1.43 | 0 | 0.5 | 0 | OK | Schröder works at this distance |

@@ -2969,7 +2969,7 @@ pub fn setup_kouznetsov_continuation(
             );
         }
 
-        let mut initial = if let Some(ref prev) = prev_state {
+        let initial = if let Some(ref prev) = prev_state {
             // Resample previous solution onto the new (potentially wider/denser) grid.
             let old_t_max = Float::with_val(64, &prev.t_max).to_f64();
             let mut init = resample_to_grid(

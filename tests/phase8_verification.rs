@@ -417,3 +417,38 @@ fn t870_parabolic_boundary_iperturbation_fallback() {
         im_f64
     );
 }
+
+#[test]
+#[ignore] // Slow (~3-5 min): continuation solver warm-starts from b=1.81, walks 16 steps to 1.46.
+fn t880_parabolic_boundary_continuation_full_precision() {
+    // b=1.46 sits in the parabolic boundary band but far enough from η that
+    // the continuation solver (warm-start from b=1.81 walking back in steps)
+    // converges at full precision. This locks in the dispatch reordering
+    // that skips direct Kouznetsov for real-base parabolic boundary cases
+    // and tries continuation BEFORE iε-perturbation Richardson.
+    //
+    // Expected: F_{1.46}(0.5) = 1.2638346032868236084… (18+ digits)
+    // Verified against the continuation solver output during development.
+    //
+    // Run with: cargo test --release --test phase8_verification -- --ignored t880
+    let digits = 20u64;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("1.46", "0", prec);
+    let h = parse("0.5", "0", prec);
+    let result = dispatch::tetrate(&b, &h, prec, digits);
+    let value = result.expect("continuation solver should succeed for b=1.46");
+    let expected = parse("1.2638346032868236084", "0", prec);
+    let m = matching_digits(&value, &expected, prec);
+    assert!(
+        m >= 16.0,
+        "expected ≥16 matching digits with continuation result, got {} (value={}, expected={})",
+        m, value, expected
+    );
+    // Im should be ≈0 (real base, real height).
+    let im_f64 = Float::with_val(prec, value.imag()).to_f64();
+    assert!(
+        im_f64.abs() < 1e-15,
+        "expected Im ≈ 0 for real base+height, got {}",
+        im_f64
+    );
+}

@@ -341,15 +341,12 @@ fn try_continuation(
 /// For real b ∈ ℝ the canonical Kneser tetration F_b(h) is real-valued. The
 /// Schwarz-symmetry F̄(b̄+iε̄, h̄) = F(b-iε, h) implies that on a real horizontal
 /// height segment Re(F(b+iε)) is even in ε while Im(F(b+iε)) is odd in ε.
-/// Thus
-///
-///     Re(F(b+iε, h)) = Re(F(b, h)) + a₂·ε² + a₄·ε⁴ + O(ε⁶)
-///     Im(F(b+iε, h)) =                c₁·ε + c₃·ε³ + O(ε⁵)  → 0
+/// Thus `Re(F(b+iε, h)) = Re(F(b, h)) + a₂·ε² + a₄·ε⁴ + O(ε⁶)` and
+/// `Im(F(b+iε, h)) = c₁·ε + c₃·ε³ + O(ε⁵) → 0`.
 ///
 /// Romberg-style table on three evaluations at ε ∈ {0.1, 0.05, 0.025}:
-///
-///     R₁(ε)  = (4·F(ε/2) − F(ε))/3                 cancels ε² → O(ε⁴)
-///     R₂(ε)  = (16·R₁(ε/2) − R₁(ε))/15             cancels ε⁴ → O(ε⁶)
+/// `R₁(ε) = (4·F(ε/2) − F(ε))/3` cancels ε² → O(ε⁴);
+/// `R₂(ε) = (16·R₁(ε/2) − R₁(ε))/15` cancels ε⁴ → O(ε⁶).
 ///
 /// With three function evaluations this yields roughly 9 useful digits in
 /// favourable regimes (typically 6–8 once the perturbed Kouznetsov problem

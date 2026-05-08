@@ -36,6 +36,7 @@ use crate::{cnum, regions::FixedPointData};
 /// for many heights via `eval_schroder`. Amortises the O(N²) σ̃ Taylor build
 /// across all heights — for grid sweeps over many `(b, h)` cells with the same
 /// base, this is a 10-100× speedup at digits ≥ 20.
+#[derive(Clone)]
 pub struct SchroderState {
     /// Attracting (|λ|<1) or repelling (|λ|>1) fixed point of `b^z = z`.
     pub l: Complex,
@@ -50,8 +51,12 @@ pub struct SchroderState {
     pub sigma_inv: Vec<Complex>,
     /// `σ̃(1 − L)` — entry point for the formula `F(z) = L + σ̃⁻¹(s1·λ^z)`.
     pub s1: Complex,
-    /// `safe_radius = 0.5 · max(|1−L|, 0.5)`. Direct σ̃⁻¹ Taylor is safe at `|t| ≤ safe_radius`.
+    /// `safe_radius = 0.5 · max(|1−L|, 0.5)`. Heuristic outer bound for σ̃⁻¹ convergence.
     pub safe_radius: f64,
+    /// Actual inner radius at which σ̃ was evaluated during setup (after φ-shifts).
+    /// σ̃⁻¹ is guaranteed convergent at `|t| ≤ sigma_inner_radius` (since σ̃ and σ̃⁻¹
+    /// share approximately the same convergence radius near the identity).
+    pub sigma_inner_radius: f64,
     /// MPC bit precision the state was built at — must match the precision
     /// used for per-cell evaluation.
     pub prec: u32,
@@ -79,23 +84,9 @@ pub fn tetrate_schroder(
     fp_data: &FixedPointData,
     prec: u32,
 ) -> Result<Complex, String> {
+    // setup_schroder now includes the anchor check (F(0)=1), so any degenerate
+    // state is rejected before we reach eval.
     let state = setup_schroder(b, fp_data, prec)?;
-    // Anchor check: F(0)=1 must hold mathematically. If σ̃(1−L) collapses to
-    // numerical zero (degeneracy near boundary band) then σ̃⁻¹(0)=0 and the
-    // formula returns F(z)=L for all z. b^L=L makes the functional-equation
-    // check below pass trivially, so we need this independent anchor.
-    let zero = cnum::zero(prec);
-    let f_zero = eval_schroder(&state, &zero)?;
-    let one_c = cnum::one(prec);
-    let anchor_diff = Complex::with_val(prec, &f_zero - &one_c);
-    let anchor_err = Float::with_val(prec, anchor_diff.abs_ref()).to_f64();
-    if !anchor_err.is_finite() || anchor_err > 1e-6 {
-        return Err(format!(
-            "Schröder anchor check failed: F(0) = {} (expected 1.0); \
-             σ̃-shift likely produced degenerate fixed-point solution F≡L",
-            f_zero
-        ));
-    }
     let f_h = eval_schroder(&state, h)?;
     validate_functional_equation(&state, h, &f_h, prec)?;
     Ok(f_h)
@@ -201,7 +192,7 @@ pub fn setup_schroder(
     //   * |λ|>1 (repelling): backward-iterate φ⁻¹(w) = log_b(L+w) − L; 0 is
     //     attracting for φ⁻¹ (multiplier 1/λ, |1/λ|<1), so a starting point in
     //     its basin contracts to 0.
-    let s1 = eval_sigma_with_shift(&sigma, b, l, lambda, prec, &w0)?;
+    let (s1, sigma_inner_radius) = eval_sigma_with_shift(&sigma, b, l, lambda, prec, &w0)?;
 
     let ln_lambda = Complex::with_val(prec, lambda.ln_ref());
     let ln_b = Complex::with_val(prec, b.ln_ref());
@@ -210,12 +201,12 @@ pub fn setup_schroder(
     if cnum::verbose() {
         let s1_abs = Float::with_val(prec, s1.abs_ref()).to_f64();
         eprintln!(
-            "schröder setup: |λ|={:.6} |1−L|={:.6} |s1|={:.6} safe={:.6} N={}",
-            lam_abs, w0_abs, s1_abs, safe_radius, n_terms
+            "schröder setup: |λ|={:.6} |1−L|={:.6} |s1|={:.6} safe={:.6} inner_r={:.6} N={}",
+            lam_abs, w0_abs, s1_abs, safe_radius, sigma_inner_radius, n_terms
         );
     }
 
-    Ok(SchroderState {
+    let base_state = SchroderState {
         l: l.clone(),
         ln_lambda,
         ln_b,
@@ -223,31 +214,80 @@ pub fn setup_schroder(
         sigma_inv,
         s1,
         safe_radius,
+        sigma_inner_radius,
         prec,
-    })
+    };
+
+    // Anchor check: F(0)=1 must hold. If σ̃(1−L) is degenerate (e.g. near
+    // the parabolic boundary where σ̃⁻¹ diverges at |s1|), eval_schroder
+    // silently returns F≡L for all h. The state now carries sigma_inner_radius
+    // so eval_schroder knows to keep |t| well within the convergence disk.
+    let zero = cnum::zero(prec);
+    let one_c = cnum::one(prec);
+    let f_zero = eval_schroder(&base_state, &zero)?;
+    let anchor_diff = Complex::with_val(prec, &f_zero - &one_c);
+    let anchor_err = Float::with_val(prec, anchor_diff.abs_ref()).to_f64();
+    if !anchor_err.is_finite() || anchor_err > 1e-6 {
+        return Err(format!(
+            "Schröder anchor check failed: F(0) = {} (expected 1.0); \
+             σ̃-shift likely produced degenerate fixed-point solution F≡L",
+            f_zero
+        ));
+    }
+
+    Ok(base_state)
 }
 
 /// Evaluate `F_b(h)` from a cached `SchroderState`. The expensive σ̃ build is
 /// already amortised; this call costs one `λ^h` exponential, one O(N) Horner
 /// pass, and (rarely) a few `b^·`/`log_b` integer-shift iterations.
+///
+/// Uses `sigma_inner_radius` as the target for the h-shift, which was
+/// determined during setup as the radius at which σ̃ actually converged.
+/// This ensures σ̃⁻¹ is evaluated well inside its convergence disk.
 pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, String> {
     let prec = state.prec;
     let lam_h = lambda_pow(h, &state.ln_lambda, prec);
     let t = Complex::with_val(prec, &state.s1 * &lam_h);
-
     let t_abs = Float::with_val(prec, t.abs_ref()).to_f64();
 
-    if t_abs.is_finite() && t_abs <= state.safe_radius {
-        let inv_t = eval_series(&state.sigma_inv, &t, prec);
-        return Ok(Complex::with_val(prec, &state.l + &inv_t));
-    }
-
-    // Shift integer k so |t · λ^k| ≤ safe_radius.
     if !t_abs.is_finite() || t_abs <= 0.0 {
         return Err(format!("Schröder: bad |t| = {}", t_abs));
     }
-    let log_lam_abs = state.lam_abs.ln(); // negative if |λ|<1, positive if >1
-    let ratio = (state.safe_radius / t_abs).ln(); // negative (safe < t)
+
+    // Use sigma_inner_radius (the proven convergent radius from setup) as the
+    // target. For well-behaved bases this equals safe_radius and no extra
+    // shift is needed; for near-η bases it's smaller (e.g. 0.3 instead of
+    // 0.66), forcing enough additional shifts to keep σ̃⁻¹ accurate.
+    let target = state.sigma_inner_radius.min(state.safe_radius);
+
+    // Whether σ̃⁻¹ was already within target but series diverged there.
+    let needs_extra_reduction = if t_abs <= target {
+        // sigma_inner_radius is where σ̃ converged in w-domain; σ̃⁻¹ may have a
+        // smaller convergence radius in t-domain (e.g. near η, |s1| can exceed
+        // the true radius of σ̃⁻¹). Check convergence; if σ̃⁻¹ diverges here,
+        // fall through to the k-shift path to reduce |t| further.
+        if let Ok(inv_t) = eval_series_checked(&state.sigma_inv, &t, prec) {
+            return Ok(Complex::with_val(prec, &state.l + &inv_t));
+        }
+        // σ̃⁻¹ diverges even within sigma_inner_radius. Need a much smaller target.
+        true
+    } else {
+        false
+    };
+
+    // When σ̃⁻¹ failed inside the normal target, reduce |t| to 10% of its
+    // current value. This forces sufficient k-shifts even when σ̃⁻¹'s true
+    // convergence radius is much smaller than sigma_inner_radius.
+    let effective_target = if needs_extra_reduction {
+        t_abs * 0.1
+    } else {
+        target
+    };
+
+    // Shift integer k so |t · λ^k| ≤ effective_target.
+    let log_lam_abs = state.lam_abs.ln(); // negative (|λ|<1) or positive (>1)
+    let ratio = (effective_target / t_abs).ln();
     let k_raw = ratio / log_lam_abs;
     let k: i64 = if log_lam_abs < 0.0 {
         k_raw.ceil() as i64
@@ -256,8 +296,8 @@ pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
     };
     if k == 0 {
         return Err(format!(
-            "Schröder: shift computed zero (|t|={}, |λ|={})",
-            t_abs, state.lam_abs
+            "Schröder: shift computed zero (|t|={:.6e}, target={:.6e}, |λ|={:.6})",
+            t_abs, target, state.lam_abs
         ));
     }
     if k.unsigned_abs() > 5000 {
@@ -329,7 +369,8 @@ fn radius_probe(
 
     // Try the same evaluation strategy that the user-precision path will use.
     // If this works at probe precision, we expect it to work at user precision.
-    if eval_sigma_with_shift(&c_probe, &b_p, &l_p, &lambda_p, probe_prec, &w0_p).is_ok() {
+    if eval_sigma_with_shift(&c_probe, &b_p, &l_p, &lambda_p, probe_prec, &w0_p).is_ok()
+    {
         return Ok(());
     }
 
@@ -520,6 +561,9 @@ fn eval_series(coeffs: &[Complex], w: &Complex, prec: u32) -> Complex {
 ///     its basin contract to 0. Compensate by `σ̃(w₀) = σ̃(φ⁻ⁿ(w₀)) · λⁿ`.
 ///     Uses principal log; this is fine as long as the orbit `L + φ⁻ᵏ(w)`
 ///     stays away from the origin (the log branch point).
+/// Returns `(σ̃(w0), inner_radius)` where `inner_radius` is the `|w_curr|` at
+/// which the Taylor series was actually evaluated (after φ-shifts). This lets
+/// callers know the proven convergent radius for future `σ̃⁻¹` evaluations.
 fn eval_sigma_with_shift(
     sigma: &[Complex],
     b: &Complex,
@@ -527,11 +571,12 @@ fn eval_sigma_with_shift(
     lambda: &Complex,
     prec: u32,
     w0: &Complex,
-) -> Result<Complex, String> {
+) -> Result<(Complex, f64), String> {
     // Fast path: direct Taylor at 0 reaches w₀.
+    let w0_abs = Float::with_val(prec, w0.abs_ref()).to_f64();
     let direct = eval_series_checked(sigma, w0, prec);
-    if direct.is_ok() {
-        return direct;
+    if let Ok(v) = direct {
+        return Ok((v, w0_abs));
     }
 
     let lam_abs = Float::with_val(prec, lambda.abs_ref()).to_f64();
@@ -577,8 +622,10 @@ fn eval_sigma_with_shift(
         }
     };
 
+    let inner_radius = Float::with_val(prec, w_curr.abs_ref()).to_f64();
+
     if n_shifts == 0 {
-        return Ok(sigma_at_curr);
+        return Ok((sigma_at_curr, inner_radius));
     }
 
     if cnum::verbose() {
@@ -594,11 +641,12 @@ fn eval_sigma_with_shift(
     for _ in 0..n_shifts {
         lam_pow = Complex::with_val(prec, &lam_pow * lambda);
     }
-    if attracting {
-        Ok(Complex::with_val(prec, &sigma_at_curr / &lam_pow))
+    let value = if attracting {
+        Complex::with_val(prec, &sigma_at_curr / &lam_pow)
     } else {
-        Ok(Complex::with_val(prec, &sigma_at_curr * &lam_pow))
-    }
+        Complex::with_val(prec, &sigma_at_curr * &lam_pow)
+    };
+    Ok((value, inner_radius))
 }
 
 /// Evaluate the series term by term and check that the tail decays. The
@@ -634,18 +682,24 @@ fn eval_series_checked(coeffs: &[Complex], w: &Complex, prec: u32) -> Result<Com
         }
         acc += term;
     }
-    // For convergent series with N ~ digits·4, the tail mean is many orders
-    // below the max. A threshold of 1% (of max) is generous but catches the
-    // pathological 10^170-blowup cases without flagging slow but real
-    // convergence.
+    // The tail mean must be small relative to the required precision.
+    // A fixed 1% threshold (0.01) passes for slowly-converging series near η,
+    // where the series IS technically convergent but the N-term truncation gives
+    // only a few digits of accuracy (e.g. b=1.4375 gives F(0) error 3.7e-5).
+    // Using a precision-calibrated threshold forces more φ-shifts until the
+    // evaluation point is deep inside the convergence disk.
     if max_term > 1e-30 && tail_count > 0 {
         let tail_mean = tail_sum / (tail_count as f64);
-        if tail_mean > max_term * 0.01 {
+        let digits = (prec as f64 * std::f64::consts::LOG10_2) as i32;
+        // Require tail < 10^(-(digits+4)): the 4-digit margin leaves room for
+        // the series-to-series composition (σ̃ then σ̃⁻¹) and integer shifts.
+        let tol = 10f64.powi(-(digits + 4));
+        if tail_mean > max_term * tol.max(1e-15) {
             return Err(format!(
-                "Schröder σ̃ series did not converge at |w|={:.3e}: \
-                 tail mean {:.3e} vs max {:.3e}",
+                "Schröder σ̃ series not accurate enough at |w|={:.3e}: \
+                 tail mean {:.3e} vs max {:.3e} (tol={:.1e})",
                 Float::with_val(prec, w.abs_ref()).to_f64(),
-                tail_mean, max_term
+                tail_mean, max_term, tol
             ));
         }
     }

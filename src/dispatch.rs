@@ -85,7 +85,25 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
             unreachable!()
         }
         regions::Region::ShellThronInterior(d) => {
-            schroder::tetrate_schroder(b, h, d, prec)
+            // Schröder is the primary method for |λ| < 0.95. For bases very
+            // close to η (typically b ≳ 1.437 for real bases), the σ̃⁻¹ series
+            // can diverge at |s1| even though |s1| < safe_radius (the heuristic
+            // safe_radius estimate is too large near the parabolic boundary). In
+            // those cases the anchor check in setup_schroder catches the failure.
+            // Fall back to Kouznetsov, which works for all real b > 1.
+            match schroder::tetrate_schroder(b, h, d, prec) {
+                Ok(v) => return Ok(v),
+                Err(e) => dprint(&format!(
+                    "Schröder failed in Shell-Thron interior ({}); falling back to Kouznetsov",
+                    e
+                )),
+            }
+            kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits).map_err(|kouz_err| {
+                format!(
+                    "Schröder failed and Kouznetsov fallback also failed: {}",
+                    kouz_err
+                )
+            })
         }
         regions::Region::ShellThronBoundary(d) => {
             // The boundary band 0.95 ≤ |λ| ≤ 1.05 is the parabolic-fixed-point

@@ -546,21 +546,6 @@ fn reverse_series(c: &[Complex], m: usize, prec: u32) -> Vec<Complex> {
     d
 }
 
-/// Evaluate `Σ_{i=1}^{coeffs.len()-1} coeffs[i] · w^i` via Horner. The constant
-/// term (`coeffs[0]`) is treated as zero (both σ̃ and σ̃⁻¹ vanish at 0).
-fn eval_series(coeffs: &[Complex], w: &Complex, prec: u32) -> Complex {
-    if coeffs.len() < 2 {
-        return cnum::zero(prec);
-    }
-    let high = coeffs.len() - 1;
-    let mut acc = coeffs[high].clone();
-    for i in (1..high).rev() {
-        acc = Complex::with_val(prec, &acc * w);
-        acc = Complex::with_val(prec, &acc + &coeffs[i]);
-    }
-    Complex::with_val(prec, &acc * w)
-}
-
 /// Evaluate `σ̃(w₀)` from σ̃ Taylor coefficients, optionally using the
 /// functional-equation shift `σ̃(φ(w)) = λ·σ̃(w)` (`φ(w) = b^(L+w) − L`) when
 /// the direct Taylor at 0 doesn't converge at w₀.

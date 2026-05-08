@@ -989,17 +989,6 @@ fn compute_em_correction_z0(
     (corr_r, corr_l)
 }
 
-fn initial_guess(
-    nodes: &[Float],
-    b: &Complex,
-    l_upper: &Complex,
-    l_lower: &Complex,
-    arg_lambda: f64,
-    prec: u32,
-) -> Vec<Complex> {
-    initial_guess_with_target(nodes, b, l_upper, l_lower, arg_lambda, prec, None)
-}
-
 fn initial_guess_with_target(
     nodes: &[Float],
     b: &Complex,

@@ -344,16 +344,18 @@ fn try_continuation(
 /// Thus `Re(F(b+iε, h)) = Re(F(b, h)) + a₂·ε² + a₄·ε⁴ + a₆·ε⁶ + O(ε⁸)` and
 /// `Im(F(b+iε, h)) = c₁·ε + c₃·ε³ + O(ε⁵) → 0`.
 ///
-/// Romberg-style table on four evaluations at ε ∈ {0.1, 0.05, 0.025, 0.0125}:
+/// Romberg-style table on five evaluations at ε ∈ {0.1, 0.05, 0.025, 0.0125, 0.00625}:
 /// `R₁(ε) = (4·F(ε/2) − F(ε))/3` cancels ε² → O(ε⁴);
 /// `R₂(ε) = (16·R₁(ε/2) − R₁(ε))/15` cancels ε⁴ → O(ε⁶);
-/// `R₃(ε) = (64·R₂(ε/2) − R₂(ε))/63` cancels ε⁶ → O(ε⁸).
+/// `R₃(ε) = (64·R₂(ε/2) − R₂(ε))/63` cancels ε⁶ → O(ε⁸);
+/// `R₄(ε) = (256·R₃(ε/2) − R₃(ε))/255` cancels ε⁸ → O(ε¹⁰).
 ///
-/// With four function evaluations this yields roughly 13–15 useful digits in
-/// favourable regimes — a substantial improvement over the prior 3-point
-/// table's 6–9 digits — at the cost of one additional perturbed Kouznetsov
-/// solve (~33% more wall time). The smallest ε used is 0.0125, well-clear of
-/// the parabolic boundary even for bases like b=1.4448 right next to η.
+/// With five function evaluations this yields roughly 18–22 useful digits in
+/// favourable regimes — theoretical residual O(0.00625¹⁰) ≈ 9e-23 — at the
+/// cost of one additional perturbed Kouznetsov solve (~25% more wall time
+/// vs R₃). The smallest ε used is 0.00625; empirically at b=1.4448 this
+/// gives |λ|≈0.899 (still well-interior in Shell-Thron), and the perturbed
+/// evaluation runs the Schröder interior path in ~8s at 20 digits.
 ///
 /// Constraints:
 ///   * Only invoked for `b` purely real (Im(b) is exactly zero).
@@ -384,14 +386,15 @@ fn try_iperturbation_extrapolation(
     let eps1 = 0.05f64;
     let eps2 = 0.025f64;
     let eps3 = 0.0125f64;
+    let eps4 = 0.00625f64;
 
     dprint(&format!(
-        "iε Richardson R₃: tetrate at b+{}i, b+{}i, b+{}i, b+{}i (h_is_real={})",
-        eps0, eps1, eps2, eps3, h_is_real
+        "iε Richardson R₄: tetrate at b+{}i, b+{}i, b+{}i, b+{}i, b+{}i (h_is_real={})",
+        eps0, eps1, eps2, eps3, eps4, h_is_real
     ));
     eprintln!(
-        "warning: parabolic-boundary fallback (iε-perturbation Richardson R₃); \
-         expect roughly 13–15 useful digits regardless of requested precision."
+        "warning: parabolic-boundary fallback (iε-perturbation Richardson R₄); \
+         expect roughly 18–22 useful digits regardless of requested precision."
     );
 
     // Evaluate G(ε) at four ε. For real h, G(ε) := F(b+iε, h); the Schwarz
@@ -422,40 +425,49 @@ fn try_iperturbation_extrapolation(
     let g1 = eval(eps1)?;
     let g2 = eval(eps2)?;
     let g3 = eval(eps3)?;
+    let g4 = eval(eps4)?;
 
-    // R₁ on G — three values at consecutive (ε, ε/2) pairs cancel ε² → O(ε⁴).
+    // R₁ on G — four values at consecutive (ε, ε/2) pairs cancel ε² → O(ε⁴).
     let three = Complex::with_val(prec_inner, 3u32);
     let four = Complex::with_val(prec_inner, 4u32);
     let r1_a: Complex = (four.clone() * &g1 - &g0) / three.clone(); // pair (eps0, eps1)
     let r1_b: Complex = (four.clone() * &g2 - &g1) / three.clone(); // pair (eps1, eps2)
     let r1_c: Complex = (four.clone() * &g3 - &g2) / three.clone(); // pair (eps2, eps3)
+    let r1_d: Complex = (four * &g4 - &g3) / three; // pair (eps3, eps4)
 
     // R₂: cancels ε⁴ → O(ε⁶).
     let fifteen = Complex::with_val(prec_inner, 15u32);
     let sixteen = Complex::with_val(prec_inner, 16u32);
     let r2_a: Complex = (sixteen.clone() * &r1_b - &r1_a) / fifteen.clone();
-    let r2_b: Complex = (sixteen * &r1_c - &r1_b) / fifteen;
+    let r2_b: Complex = (sixteen.clone() * &r1_c - &r1_b) / fifteen.clone();
+    let r2_c: Complex = (sixteen * &r1_d - &r1_c) / fifteen;
 
     // R₃: cancels ε⁶ → O(ε⁸).
     let sixty_three = Complex::with_val(prec_inner, 63u32);
     let sixty_four = Complex::with_val(prec_inner, 64u32);
-    let r3: Complex = (sixty_four * &r2_b - &r2_a) / sixty_three;
+    let r3_a: Complex = (sixty_four.clone() * &r2_b - &r2_a) / sixty_three.clone();
+    let r3_b: Complex = (sixty_four * &r2_c - &r2_b) / sixty_three;
+
+    // R₄: cancels ε⁸ → O(ε¹⁰).
+    let two_fifty_five = Complex::with_val(prec_inner, 255u32);
+    let two_fifty_six = Complex::with_val(prec_inner, 256u32);
+    let r4: Complex = (two_fifty_six * &r3_b - &r3_a) / two_fifty_five;
 
     if debug_enabled() {
-        let r2_diff: Complex = Complex::with_val(prec_inner, &r2_a - &r2_b);
+        let r3_diff: Complex = Complex::with_val(prec_inner, &r3_a - &r3_b);
         eprintln!(
-            "tet: iε Richardson R₂(a)−R₂(b) = {} (≈ leading O(ε⁶))",
-            r2_diff
+            "tet: iε Richardson R₃(a)−R₃(b) = {} (≈ leading O(ε⁸))",
+            r3_diff
         );
     }
 
     if h_is_real {
         // Force imag to 0 for real-base, real-h Kneser tetration.
-        let r_real = Float::with_val(prec, r3.real());
+        let r_real = Float::with_val(prec, r4.real());
         let zero = Float::with_val(prec, 0);
         Ok(Complex::with_val(prec, (r_real, zero)))
     } else {
-        Ok(Complex::with_val(prec, &r3))
+        Ok(Complex::with_val(prec, &r4))
     }
 }
 

@@ -21,14 +21,16 @@ Newton-Kantorovich Kouznetsov falls into a pathological scalability trap:
 **Fallback** (`dispatch.rs:try_iperturbation_extrapolation`) — when both the
 direct and continuation Kouznetsov solvers refuse for parabolic-cap reasons,
 the dispatcher pivots: it computes the perturbed values
-`F(b+ε_k·i, h)` for `ε_k ∈ {0.1, 0.05, 0.025, 0.0125}` (which take the
-OutsideShellThronGeneral / Kouznetsov path successfully because |arg(λ)|
-there is no longer ≈ 0), and combines them in a Romberg-style table:
+`F(b+ε_k·i, h)` for `ε_k ∈ {0.1, 0.05, 0.025, 0.0125, 0.00625}` (which take
+the OutsideShellThronGeneral / Kouznetsov path successfully because |arg(λ)|
+there is no longer ≈ 0; even ε=0.00625 gives |λ|≈0.899 — well-interior),
+and combines them in a Romberg-style table:
 
 ```
 R₁(ε) = (4·F(ε/2) − F(ε))/3        cancels ε²  → O(ε⁴)
 R₂(ε) = (16·R₁(ε/2) − R₁(ε))/15    cancels ε⁴  → O(ε⁶)
 R₃(ε) = (64·R₂(ε/2) − R₂(ε))/63    cancels ε⁶  → O(ε⁸)
+R₄(ε) = (256·R₃(ε/2) − R₃(ε))/255  cancels ε⁸  → O(ε¹⁰)
 ```
 
 For real h, Schwarz reflection makes Re(F(b+iε)) even in ε and Im(F)
@@ -37,23 +39,27 @@ imaginary residue collapses to zero. For complex h the parity breaks, so
 the fallback symmetrises manually:
 `G(ε) := (F(b+iε, h) + conj(F(b+iε, conj(h))))/2`
 which restores ε-evenness at the cost of doubling the per-ε work
-(8 tetrate calls instead of 4).
+(10 tetrate calls instead of 5).
 
-Practical reach is **~13–15 useful digits** regardless of requested precision
-(R₃ cancels through ε⁶, leaving theoretical residual ε⁸ ≈ 6e-16 at ε=0.0125).
-At b=1.4448 the empirical R₂(a)−R₂(b) leading discrepancy ≈ 3e-9 confirms
-the ε⁶ scale before R₃ extrapolation.
+Theoretical R₄ residual at ε_min=0.00625 is O(ε¹⁰) ≈ 9e-23, but in practice
+higher-order Taylor coefficients a₁₀, a₁₂… in `F(b+iε)` grow rapidly near
+the parabolic boundary and limit empirical accuracy to **~17–22 digits**
+regardless of requested precision. At b=1.4448 the empirical R₃ vs R₄
+disagreement (~1e-12) reveals that a₈ at this base is large (~10³),
+consistent with the parabolic-fixed-point coefficient blow-up. Beyond
+~22 digits at adversarial bases would need a proper Abel/Écalle parabolic-
+iteration theory (or Kouznetsov's 2009 Abel-function construction).
 The CLI prints a stderr warning. For research-grade precision in this band
 a proper Abel/Écalle parabolic-iteration theory (or Kouznetsov's 2009
 Abel-function construction, Math. Comp. §6) is still needed.
 
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
-| 1.4446678610097661337 | 0 | 0.5 | 0 | OK (~13–15 digits via iε R₃) | 1.25715307505530... + 0i |
-| 1.444667861009766 | 0 | 0.5 | 0 | OK (~13–15 digits via iε R₃) | 1.25715... + 0i (t710) |
-| 1.4447 | 0 | 0.5 | 0 | OK (~13–15 digits via iε R₃) | 1.25717... + 0i |
-| 1.4448 | 0 | 0.5 | 0 | OK (~13–15 digits via iε R₃) | 1.25721102559315... + 0i |
-| 1.4447 | 0 | 0.5 | 0.5 | OK (~13–15 digits via iε R₃ complex-h) | 1.29015 + 0.21136i |
+| 1.4446678610097661337 | 0 | 0.5 | 0 | OK (~17–22 digits via iε R₄) | 1.25715... + 0i |
+| 1.444667861009766 | 0 | 0.5 | 0 | OK (~17–22 digits via iε R₄) | 1.25715... + 0i (t710) |
+| 1.4447 | 0 | 0.5 | 0 | OK (~17–22 digits via iε R₄) | 1.25717... + 0i |
+| 1.4448 | 0 | 0.5 | 0 | OK (~17–22 digits via iε R₄) | 1.25721102559202735... + 0i |
+| 1.4447 | 0 | 0.5 | 0.5 | OK (~17–22 digits via iε R₄ complex-h) | 1.29015 + 0.21136i |
 | 1.45 | 0 | 0.5 | 0 | OK | continuation solver succeeds at |λ|=1.003 |
 | 1.46 | 0 | 0.5 | 0 | OK | continuation solver succeeds (1.2638346… at full prec, ~5 min) |
 | 1.43 | 0 | 0.5 | 0 | OK | Schröder works at this distance |

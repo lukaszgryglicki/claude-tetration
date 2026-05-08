@@ -214,7 +214,7 @@ fn t071_schroder_continuity_near_one() {
     let (re, _im) = tet("30", "1.4142135623730950488", "0", "0.9999999999", "0");
     let r: f64 = re.parse().unwrap();
     assert!(
-        (r - 1.4142135623730950488).abs() < 1e-8,
+        (r - std::f64::consts::SQRT_2).abs() < 1e-8,
         "F_{{√2}}(1−1e-10) ≈ {}",
         re
     );

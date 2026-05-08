@@ -379,8 +379,12 @@ fn initial_guess_w0(z: (f64, f64)) -> (f64, f64) {
             // far from the principal W_0 basin. Anchor at W_0(-1) and let
             // f64 Newton refine. Sign of Im(seed) tracks Im(z) so cases on
             // both sides of the real axis converge.
+            // (clippy::approx_constant flags -0.318 as ≈ -1/π — false positive;
+            // the value is Re(W_0(-1)) ≈ -0.31813.)
+            #[allow(clippy::approx_constant)]
+            let re_anchor: f64 = -0.318;
             let im_anchor = if z.1 >= 0.0 { 1.337 } else { -1.337 };
-            return (-0.318, im_anchor);
+            return (re_anchor, im_anchor);
         }
     }
     // z near −1: fall back to asymptotic.

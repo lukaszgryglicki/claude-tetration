@@ -108,12 +108,19 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
         regions::Region::ShellThronBoundary(d) => {
             // The boundary band 0.95 ≤ |λ| ≤ 1.05 is the parabolic-fixed-point
             // regime. Schröder regular tetration converges very slowly here
-            // (geometric rate `|λ|`, which is near 1) and typically bails. But
-            // for bases inside this band whose argλ is far enough from 0 — and
-            // whose fixed-point pair sits in opposite half-planes — Newton-
-            // Kantorovich Cauchy iteration still converges, just with a taller
-            // contour. Try Schröder, then Kouznetsov; only error if both fail.
-            // For truly parabolic |λ|=1 the band needs Paulsen-Cowgill.
+            // (geometric rate `|λ|`, which is near 1) and typically bails.
+            //
+            // For real positive bases (b > η, |λ| just above 1) on this band,
+            // |arg(λ)| is small so direct Kouznetsov has trouble converging on
+            // a feasible-sized grid (see kouznetsov.rs for the parabolic-cap
+            // logic). The continuation solver — which warm-starts from a base
+            // farther from the boundary and walks back — is much more reliable
+            // there, so we try it FIRST and only fall through to direct
+            // Kouznetsov if continuation also fails. iε-perturbation Richardson
+            // is the final fallback (real bases only, ~9 digits).
+            //
+            // For complex bases on the boundary, |arg(λ)| can already be large,
+            // so direct Kouznetsov often works; we keep the original order.
             match schroder::tetrate_schroder(b, h, d, prec) {
                 Ok(v) => {
                     dprint("Schröder succeeded at boundary band");
@@ -121,48 +128,56 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
                 }
                 Err(e) => dprint(&format!("Schröder failed at boundary band: {}", e)),
             }
-            dprint("Schröder unavailable in boundary band; trying Newton-Kouznetsov");
+            let is_real_base =
+                b.imag().is_zero() && !b.real().is_sign_negative();
+            if is_real_base {
+                // Direct Kouznetsov is essentially hopeless for real bases on
+                // the parabolic boundary (|arg λ| → 0 forces t_max → ∞). We
+                // skip it entirely and try, in order:
+                //   1. Continuation solver (warm-starts from a non-parabolic
+                //      base) — fast for moderate |λ| above 1.
+                //   2. iε-perturbation Richardson — last resort, ~9 digits.
+                dprint("real-base parabolic boundary: trying continuation solver");
+                let cont_res = try_continuation(b, h, d, prec, digits);
+                if let Ok(v) = cont_res {
+                    return Ok(v);
+                }
+                let cont_err = cont_res.err().unwrap_or_default();
+                dprint(&format!(
+                    "continuation failed: {}; trying iε-perturbation Richardson",
+                    cont_err
+                ));
+                if let Ok(v) = try_iperturbation_extrapolation(b, h, prec, digits) {
+                    return Ok(v);
+                }
+                return Err(unsupported_msg(
+                    "Shell-Thron parabolic boundary band (|λ| ≈ 1)",
+                    &format!(
+                        "Schröder too slow; continuation: {}; \
+                         iε-perturbation Richardson also failed",
+                        cont_err
+                    ),
+                ));
+            }
+            dprint("complex-base boundary band: trying Newton-Kouznetsov");
             match kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits) {
                 Ok(v) => Ok(v),
                 Err(why) => {
-                    // If the direct solver was blocked by the parabolic-boundary
-                    // n_nodes cap, try the continuation-based solver which
-                    // warm-starts from a farther base and allows larger grids.
                     if why.contains("parabolic boundary") || why.contains("degenerate contour") {
-                        dprint("direct Kouznetsov hit parabolic cap; trying continuation solver");
-                        match try_continuation(b, h, d, prec, digits) {
-                            Ok(v) => return Ok(v),
-                            Err(cont_err) => {
-                                dprint(&format!(
-                                    "continuation also failed: {}; trying iε-perturbation Richardson",
-                                    cont_err
-                                ));
-                                if let Ok(v) =
-                                    try_iperturbation_extrapolation(b, h, prec, digits)
-                                {
-                                    return Ok(v);
-                                }
-                                Err(unsupported_msg(
-                                    "Shell-Thron parabolic boundary band (|λ| ≈ 1)",
-                                    &format!(
-                                        "Schröder too slow; Kouznetsov direct: {}; \
-                                         continuation: {}; iε-perturbation also failed",
-                                        why, cont_err
-                                    ),
-                                ))
-                            }
+                        dprint("direct Kouznetsov hit parabolic cap; trying continuation");
+                        if let Ok(v) = try_continuation(b, h, d, prec, digits) {
+                            return Ok(v);
                         }
-                    } else {
-                        Err(unsupported_msg(
-                            "Shell-Thron parabolic boundary band (|λ| ≈ 1)",
-                            &format!(
-                                "Schröder regular tetration converges too slowly here, \
-                                 and Newton-Kantorovich Kouznetsov Cauchy iteration \
-                                 failed: {}",
-                                why
-                            ),
-                        ))
                     }
+                    Err(unsupported_msg(
+                        "Shell-Thron parabolic boundary band (|λ| ≈ 1)",
+                        &format!(
+                            "Schröder regular tetration converges too slowly here, \
+                             and Newton-Kantorovich Kouznetsov Cauchy iteration \
+                             failed: {}",
+                            why
+                        ),
+                    ))
                 }
             }
         }
@@ -183,30 +198,46 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
             match kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits) {
                 Ok(v) => Ok(v),
                 Err(why) => {
-                    if why.contains("parabolic boundary") || why.contains("degenerate contour") {
-                        dprint("direct Kouznetsov hit parabolic cap; trying continuation solver");
-                        match try_continuation(b, h, d, prec, digits) {
-                            Ok(v) => return Ok(v),
-                            Err(cont_err) => {
-                                dprint(&format!(
-                                    "continuation also failed: {}; trying iε-perturbation Richardson",
-                                    cont_err
-                                ));
-                                if let Ok(v) =
-                                    try_iperturbation_extrapolation(b, h, prec, digits)
-                                {
-                                    return Ok(v);
-                                }
-                                Err(unsupported_msg(
-                                    "real base > e^(1/e)",
-                                    &format!(
-                                        "Schröder not applicable; Kouznetsov direct: {}; \
-                                         continuation: {}; iε-perturbation also failed",
-                                        why, cont_err
-                                    ),
-                                ))
+                    // For real positive bases on or near the parabolic boundary,
+                    // try continuation + iε-perturbation Richardson on any
+                    // Kouznetsov failure (the classification can put a base in
+                    // OutsideShellThronRealPositive but with |λ| only slightly
+                    // > 1.05, where Kouznetsov still struggles).
+                    let is_real_base = b.imag().is_zero();
+                    let near_boundary = d.lambda_abs < 1.10;
+                    let parabolic_signal = why.contains("parabolic boundary")
+                        || why.contains("degenerate contour")
+                        || (is_real_base
+                            && near_boundary
+                            && (why.contains("did not converge")
+                                || why.contains("residual")
+                                || why.contains("n_nodes")));
+                    if parabolic_signal {
+                        dprint("Kouznetsov failed near parabolic boundary; trying continuation solver");
+                        let cont_outcome = try_continuation(b, h, d, prec, digits);
+                        if let Ok(v) = cont_outcome {
+                            return Ok(v);
+                        }
+                        let cont_err = cont_outcome.err().unwrap_or_default();
+                        if is_real_base {
+                            dprint(&format!(
+                                "continuation also failed: {}; trying iε-perturbation Richardson",
+                                cont_err
+                            ));
+                            if let Ok(v) =
+                                try_iperturbation_extrapolation(b, h, prec, digits)
+                            {
+                                return Ok(v);
                             }
                         }
+                        Err(unsupported_msg(
+                            "real base > e^(1/e)",
+                            &format!(
+                                "Schröder not applicable; Kouznetsov direct: {}; \
+                                 continuation: {}; iε-perturbation also failed",
+                                why, cont_err
+                            ),
+                        ))
                     } else {
                         Err(unsupported_msg(
                             "real base > e^(1/e)",
@@ -300,30 +331,35 @@ fn try_continuation(
     kouznetsov::eval_kouznetsov(&state, b, h)
 }
 
-/// Quadratic-Richardson fallback for real bases trapped in the parabolic band.
+/// Three-point Richardson fallback for real bases trapped in the parabolic band.
 ///
 /// When direct Kouznetsov and continuation both fail because |arg(λ)| → 0
 /// (i.e. b is real and just above η = e^(1/e)), we leave the real axis and
-/// evaluate at b + iε for two ε values, then Richardson-extrapolate to ε=0.
+/// evaluate at b + iε for several ε values, then Richardson-extrapolate to
+/// ε = 0.
 ///
-/// For real b ∈ ℝ the canonical tetration F_b(h) is real-valued. The
+/// For real b ∈ ℝ the canonical Kneser tetration F_b(h) is real-valued. The
 /// Schwarz-symmetry F̄(b̄+iε̄, h̄) = F(b-iε, h) implies that on a real horizontal
 /// height segment Re(F(b+iε)) is even in ε while Im(F(b+iε)) is odd in ε.
 /// Thus
 ///
-///     Re(F(b+iε, h)) = Re(F(b, h)) + a·ε² + O(ε⁴)
-///     Im(F(b+iε, h)) =                 c·ε + O(ε³)  → 0
+///     Re(F(b+iε, h)) = Re(F(b, h)) + a₂·ε² + a₄·ε⁴ + O(ε⁶)
+///     Im(F(b+iε, h)) =                c₁·ε + c₃·ε³ + O(ε⁵)  → 0
 ///
-/// One quadratic-Richardson step on the real part cancels ε² and yields
-/// O(ε⁴) accuracy from two off-axis evaluations. Practical reach is roughly
-/// 6–8 useful digits — far short of the requested precision when digits
-/// is large, but vastly better than erroring out. We warn on stderr.
+/// Romberg-style table on three evaluations at ε ∈ {0.1, 0.05, 0.025}:
+///
+///     R₁(ε)  = (4·F(ε/2) − F(ε))/3                 cancels ε² → O(ε⁴)
+///     R₂(ε)  = (16·R₁(ε/2) − R₁(ε))/15             cancels ε⁴ → O(ε⁶)
+///
+/// With three function evaluations this yields roughly 9 useful digits in
+/// favourable regimes (typically 6–8 once the perturbed Kouznetsov problem
+/// itself starts to feel the parabolic boundary).
 ///
 /// Constraints:
-///   * Only invoked for `b` that is purely real (Im(b) is exactly zero).
-///   * Calls `tetrate` recursively at the perturbed bases, so it must NOT
-///     trigger a re-entrant iε path — and it doesn't: b±iε is no longer real,
-///     so the dispatcher routes through OutsideShellThronGeneral / Kouznetsov.
+///   * Only invoked for `b` purely real (Im(b) is exactly zero).
+///   * Calls `tetrate` recursively at the perturbed bases. The dispatcher
+///     routes b+iε as OutsideShellThronGeneral → Kouznetsov, so this does
+///     not re-enter the iε fallback.
 fn try_iperturbation_extrapolation(
     b: &Complex,
     h: &Complex,
@@ -334,57 +370,85 @@ fn try_iperturbation_extrapolation(
         return Err("iε-perturbation only applies for purely real bases".to_string());
     }
     let b_re = b.real().clone();
-    if h.imag().is_zero() {
-        // We aim to deliver a real result; that's only well-defined when the
-        // height is real too. (For complex h the algorithm still computes
-        // Schwarz-conjugate samples, but we don't claim a clean result.)
-    }
-    // We solve at slightly higher working precision to absorb the cancellation
-    // that quadratic Richardson induces.
+    let h_is_real = h.imag().is_zero();
+
     let prec_inner = prec.saturating_add(64);
     let mk_pert = |eps: f64| -> Complex {
         let im = Float::with_val(prec_inner, eps);
         Complex::with_val(prec_inner, (b_re.clone(), im))
     };
     let h_inner = Complex::with_val(prec_inner, h);
+    let h_inner_conj = Complex::with_val(prec_inner, h.conj_ref());
 
-    let eps1 = 0.1f64;
-    let eps2 = 0.05f64;
-    let b1 = mk_pert(eps1);
-    let b2 = mk_pert(eps2);
+    let eps_coarse = 0.1f64;
+    let eps_mid = 0.05f64;
+    let eps_fine = 0.025f64;
 
     dprint(&format!(
-        "iε-perturbation Richardson: tetrate at b+{}i and b+{}i",
-        eps1, eps2
+        "iε Richardson: tetrate at b+{}i, b+{}i, b+{}i (h_is_real={})",
+        eps_coarse, eps_mid, eps_fine, h_is_real
     ));
     eprintln!(
         "warning: parabolic-boundary fallback (iε-perturbation Richardson); \
-         expect ~6 useful digits regardless of requested precision."
+         expect roughly 6–9 useful digits regardless of requested precision."
     );
 
-    let f1 = tetrate(&b1, &h_inner, prec_inner, digits)
-        .map_err(|e| format!("iε-perturbation: tetrate(b+{}i) failed: {}", eps1, e))?;
-    let f2 = tetrate(&b2, &h_inner, prec_inner, digits)
-        .map_err(|e| format!("iε-perturbation: tetrate(b+{}i) failed: {}", eps2, e))?;
+    // Evaluate G(ε) at three ε. For real h, G(ε) := F(b+iε, h); the Schwarz
+    // symmetry F̄(b̄+iε̄, h̄) = F(b−iε, h) gives Re(G) even and Im(G) odd in ε,
+    // so the canonical real F(b, h) is the ε→0 limit of Re(G).
+    //
+    // For complex h, the parity breaks. We restore it by symmetrizing manually:
+    //     G(ε) := (F(b+iε, h) + conj(F(b+iε, conj(h)))) / 2.
+    // This averages the b+iε branch with the b−iε branch (the latter is
+    // F(b−iε, h) = conj(F(b+iε, conj(h))) by Schwarz). The resulting G(ε) is
+    // even in ε with leading correction O(ε²), exactly like the real-h case;
+    // it is complex-valued (the desired F(b, h)).
+    let eval = |eps: f64| -> Result<Complex, String> {
+        let f_plus = tetrate(&mk_pert(eps), &h_inner, prec_inner, digits)
+            .map_err(|e| format!("iε-perturbation: tetrate(b+{}i, h) failed: {}", eps, e))?;
+        if h_is_real {
+            return Ok(f_plus);
+        }
+        let f_plus_conjh = tetrate(&mk_pert(eps), &h_inner_conj, prec_inner, digits)
+            .map_err(|e| format!("iε-perturbation: tetrate(b+{}i, conj(h)) failed: {}", eps, e))?;
+        let f_plus_conjh_conj = Complex::with_val(prec_inner, f_plus_conjh.conj_ref());
+        let two = Float::with_val(prec_inner, 2u32);
+        let avg = (f_plus + f_plus_conjh_conj) / Complex::with_val(prec_inner, &two);
+        Ok(avg)
+    };
 
-    // Quadratic Richardson on real part: R = (4·F(ε/2) − F(ε))/3.
-    let four = Float::with_val(prec_inner, 4u32);
-    let three = Float::with_val(prec_inner, 3u32);
-    let r_real_inner: Float = (four.clone() * f2.real() - f1.real()) / three.clone();
+    let g_coarse = eval(eps_coarse)?;
+    let g_mid = eval(eps_mid)?;
+    let g_fine = eval(eps_fine)?;
 
-    // Linear Richardson on imaginary part should land near zero (it's odd in ε).
-    let r_imag_inner: Float = Float::with_val(prec_inner, 2u32) * f2.imag() - f1.imag();
+    // R₁ on real part of G (G is real-valued for real h, and even-symmetric
+    // and complex for complex h after manual symmetrization): cancels ε² → O(ε⁴).
+    let four = Complex::with_val(prec_inner, 4u32);
+    let three = Complex::with_val(prec_inner, 3u32);
+    let r1_coarse: Complex = (four.clone() * &g_mid - &g_coarse) / three.clone();
+    let r1_mid: Complex = (four.clone() * &g_fine - &g_mid) / three.clone();
+
+    // R₂: cancels ε⁴ → O(ε⁶).
+    let sixteen = Complex::with_val(prec_inner, 16u32);
+    let fifteen = Complex::with_val(prec_inner, 15u32);
+    let r2: Complex = (sixteen * &r1_mid - &r1_coarse) / fifteen;
+
     if debug_enabled() {
+        let r1_diff: Complex = Complex::with_val(prec_inner, &r1_coarse - &r1_mid);
         eprintln!(
-            "tet: iε Richardson residual Im = {} (should be ≈ 0)",
-            r_imag_inner
+            "tet: iε Richardson R₁(coarse)−R₁(mid) = {} (≈ leading O(ε⁴))",
+            r1_diff
         );
     }
 
-    let r_real = Float::with_val(prec, &r_real_inner);
-    // For real b and real h the canonical tetration is real; force imag to 0.
-    let zero = Float::with_val(prec, 0);
-    Ok(Complex::with_val(prec, (r_real, zero)))
+    if h_is_real {
+        // Force imag to 0 for real-base, real-h Kneser tetration.
+        let r_real = Float::with_val(prec, r2.real());
+        let zero = Float::with_val(prec, 0);
+        Ok(Complex::with_val(prec, (r_real, zero)))
+    } else {
+        Ok(Complex::with_val(prec, &r2))
+    }
 }
 
 /// Tetration with base 0 — convention:

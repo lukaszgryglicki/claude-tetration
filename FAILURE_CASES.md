@@ -20,26 +20,39 @@ Newton-Kantorovich Kouznetsov falls into a pathological scalability trap:
 
 **Fallback** (`dispatch.rs:try_iperturbation_extrapolation`) — when both the
 direct and continuation Kouznetsov solvers refuse for parabolic-cap reasons,
-the dispatcher pivots: it computes `F(b+0.1i, h)` and `F(b+0.05i, h)` (both
-of which take the OutsideShellThronGeneral / Kouznetsov path successfully
-because |arg(λ)| there is no longer ≈ 0), then quadratic-Richardson
-combines them as `(4·F(b+0.05i) − F(b+0.1i))/3`. By Schwarz reflection
-`Re(F(b+iε))` is even in ε with leading correction `O(ε²)`, so this cancels
-to `O(ε⁴)`; the imaginary part is odd in ε and collapses to zero.
+the dispatcher pivots: it computes the perturbed values
+`F(b+ε_k·i, h)` for `ε_k ∈ {0.1, 0.05, 0.025}` (which take the
+OutsideShellThronGeneral / Kouznetsov path successfully because |arg(λ)|
+there is no longer ≈ 0), and combines them in a Romberg-style table:
 
-Practical reach is **~6 useful digits** regardless of the requested precision
+```
+R₁(ε) = (4·F(ε/2) − F(ε))/3        cancels ε²  → O(ε⁴)
+R₂(ε) = (16·R₁(ε/2) − R₁(ε))/15    cancels ε⁴  → O(ε⁶)
+```
+
+For real h, Schwarz reflection makes Re(F(b+iε)) even in ε and Im(F)
+odd in ε; the Richardson table works directly on the real part and the
+imaginary residue collapses to zero. For complex h the parity breaks, so
+the fallback symmetrises manually:
+`G(ε) := (F(b+iε, h) + conj(F(b+iε, conj(h))))/2`
+which restores ε-evenness at the cost of doubling the per-ε work
+(6 tetrate calls instead of 3).
+
+Practical reach is **~6–9 useful digits** regardless of requested precision
 (Richardson cancellation amplifies noise from the perturbed evaluations).
-The CLI prints a stderr warning. For research-grade precision in this band a
-proper Abel/Écalle parabolic-iteration theory (or Kouznetsov's 2009 Abel-
-function construction, Math. Comp. §6) is still needed — see Class A2 below.
+The CLI prints a stderr warning. For research-grade precision in this band
+a proper Abel/Écalle parabolic-iteration theory (or Kouznetsov's 2009
+Abel-function construction, Math. Comp. §6) is still needed.
 
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
 | 1.4446678610097661337 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25716... + 0i |
 | 1.444667861009766 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25716... + 0i (t710) |
 | 1.4447 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25717... + 0i |
-| 1.4448 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25721... + 0i |
+| 1.4448 | 0 | 0.5 | 0 | OK (~9 digits via iε) | 1.25721... + 0i |
+| 1.4447 | 0 | 0.5 | 0.5 | OK (~9 digits via iε complex-h) | 1.29015 + 0.21136i |
 | 1.45 | 0 | 0.5 | 0 | OK | continuation solver succeeds at |λ|=1.003 |
+| 1.46 | 0 | 0.5 | 0 | OK | continuation solver succeeds (1.2638346… at full prec, ~5 min) |
 | 1.43 | 0 | 0.5 | 0 | OK | Schröder works at this distance |
 | 1.44 | 0 | 0.5 | 0 | OK | Schröder converged (|λ|=0.873, post-validation rel=6.4e-29) |
 
@@ -108,7 +121,7 @@ mathematical identity for the canonical Kneser tetration, not an approximation.
 | 0.5 | 2 | 0.5 | 0 | OK (0.2498 + 0.5270i) |
 | -3.6 | -0.4 | 0.5 | 0 | **WAS HANG** → OK via Schwarz (~165s) |
 | -1.2 | -1.2 | 0.5 | 0 | **WAS HANG** → OK via Schwarz (~548s) |
-| -1 | 1 | 0.5 | 0 | ERR (Re(b)<0, Im(b)=0 → see Class B) |
+| -1 | 1 | 0.5 | 0 | OK (-0.0804 + 0.3593i, ~7 min via direct Kouznetsov) |
 | 2 | 5 | 0 | 0.5 | OK |
 
 ---

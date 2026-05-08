@@ -386,22 +386,18 @@ fn try_iperturbation_extrapolation(
     let h_inner = Complex::with_val(prec_inner, h);
     let h_inner_conj = Complex::with_val(prec_inner, h.conj_ref());
 
-    let eps0 = 0.1f64;
-    let eps1 = 0.05f64;
-    let eps2 = 0.025f64;
-    let eps3 = 0.0125f64;
-    let eps4 = 0.00625f64;
+    let epss = [0.1f64, 0.05, 0.025, 0.0125, 0.00625];
 
     dprint(&format!(
         "iε Richardson R₄: tetrate at b+{}i, b+{}i, b+{}i, b+{}i, b+{}i (h_is_real={})",
-        eps0, eps1, eps2, eps3, eps4, h_is_real
+        epss[0], epss[1], epss[2], epss[3], epss[4], h_is_real
     ));
     eprintln!(
         "warning: parabolic-boundary fallback (iε-perturbation Richardson R₄); \
          expect roughly 15–17 useful digits regardless of requested precision."
     );
 
-    // Evaluate G(ε) at four ε. For real h, G(ε) := F(b+iε, h); the Schwarz
+    // Evaluate G(ε) at five ε. For real h, G(ε) := F(b+iε, h); the Schwarz
     // symmetry F̄(b̄+iε̄, h̄) = F(b−iε, h) gives Re(G) even and Im(G) odd in ε,
     // so the canonical real F(b, h) is the ε→0 limit of Re(G).
     //
@@ -411,6 +407,10 @@ fn try_iperturbation_extrapolation(
     // F(b−iε, h) = conj(F(b+iε, conj(h))) by Schwarz). The resulting G(ε) is
     // even in ε with leading correction O(ε²), exactly like the real-h case;
     // it is complex-valued (the desired F(b, h)).
+    //
+    // The five ε evaluations are independent — run them in parallel via
+    // rayon. Each Kouznetsov solve is single-threaded, so this gives close
+    // to a 5× speedup on multi-core systems.
     let eval = |eps: f64| -> Result<Complex, String> {
         let f_plus = tetrate(&mk_pert(eps), &h_inner, prec_inner, digits)
             .map_err(|e| format!("iε-perturbation: tetrate(b+{}i, h) failed: {}", eps, e))?;
@@ -425,19 +425,24 @@ fn try_iperturbation_extrapolation(
         Ok(avg)
     };
 
-    let g0 = eval(eps0)?;
-    let g1 = eval(eps1)?;
-    let g2 = eval(eps2)?;
-    let g3 = eval(eps3)?;
-    let g4 = eval(eps4)?;
+    use rayon::prelude::*;
+    let gs: Vec<Complex> = epss
+        .par_iter()
+        .map(|&eps| eval(eps))
+        .collect::<Result<Vec<_>, _>>()?;
+    let g0 = &gs[0];
+    let g1 = &gs[1];
+    let g2 = &gs[2];
+    let g3 = &gs[3];
+    let g4 = &gs[4];
 
     // R₁ on G — four values at consecutive (ε, ε/2) pairs cancel ε² → O(ε⁴).
     let three = Complex::with_val(prec_inner, 3u32);
     let four = Complex::with_val(prec_inner, 4u32);
-    let r1_a: Complex = (four.clone() * &g1 - &g0) / three.clone(); // pair (eps0, eps1)
-    let r1_b: Complex = (four.clone() * &g2 - &g1) / three.clone(); // pair (eps1, eps2)
-    let r1_c: Complex = (four.clone() * &g3 - &g2) / three.clone(); // pair (eps2, eps3)
-    let r1_d: Complex = (four * &g4 - &g3) / three; // pair (eps3, eps4)
+    let r1_a: Complex = (four.clone() * g1 - g0) / three.clone(); // pair (eps0, eps1)
+    let r1_b: Complex = (four.clone() * g2 - g1) / three.clone(); // pair (eps1, eps2)
+    let r1_c: Complex = (four.clone() * g3 - g2) / three.clone(); // pair (eps2, eps3)
+    let r1_d: Complex = (four * g4 - g3) / three; // pair (eps3, eps4)
 
     // R₂: cancels ε⁴ → O(ε⁶).
     let fifteen = Complex::with_val(prec_inner, 15u32);

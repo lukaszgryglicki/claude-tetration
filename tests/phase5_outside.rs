@@ -167,6 +167,47 @@ fn t424_imaginary_supported_via_sigma_shift() {
     check_functional_eq("0", "1", "0.5", "0", 30, 20.0);
 }
 
+// ---------- Large real bases (regression for the smooth target_mid cap) ----
+// Bases b ∈ {50, 100, 200, 500, 1000} stress the `target_mid` initial-guess
+// formula in `kouznetsov.rs::initial_guess_with_target` (≈ lines 986-1011):
+// the cap `clamp(1.5 − 0.1·max(0, ln|b|−2), 0.7, 1.5)` keeps the Levenberg-
+// Marquardt iterate inside the correct basin of attraction for the Kneser
+// fixed-point. Without the cap, `target_mid = √b` lands far from the true
+// F̃[mid] for large bases and the LM leaks into the wrong basin
+// (F̃[mid] → 0). Verified results match the table in FAILURE_CASES.md §E.
+//
+// Probed at 10 digits (~7s per case) so all three tests stay default-runnable.
+
+#[test]
+fn t440_large_base_b100_functional_eq() {
+    // F_100(0.5) ≈ 4.213104547 per FAILURE_CASES §E
+    check_functional_eq("100", "0", "0.5", "0", 10, 3.0);
+}
+
+#[test]
+fn t441_large_base_b1000_functional_eq() {
+    // F_1000(0.5) ≈ 6.391336395 per FAILURE_CASES §E. Largest base in the
+    // verified table; defends the cap-clamp at the high end (cap=0.7).
+    check_functional_eq("1000", "0", "0.5", "0", 10, 3.0);
+}
+
+#[test]
+fn t442_large_base_b50_value_check() {
+    // F_50(0.5) ≈ 3.6480… per FAILURE_CASES §E. Spot-check that the result
+    // is in the documented range (within 1e-3 of expected).
+    let digits = 10u64;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("50", "0", prec);
+    let h = parse("0.5", "0", prec);
+    let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
+    let f_re = Float::with_val(prec, f.real()).to_f64();
+    assert!(
+        (f_re - 3.6480).abs() < 1e-3,
+        "F_50(0.5) = {} but expected ≈ 3.6480 (FAILURE_CASES §E)",
+        f_re
+    );
+}
+
 // ---------- Integer heights still work exactly ----
 // Even when no continuous algorithm is available, integer heights bypass the
 // region-based dispatch and use direct iteration.

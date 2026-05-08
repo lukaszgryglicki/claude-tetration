@@ -285,32 +285,24 @@ pub fn setup_kouznetsov(
 
     let debug_phase = cnum::verbose();
     let phase_start = std::time::Instant::now();
-    let mut initial = initial_guess(&nodes, b, &l_upper, &l_lower, arg_lambda, prec);
+
+    // Helper: build + symmetrize an initial guess, with an optional target_mid
+    // override (for multi-start retries when the default cap fails).
+    let make_initial = |target_override: Option<f64>| -> Vec<Complex> {
+        let mut init = initial_guess_with_target(
+            &nodes, b, &l_upper, &l_lower, arg_lambda, prec, target_override,
+        );
+        init[0] = l_lower.clone();
+        init[n_nodes - 1] = l_upper.clone();
+        if use_schwarz {
+            symmetrize_schwarz(&mut init, prec);
+        }
+        init
+    };
+
+    let initial = make_initial(None);
     if debug_phase {
         eprintln!("kouz phase: initial_guess done ({:.2}s)", phase_start.elapsed().as_secs_f64());
-    }
-    // Pin the boundary samples to the asymptotic fixed-point values: the very
-    // first sample (t=−t_max) corresponds to z₀ on the bottom contour edge —
-    // Cauchy's formula has a 1/(t−z₀) singularity there. Same for the last
-    // sample at the top edge. By pinning F[0]=L_lower and F[N−1]=L_upper we
-    // remove the corner singularity from the iteration; interior samples then
-    // converge cleanly via T (which uses these pinned values in its integrand).
-    initial[0] = l_lower.clone();
-    initial[n_nodes - 1] = l_upper.clone();
-    // Schwarz reflection: F(z̄)=F̄(z). For real bases, symmetrize the initial
-    // guess so the iteration starts on the natural-Kouznetsov manifold. For
-    // complex bases the symmetry is broken (conjugate of `b^z` is not `b^z̄`),
-    // so we skip this step.
-    let phase_start = std::time::Instant::now();
-    if use_schwarz {
-        symmetrize_schwarz(&mut initial, prec);
-    }
-    if debug_phase {
-        eprintln!(
-            "kouz phase: symmetrize done ({:.2}s, use_schwarz={})",
-            phase_start.elapsed().as_secs_f64(),
-            use_schwarz
-        );
     }
     let phase_start = std::time::Instant::now();
     // Default solver: Levenberg-Marquardt Newton-Kantorovich. Newton's
@@ -321,21 +313,52 @@ pub fn setup_kouznetsov(
     //   * `TET_KOUZ_ANDERSON=1`: Anderson-accelerated Picard (works when T
     //     is a contraction, fails for higher b).
     //   * `TET_KOUZ_PICARD=1`: damped Picard, useful for spectrum diagnosis.
-    let samples = if std::env::var_os("TET_KOUZ_ANDERSON").is_some() {
+    let lm_result = if std::env::var_os("TET_KOUZ_ANDERSON").is_some() {
         iterate_anderson(
             initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
             use_schwarz,
-        )?
+        )
     } else if std::env::var_os("TET_KOUZ_PICARD").is_some() {
         iterate_picard(
             initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
             use_schwarz,
-        )?
+        )
     } else {
         iterate_newton(
             initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
             use_schwarz,
-        )?
+        )
+    };
+
+    // Multi-start: if the default initial guess fails to converge (LM "no
+    // descent step" — typical for bases like b≈5 where the converged F̃[mid]≈0.73
+    // is well below the default cap of 1.5), retry with alternative target_mid
+    // values. Two retries cover the b∈[η,e²] gap.
+    let samples = match lm_result {
+        Ok(s) => s,
+        Err(ref e) if e.contains("no descent step") || e.contains("no convergence") => {
+            if debug_phase {
+                eprintln!("kouz: LM failed with default guess ({}); retrying with alternative initial guesses", e);
+            }
+            let retry_targets: &[f64] = &[0.75, 1.1, 0.5, 1.25];
+            let mut last_err = e.clone();
+            let mut found = None;
+            for &target in retry_targets {
+                if debug_phase {
+                    eprintln!("kouz: retry with target_mid={}", target);
+                }
+                let retry_init = make_initial(Some(target));
+                match iterate_newton(
+                    retry_init, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
+                    use_schwarz,
+                ) {
+                    Ok(s) => { found = Some(s); break; }
+                    Err(e2) => { last_err = e2; }
+                }
+            }
+            found.ok_or(last_err)?
+        }
+        Err(e) => return Err(e),
     };
     if debug_phase {
         eprintln!("kouz phase: iterate_newton done ({:.2}s elapsed since symmetrize)", phase_start.elapsed().as_secs_f64());
@@ -974,6 +997,18 @@ fn initial_guess(
     arg_lambda: f64,
     prec: u32,
 ) -> Vec<Complex> {
+    initial_guess_with_target(nodes, b, l_upper, l_lower, arg_lambda, prec, None)
+}
+
+fn initial_guess_with_target(
+    nodes: &[Float],
+    b: &Complex,
+    l_upper: &Complex,
+    l_lower: &Complex,
+    arg_lambda: f64,
+    prec: u32,
+    target_mid_override: Option<f64>,
+) -> Vec<Complex> {
     // Smooth shape combining three pieces:
     //   * tanh-blend asymptote pinning F → L_upper as t→+∞ and F → L_lower as
     //     t→-∞. Slope `arg(λ)` matches the true exponential decay rate.
@@ -1017,7 +1052,11 @@ fn initial_guess(
     let sqrt_b_abs = Float::with_val(prec, sqrt_b.abs_ref()).to_f64();
     let b_abs = Float::with_val(prec, b.abs_ref()).to_f64();
     let cap: f64 = (1.5 - 0.1 * (b_abs.ln() - 2.0).max(0.0)).clamp(0.7, 1.5);
-    let target_mid = if sqrt_b_abs <= cap {
+    let target_mid = if let Some(override_val) = target_mid_override {
+        // Explicit override for retry attempts (multi-start strategy).
+        let dir = Complex::with_val(prec, &sqrt_b / Float::with_val(prec, sqrt_b_abs.max(1e-15)));
+        Complex::with_val(prec, &dir * Float::with_val(prec, override_val))
+    } else if sqrt_b_abs <= cap {
         sqrt_b.clone()
     } else {
         let scale = Float::with_val(prec, cap / sqrt_b_abs);

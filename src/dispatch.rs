@@ -143,11 +143,13 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
             // Schröder bails. Fall through to Anderson-accelerated Kouznetsov
             // Cauchy iteration, which produces the natural real-on-real
             // tetration via samples on Re(z)=0.5 refined by Cauchy's formula.
-            if let Ok(v) = schroder::tetrate_schroder(b, h, d, prec) {
-                dprint("Schröder succeeded at repelling fixed point");
-                return Ok(v);
+            match schroder::tetrate_schroder(b, h, d, prec) {
+                Ok(v) => {
+                    dprint("Schröder succeeded at repelling fixed point");
+                    return Ok(v);
+                }
+                Err(e) => dprint(&format!("Schröder unavailable ({}); switching to Newton-Kouznetsov", e)),
             }
-            dprint("Schröder unavailable; switching to Newton-Kouznetsov");
             match kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits) {
                 Ok(v) => Ok(v),
                 Err(why) => {

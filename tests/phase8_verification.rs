@@ -459,6 +459,45 @@ fn t871_iperturbation_r4_functional_equation() {
 }
 
 #[test]
+#[ignore] // Slow (~3.5 min): two complex-h iε R₄ evaluations × 5 perturbed Kouznetsov solves each.
+fn t872_iperturbation_r4_functional_equation_complex_h() {
+    // R₄ self-consistency check on the COMPLEX-h path. For complex h the
+    // Schwarz-symmetry F(b−iε, h) = conj(F(b+iε, conj(h))) is restored by
+    // explicit symmetrization
+    //   G(ε) := (F(b+iε, h) + conj(F(b+iε, conj(h))))/2
+    // doubling the per-ε work (10 tetrate calls instead of 5).
+    //
+    // Verifies that F(b, h+1) = b^F(b, h) holds to ~15-17 digits at
+    // b=1.4447 (parabolic boundary), h=0.5+0.5i. This certifies the iε
+    // complex-h path's precision matches the real-h path's.
+    use rug::ops::Pow;
+
+    let digits = 25u64;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("1.4447", "0", prec);
+    let h_lower = parse("0.5", "0.5", prec);
+    let h_upper = parse("1.5", "0.5", prec);
+
+    let f_lower = dispatch::tetrate(&b, &h_lower, prec, digits)
+        .expect("F(1.4447, 0.5+0.5i) via iε R₄ complex-h must succeed");
+    let f_upper = dispatch::tetrate(&b, &h_upper, prec, digits)
+        .expect("F(1.4447, 1.5+0.5i) via iε R₄ complex-h must succeed");
+
+    let b_pow = b.clone().pow(&f_lower);
+    let diff = Complex::with_val(prec, &b_pow - &f_upper);
+    let abs_diff = abs(&diff, prec);
+    let abs_upper = abs(&f_upper, prec).max(1.0);
+    let rel_err = abs_diff / abs_upper;
+
+    // Empirical at b=1.4447, h=0.5+0.5i: rel_err ≈ 1.3e-16 → ~16 digits.
+    assert!(
+        rel_err < 1e-14,
+        "R₄ complex-h functional-equation residual too large: rel_err={:.3e}, F(0.5+0.5i)={}, F(1.5+0.5i)={}",
+        rel_err, f_lower, f_upper
+    );
+}
+
+#[test]
 #[ignore] // Slow (~3-5 min): continuation solver warm-starts from b=1.81, walks 16 steps to 1.46.
 fn t880_parabolic_boundary_continuation_full_precision() {
     // b=1.46 sits in the parabolic boundary band but far enough from η that

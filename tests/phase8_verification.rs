@@ -383,23 +383,30 @@ fn t860_schwarz_reflection_conjugate_base() {
 
 #[test]
 fn t870_parabolic_boundary_clean_err() {
-    // Class A: bases very close to η=e^(1/e) require |arg(λ)| ≈ 0 → n_nodes > 32K.
-    // Must return ERR quickly (< 5s), not hang.
+    // Class A: bases extremely close to η=e^(1/e) have |arg(λ)| ≈ 0 and
+    // n_nodes that exceeds BOTH the direct-solver cap (32K) AND the continuation
+    // cap (131K).  Must return ERR quickly (< 5s), not hang.
+    //
+    // b=1.4448 is just 0.0001 above η=1.44467:
+    //   |arg(λ)| ≈ 0.019 → t_max ≈ 3400 → n_nodes ≈ 262K → exceeds both caps.
+    //
+    // Note: b=1.45 (|arg(λ)|=0.141, n_nodes=65536 ≤ 131K) now SUCCEEDS via
+    // the continuation solver (see FAILURE_CASES.md Class A).
     let digits = 20u64;
     let prec = cnum::digits_to_bits(digits);
-    // b=1.45: |arg(λ)|=0.141 → n_nodes=65536 > 32768 — parabolic guard triggers.
-    let b = parse("1.45", "0", prec);
+    let b = parse("1.4448", "0", prec);
     let h = parse("0.5", "0", prec);
     let result = dispatch::tetrate(&b, &h, prec, digits);
     assert!(
         result.is_err(),
-        "b=1.45 should fail with parabolic-boundary ERR, got {:?}",
+        "b=1.4448 should fail (parabolic boundary, n_nodes >> 131K), got {:?}",
         result
     );
     let msg = result.unwrap_err();
+    // Either the direct solver or the continuation solver should name the cause.
     assert!(
-        msg.contains("parabolic boundary") || msg.contains("Abel"),
-        "ERR message should mention parabolic boundary or Abel, got: {}",
+        msg.contains("parabolic boundary") || msg.contains("continuation") || msg.contains("Abel"),
+        "ERR message should mention parabolic boundary / continuation / Abel, got: {}",
         msg
     );
 }

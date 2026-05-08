@@ -104,17 +104,37 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
                 Err(e) => dprint(&format!("Schröder failed at boundary band: {}", e)),
             }
             dprint("Schröder unavailable in boundary band; trying Newton-Kouznetsov");
-            kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits).map_err(|why| {
-                unsupported_msg(
-                    "Shell-Thron parabolic boundary band (|λ| ≈ 1)",
-                    &format!(
-                        "Schröder regular tetration converges too slowly here, \
-                         and Newton-Kantorovich Kouznetsov Cauchy iteration \
-                         failed: {}",
-                        why
-                    ),
-                )
-            })
+            match kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits) {
+                Ok(v) => Ok(v),
+                Err(why) => {
+                    // If the direct solver was blocked by the parabolic-boundary
+                    // n_nodes cap, try the continuation-based solver which
+                    // warm-starts from a farther base and allows larger grids.
+                    if why.contains("parabolic boundary") {
+                        dprint("direct Kouznetsov hit parabolic cap; trying continuation solver");
+                        try_continuation(b, h, d, prec, digits).map_err(|cont_err| {
+                            unsupported_msg(
+                                "Shell-Thron parabolic boundary band (|λ| ≈ 1)",
+                                &format!(
+                                    "Schröder too slow; Kouznetsov direct: {}; \
+                                     continuation: {}",
+                                    why, cont_err
+                                ),
+                            )
+                        })
+                    } else {
+                        Err(unsupported_msg(
+                            "Shell-Thron parabolic boundary band (|λ| ≈ 1)",
+                            &format!(
+                                "Schröder regular tetration converges too slowly here, \
+                                 and Newton-Kantorovich Kouznetsov Cauchy iteration \
+                                 failed: {}",
+                                why
+                            ),
+                        ))
+                    }
+                }
+            }
         }
         regions::Region::OutsideShellThronRealPositive(d) => {
             // Schröder at the repelling fixed point handles bases unusually
@@ -128,17 +148,34 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
                 return Ok(v);
             }
             dprint("Schröder unavailable; switching to Newton-Kouznetsov");
-            kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits).map_err(|why| {
-                unsupported_msg(
-                    "real base > e^(1/e)",
-                    &format!(
-                        "Schröder regular tetration not applicable, and \
-                         Newton-Kantorovich Kouznetsov Cauchy iteration \
-                         failed: {}",
-                        why
-                    ),
-                )
-            })
+            match kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits) {
+                Ok(v) => Ok(v),
+                Err(why) => {
+                    if why.contains("parabolic boundary") {
+                        dprint("direct Kouznetsov hit parabolic cap; trying continuation solver");
+                        try_continuation(b, h, d, prec, digits).map_err(|cont_err| {
+                            unsupported_msg(
+                                "real base > e^(1/e)",
+                                &format!(
+                                    "Schröder not applicable; Kouznetsov direct: {}; \
+                                     continuation: {}",
+                                    why, cont_err
+                                ),
+                            )
+                        })
+                    } else {
+                        Err(unsupported_msg(
+                            "real base > e^(1/e)",
+                            &format!(
+                                "Schröder regular tetration not applicable, and \
+                                 Newton-Kantorovich Kouznetsov Cauchy iteration \
+                                 failed: {}",
+                                why
+                            ),
+                        ))
+                    }
+                }
+            }
         }
         regions::Region::OutsideShellThronGeneral(d) => {
             // Try Schröder at the repelling fixed point first (cheap when it
@@ -204,6 +241,19 @@ fn lambda_abs_of(region: &regions::Region) -> Option<f64> {
         | regions::Region::OutsideShellThronGeneral(d) => Some(d.lambda_abs),
         _ => None,
     }
+}
+
+/// Attempt the continuation-based Kouznetsov solver for near-parabolic real bases,
+/// then evaluate at the requested height.
+fn try_continuation(
+    b: &Complex,
+    h: &Complex,
+    fp: &crate::regions::FixedPointData,
+    prec: u32,
+    digits: u64,
+) -> Result<Complex, String> {
+    let state = kouznetsov::setup_kouznetsov_continuation(b, fp, prec, digits)?;
+    kouznetsov::eval_kouznetsov(&state, b, h)
 }
 
 /// Tetration with base 0 — convention:

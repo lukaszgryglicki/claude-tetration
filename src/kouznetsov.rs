@@ -2748,3 +2748,276 @@ where
         max_outer, restart
     ))
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Continuation-based solver for near-parabolic bases (Class A)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resample a converged Kouznetsov solution onto a new uniform grid.
+///
+/// Old grid: `old_n` nodes uniformly spaced over `[−old_t_max, +old_t_max]`.
+/// New grid: `new_nodes` (may be wider/denser than the old one).
+///
+/// For new nodes that fall within the old range: linear interpolation between
+/// adjacent old samples. For new nodes beyond `±old_t_max`: pin to the
+/// asymptotic fixed-point value (`l_upper` / `l_lower`).
+fn resample_to_grid(
+    old_samples: &[Complex],
+    old_t_max_f64: f64,
+    new_nodes: &[Float],
+    l_upper: &Complex,
+    l_lower: &Complex,
+    prec: u32,
+) -> Vec<Complex> {
+    let old_n = old_samples.len();
+    if old_n < 2 {
+        return new_nodes.iter().map(|_| Complex::with_val(prec, (0u32, 0u32))).collect();
+    }
+    let old_step = 2.0 * old_t_max_f64 / (old_n - 1) as f64;
+
+    new_nodes
+        .iter()
+        .map(|t_new| {
+            let t = Float::with_val(64, t_new).to_f64();
+            if t <= -old_t_max_f64 {
+                l_lower.clone()
+            } else if t >= old_t_max_f64 {
+                l_upper.clone()
+            } else {
+                // Linear interpolation between neighbouring old samples.
+                let frac_idx = (t + old_t_max_f64) / old_step;
+                let i0 = frac_idx.floor() as usize;
+                let i1 = (i0 + 1).min(old_n - 1);
+                let alpha = frac_idx - i0 as f64;
+                let re0 = Float::with_val(64, old_samples[i0].real()).to_f64();
+                let re1 = Float::with_val(64, old_samples[i1].real()).to_f64();
+                let im0 = Float::with_val(64, old_samples[i0].imag()).to_f64();
+                let im1 = Float::with_val(64, old_samples[i1].imag()).to_f64();
+                Complex::with_val(prec, (
+                    Float::with_val(prec, re0 + alpha * (re1 - re0)),
+                    Float::with_val(prec, im0 + alpha * (im1 - im0)),
+                ))
+            }
+        })
+        .collect()
+}
+
+/// Continuation-based Kouznetsov solver for near-parabolic real bases.
+///
+/// The direct `setup_kouznetsov` fails for `b` near `η = e^(1/e)` because
+/// `|arg(λ)| → 0` forces `n_nodes ≫ 32768` and each LM matvec takes ~20s.
+/// With a warm start from a nearby-`b` solution the LM converges in 3–5
+/// Newton steps (instead of 40+), making even `n_nodes = 65536` tractable.
+///
+/// **Strategy**: step `b` from `b_start ≈ 1.75` (where `n_nodes ≤ 4096`)
+/// toward `b_target` in increments of `≤ 0.025`. At each step, resample the
+/// previous samples onto the new (wider/denser) grid as the initial guess.
+/// The gradual doubling of `n_nodes` distributes the work across `O(log N)`
+/// cheap initial steps.
+///
+/// Only supports real `b > η`; complex near-parabolic bases are rare and out
+/// of scope.
+pub fn setup_kouznetsov_continuation(
+    b_target: &Complex,
+    fp_target: &FixedPointData,
+    prec: u32,
+    digits: u64,
+) -> Result<KouznetsovState, String> {
+    let b_re_target = Float::with_val(64, b_target.real()).to_f64();
+    let b_im_target = Float::with_val(64, b_target.imag()).to_f64();
+    if b_im_target.abs() > 1e-10 {
+        return Err("continuation solver only supports real b".into());
+    }
+    let eta = std::f64::consts::E.powf(1.0 / std::f64::consts::E);
+    if b_re_target <= eta {
+        return Err(format!("continuation: b={:.5} ≤ η={:.5}", b_re_target, eta));
+    }
+
+    // Upfront cap check: compute n_nodes for b_target before doing any work.
+    // If target itself exceeds the continuation cap, fail immediately.
+    const N_CONTINUATION_CAP: usize = 131_072;
+    {
+        let arg_lambda_tgt = arg_abs_f64(&fp_target.lambda, 64);
+        if arg_lambda_tgt > 1e-6 {
+            let t_max_tgt = ((digits as f64 + 8.0) * std::f64::consts::LN_10 / arg_lambda_tgt).max(8.0);
+            // Use uncapped n_bulk (not pick_node_count which caps at 60K) to detect when
+            // the true required nodes exceed the continuation budget.
+            const SIGMA_EFF: f64 = 0.30;
+            const MARGIN: f64 = 1.2;
+            let n_bulk_tgt = (MARGIN
+                * (digits as f64 + 5.0)
+                * std::f64::consts::LN_10
+                * t_max_tgt
+                / (std::f64::consts::PI * SIGMA_EFF))
+                .ceil() as usize;
+            if n_bulk_tgt > N_CONTINUATION_CAP {
+                return Err(format!(
+                    "continuation: parabolic boundary — b={:.5} requires ~{} nodes > cap={} \
+                     (|arg(λ)|={:.4}); needs Abel/Écalle theory",
+                    b_re_target, n_bulk_tgt, N_CONTINUATION_CAP, arg_lambda_tgt
+                ));
+            }
+        }
+    }
+
+    // Starting point: far enough from η that the direct solver handles it
+    // without triggering the parabolic-boundary cap.
+    // b=1.75 has |arg(λ)|≈0.9, giving n_nodes≈4096 at 20 digits.
+    let b_start = (b_re_target + 0.35_f64).max(1.75_f64).min(2.5_f64);
+
+    // Step count: ≤ 0.025 per step keeps the warm-start error small enough
+    // for quadratic LM convergence in ≤ 5 iterations.
+    let n_steps = ((b_start - b_re_target) / 0.025).ceil() as usize + 1;
+    let n_steps = n_steps.max(2);
+
+    if cnum::verbose() {
+        eprintln!(
+            "kouz continuation: b_target={:.5}  b_start={:.5}  n_steps={}",
+            b_re_target, b_start, n_steps
+        );
+    }
+
+    let mut prev_state: Option<KouznetsovState> = None;
+
+    for step in 0..=n_steps {
+        let frac = step as f64 / n_steps as f64;
+        let b_step = b_start * (1.0 - frac) + b_re_target * frac;
+
+        let b_cplx = Complex::with_val(prec, (Float::with_val(prec, b_step), Float::new(prec)));
+
+        // Compute fixed-point pair for this b value.
+        let ln_b = Complex::with_val(prec, b_cplx.ln_ref());
+        let neg_ln_b = Complex::with_val(prec, -&ln_b);
+        let w0_val = lambertw::w0(&neg_ln_b, prec)
+            .map_err(|e| format!("continuation step {}: W₀ failed: {}", step, e))?;
+        let l_raw = Complex::with_val(prec, -w0_val / &ln_b);
+        // Ensure l_upper has Im > 0 (the convention for Schwarz-symmetric bases).
+        let l_upper_step = if Float::with_val(64, l_raw.imag()).to_f64() < 0.0 {
+            Complex::with_val(prec, l_raw.conj_ref())
+        } else {
+            l_raw
+        };
+        let l_lower_step = Complex::with_val(prec, l_upper_step.conj_ref());
+        let lambda_upper = Complex::with_val(prec, &ln_b * &l_upper_step);
+        let arg_lambda = arg_abs_f64(&lambda_upper, prec);
+
+        if arg_lambda <= 1e-3 {
+            return Err(format!(
+                "continuation step {}: |arg(λ)|={:.4} too small at b={:.5}",
+                step, arg_lambda, b_step
+            ));
+        }
+
+        let t_max_f64 = ((digits as f64 + 8.0) * std::f64::consts::LN_10 / arg_lambda).max(8.0);
+        let t_max_fp = Float::with_val(prec, t_max_f64);
+        let n_nodes = pick_node_count(digits, t_max_f64, arg_lambda);
+
+        if n_nodes > N_CONTINUATION_CAP {
+            return Err(format!(
+                "continuation step {}: n_nodes={} > {} cap (b={:.5}, |arg(λ)|={:.4})",
+                step, n_nodes, N_CONTINUATION_CAP, b_step, arg_lambda
+            ));
+        }
+
+        let nodes = build_uniform_nodes(&t_max_fp, n_nodes, prec);
+        let weights = build_trapezoidal_weights(&t_max_fp, n_nodes, prec);
+
+        if cnum::verbose() {
+            eprintln!(
+                "kouz cont step {}/{}: b={:.5}  |arg(λ)|={:.4}  t_max={:.1}  n={}  warm={}",
+                step, n_steps, b_step, arg_lambda, t_max_f64, n_nodes,
+                prev_state.is_some()
+            );
+        }
+
+        let mut initial = if let Some(ref prev) = prev_state {
+            // Resample previous solution onto the new (potentially wider/denser) grid.
+            let old_t_max = Float::with_val(64, &prev.t_max).to_f64();
+            let mut init = resample_to_grid(
+                &prev.samples,
+                old_t_max,
+                &nodes,
+                &l_upper_step,
+                &l_lower_step,
+                prec,
+            );
+            // Always re-pin the boundary samples (they may have been approximated
+            // as L± during resampling, but the exact new L values differ slightly).
+            init[0] = l_lower_step.clone();
+            init[n_nodes - 1] = l_upper_step.clone();
+            // Real base: symmetrize so the solver stays on the Schwarz manifold.
+            symmetrize_schwarz(&mut init, prec);
+            init
+        } else {
+            // Cold start for the first (safe) step. Use the normal capped solver.
+            let fp_step = FixedPointData {
+                fixed_point: l_upper_step.clone(),
+                lambda: lambda_upper.clone(),
+                lambda_abs: Float::with_val(64, lambda_upper.abs_ref()).to_f64(),
+            };
+            let cold = setup_kouznetsov(&b_cplx, &fp_step, prec, digits)?;
+            // Resample cold solution onto `nodes` in case step-0 geometry differs.
+            let old_t_max = Float::with_val(64, &cold.t_max).to_f64();
+            let mut init = resample_to_grid(
+                &cold.samples,
+                old_t_max,
+                &nodes,
+                &l_upper_step,
+                &l_lower_step,
+                prec,
+            );
+            init[0] = l_lower_step.clone();
+            init[n_nodes - 1] = l_upper_step.clone();
+            symmetrize_schwarz(&mut init, prec);
+            init
+        };
+
+        // Run LM with the warm (or cold-resampled) initial.
+        let samples = iterate_newton(
+            initial,
+            &nodes,
+            &weights,
+            &t_max_fp,
+            &l_upper_step,
+            &l_lower_step,
+            &ln_b,
+            prec,
+            digits,
+            true, // use_schwarz = true for real b
+        )?;
+
+        let shift = find_normalization_shift(
+            &samples,
+            &nodes,
+            &weights,
+            &t_max_fp,
+            &l_upper_step,
+            &l_lower_step,
+            &ln_b,
+            prec,
+            digits,
+        )?;
+
+        prev_state = Some(KouznetsovState {
+            samples,
+            nodes,
+            weights,
+            t_max: t_max_fp,
+            l_upper: l_upper_step,
+            l_lower: l_lower_step,
+            ln_b,
+            shift,
+            prec,
+        });
+
+        // If this step is already at the target (within float rounding), stop.
+        if (b_step - b_re_target).abs() < 1e-10 {
+            break;
+        }
+    }
+
+    // Ignore fp_target (already computed inline above); suppress unused-variable warning.
+    let _ = fp_target;
+
+    prev_state.ok_or_else(|| "continuation: no state produced".into())
+}

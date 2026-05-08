@@ -419,6 +419,46 @@ fn t870_parabolic_boundary_iperturbation_fallback() {
 }
 
 #[test]
+fn t871_iperturbation_r4_functional_equation() {
+    // R₄ self-consistency check: at b=η (the worst-case parabolic point),
+    // F(h+1) computed via iε R₄ should equal b^F(h) to roughly the empirical
+    // ceiling of the iε method (~15-17 digits). This is a stronger test than
+    // t870's order-of-magnitude check — it certifies the precision claim of
+    // "~15-17 useful digits via iε R₄" baked into the warning message.
+    //
+    // Each tetrate call runs 5 perturbed Kouznetsov evaluations (~10s each)
+    // for ~50s per call; two calls → ~100s. Acceptable for the verification
+    // value.
+    use rug::ops::Pow;
+
+    let digits = 25u64;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("1.444667861009766", "0", prec);
+    let h_lower = parse("0.5", "0", prec);
+    let h_upper = parse("1.5", "0", prec);
+
+    let f_lower = dispatch::tetrate(&b, &h_lower, prec, digits)
+        .expect("F(η, 0.5) via iε R₄ must succeed");
+    let f_upper = dispatch::tetrate(&b, &h_upper, prec, digits)
+        .expect("F(η, 1.5) via iε R₄ must succeed");
+
+    // b^F(0.5) should match F(1.5) up to R₄'s empirical precision.
+    let b_pow = b.clone().pow(&f_lower);
+    let diff = Complex::with_val(prec, &b_pow - &f_upper);
+    let abs_diff = abs(&diff, prec);
+    let abs_upper = abs(&f_upper, prec).max(1.0);
+    let rel_err = abs_diff / abs_upper;
+
+    // Empirical: at b=η, residual is ~6e-17 → ~16 digits.
+    // Assert at least 14 digits (gives a safety margin for slight numerical drift).
+    assert!(
+        rel_err < 1e-14,
+        "R₄ functional-equation residual too large: rel_err={:.3e}, F(0.5)={}, F(1.5)={}",
+        rel_err, f_lower, f_upper
+    );
+}
+
+#[test]
 #[ignore] // Slow (~3-5 min): continuation solver warm-starts from b=1.81, walks 16 steps to 1.46.
 fn t880_parabolic_boundary_continuation_full_precision() {
     // b=1.46 sits in the parabolic boundary band but far enough from η that

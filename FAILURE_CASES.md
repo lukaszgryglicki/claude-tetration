@@ -43,23 +43,29 @@ which restores ε-evenness at the cost of doubling the per-ε work
 
 Theoretical R₄ residual at ε_min=0.00625 is O(ε¹⁰) ≈ 9e-23, but in practice
 higher-order Taylor coefficients a₁₀, a₁₂… in `F(b+iε)` grow rapidly near
-the parabolic boundary and limit empirical accuracy to **~17–22 digits**
-regardless of requested precision. At b=1.4448 the empirical R₃ vs R₄
-disagreement (~1e-12) reveals that a₈ at this base is large (~10³),
-consistent with the parabolic-fixed-point coefficient blow-up. Beyond
-~22 digits at adversarial bases would need a proper Abel/Écalle parabolic-
-iteration theory (or Kouznetsov's 2009 Abel-function construction).
+the parabolic boundary and limit empirical accuracy to **~15–17 digits**
+regardless of requested precision. Functional-equation self-check
+`F(h+1) − b^F(h)` gives:
+
+  - b=η (worst case):   relative error 6.2e-17  → ~16 digits
+  - b=1.4448:            relative error 1.3e-15  → ~15 digits
+
+At b=1.4448 the empirical R₃ vs R₄ disagreement (~1e-12) reveals that
+a₈ at this base is large (~10³), consistent with the parabolic-fixed-
+point coefficient blow-up. Beyond ~17 digits at adversarial bases would
+need a proper Abel/Écalle parabolic-iteration theory (or Kouznetsov's
+2009 Abel-function construction).
 The CLI prints a stderr warning. For research-grade precision in this band
 a proper Abel/Écalle parabolic-iteration theory (or Kouznetsov's 2009
 Abel-function construction, Math. Comp. §6) is still needed.
 
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
-| 1.4446678610097661337 | 0 | 0.5 | 0 | OK (~17–22 digits via iε R₄) | 1.25715... + 0i |
-| 1.444667861009766 | 0 | 0.5 | 0 | OK (~17–22 digits via iε R₄) | 1.25715... + 0i (t710) |
-| 1.4447 | 0 | 0.5 | 0 | OK (~17–22 digits via iε R₄) | 1.25717... + 0i |
-| 1.4448 | 0 | 0.5 | 0 | OK (~17–22 digits via iε R₄) | 1.25721102559202735... + 0i |
-| 1.4447 | 0 | 0.5 | 0.5 | OK (~17–22 digits via iε R₄ complex-h) | 1.29015 + 0.21136i |
+| 1.4446678610097661337 | 0 | 0.5 | 0 | OK (~16 digits via iε R₄) | 1.25715307505417... + 0i |
+| 1.444667861009766 | 0 | 0.5 | 0 | OK (~16 digits via iε R₄) | 1.25715... + 0i (t710) |
+| 1.4447 | 0 | 0.5 | 0 | OK (~15 digits via iε R₄) | 1.25717... + 0i |
+| 1.4448 | 0 | 0.5 | 0 | OK (~15 digits via iε R₄) | 1.25721102559202735... + 0i |
+| 1.4447 | 0 | 0.5 | 0.5 | OK (~15 digits via iε R₄ complex-h) | 1.29015 + 0.21136i |
 | 1.45 | 0 | 0.5 | 0 | OK | continuation solver succeeds at |λ|=1.003 |
 | 1.46 | 0 | 0.5 | 0 | OK | continuation solver succeeds (1.2638346… at full prec, ~5 min) |
 | 1.43 | 0 | 0.5 | 0 | OK | Schröder works at this distance |

@@ -350,10 +350,14 @@ fn try_continuation(
 /// `R₃(ε) = (64·R₂(ε/2) − R₂(ε))/63` cancels ε⁶ → O(ε⁸);
 /// `R₄(ε) = (256·R₃(ε/2) − R₃(ε))/255` cancels ε⁸ → O(ε¹⁰).
 ///
-/// With five function evaluations this yields roughly 18–22 useful digits in
-/// favourable regimes — theoretical residual O(0.00625¹⁰) ≈ 9e-23 — at the
-/// cost of one additional perturbed Kouznetsov solve (~25% more wall time
-/// vs R₃). The smallest ε used is 0.00625; empirically at b=1.4448 this
+/// With five function evaluations this yields roughly 15–17 useful digits
+/// at the parabolic point b=η, validated by functional-equation self-check
+/// `F(h+1) − b^F(h)` showing relative error ~6e-17 at b=η and ~1.3e-15 at
+/// b=1.4448. Theoretical residual O(0.00625¹⁰) ≈ 9e-23 is unattainable in
+/// practice — higher-order Taylor coefficients (a₈ ≈ 10³ at b=1.4448) grow
+/// rapidly near the parabolic boundary, eating most of the ε⁸ improvement.
+/// Cost: one additional perturbed Kouznetsov solve vs R₃ (~25% more wall
+/// time). The smallest ε used is 0.00625; empirically at b=1.4448 this
 /// gives |λ|≈0.899 (still well-interior in Shell-Thron), and the perturbed
 /// evaluation runs the Schröder interior path in ~8s at 20 digits.
 ///
@@ -394,7 +398,7 @@ fn try_iperturbation_extrapolation(
     ));
     eprintln!(
         "warning: parabolic-boundary fallback (iε-perturbation Richardson R₄); \
-         expect roughly 18–22 useful digits regardless of requested precision."
+         expect roughly 15–17 useful digits regardless of requested precision."
     );
 
     // Evaluate G(ε) at four ε. For real h, G(ε) := F(b+iε, h); the Schwarz

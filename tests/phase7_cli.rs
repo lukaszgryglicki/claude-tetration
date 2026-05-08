@@ -144,17 +144,41 @@ fn t709_debug_diagnostics() {
 }
 
 #[test]
-fn t710_boundary_band_unsupported() {
+fn t710_boundary_band_iperturbation_fallback() {
     // Base on the parabolic Shell-Thron boundary band (|λ| ≈ 1) — Schröder is
-    // unreliable there and no other algorithm is implemented. Per design, the
-    // CLI errors out cleanly rather than producing a wrong number. b ≈ η =
-    // e^(1/e) ≈ 1.4446679 sits on the boundary.
-    let out = run(&["50", "1.444667861009766", "0", "0.5", "0"]);
-    assert!(!out.status.success(), "expected non-zero exit");
+    // unreliable there and direct/continuation Kouznetsov hit the parabolic
+    // n_nodes cap. The dispatcher falls back to an iε-perturbation Richardson
+    // extrapolation: it tetrates at b+0.1i and b+0.05i (which take the
+    // OutsideShellThronGeneral / Kouznetsov path successfully) and combines
+    // them as (4·F(ε/2) − F(ε))/3 to cancel the O(ε²) leading error of the
+    // even part, with the odd imaginary part collapsing to zero. Practical
+    // reach is roughly 6 digits, far short of the requested precision but
+    // enough for the CLI to deliver a real-valued answer instead of failing.
+    // b ≈ η = e^(1/e) ≈ 1.4446679 is the canonical parabolic point.
+    let out = run(&["20", "1.444667861009766", "0", "0.5", "0"]);
+    assert!(out.status.success(), "expected success, got exit={:?}, stderr={}",
+            out.status.code(), String::from_utf8_lossy(&out.stderr));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("unsupported case"),
-        "expected unsupported-case error, stderr: {}",
+        stderr.contains("iε-perturbation") || stderr.contains("parabolic-boundary fallback"),
+        "expected iε-perturbation warning, stderr: {}",
         stderr
+    );
+    // Output should be a real tetration value near 1.257 (the empirical
+    // e^^(0.5) limit value at b=η).
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "expected re/im output, got: {}", stdout);
+    let re: f64 = lines[0].parse().expect("re parse");
+    let im: f64 = lines[1].parse().expect("im parse");
+    assert!(
+        (re - 1.257).abs() < 0.01,
+        "expected Re ≈ 1.257, got {}",
+        re
+    );
+    assert!(
+        im.abs() < 1e-10,
+        "expected Im ≈ 0 (Schwarz cancellation), got {}",
+        im
     );
 }

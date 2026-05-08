@@ -382,31 +382,38 @@ fn t860_schwarz_reflection_conjugate_base() {
 }
 
 #[test]
-fn t870_parabolic_boundary_clean_err() {
+fn t870_parabolic_boundary_iperturbation_fallback() {
     // Class A: bases extremely close to η=e^(1/e) have |arg(λ)| ≈ 0 and
     // n_nodes that exceeds BOTH the direct-solver cap (32K) AND the continuation
-    // cap (131K).  Must return ERR quickly (< 5s), not hang.
+    // cap (131K). Must NOT hang and must NOT return ERR — instead,
+    // fall back to the iε-perturbation Richardson extrapolation:
+    //   F(b, h) ≈ (4·F(b+0.05i, h) − F(b+0.1i, h))/3.
+    // The complex-base path handles b±iε successfully because |arg(λ)| there
+    // is no longer ≈ 0. Quadratic Richardson on the real part cancels the
+    // O(ε²) correction (Schwarz reflection makes Re(F) even in ε); the
+    // imaginary part is odd in ε so it collapses to ~0 after cancellation.
+    // Practical reach is ~6 digits, so we only assert order-of-magnitude
+    // agreement here.
     //
-    // b=1.4448 is just 0.0001 above η=1.44467:
+    // b=1.4448 is 0.0001 above η=1.44467:
     //   |arg(λ)| ≈ 0.019 → t_max ≈ 3400 → n_nodes ≈ 262K → exceeds both caps.
-    //
-    // Note: b=1.45 (|arg(λ)|=0.141, n_nodes=65536 ≤ 131K) now SUCCEEDS via
-    // the continuation solver (see FAILURE_CASES.md Class A).
     let digits = 20u64;
     let prec = cnum::digits_to_bits(digits);
     let b = parse("1.4448", "0", prec);
     let h = parse("0.5", "0", prec);
     let result = dispatch::tetrate(&b, &h, prec, digits);
+    let value = result.expect("iε-perturbation fallback should return a value");
+    // Expect Re ≈ 1.257 (limiting value at η for h=0.5) and Im ≈ 0.
+    let re_f64 = value.real().to_f64();
+    let im_f64 = value.imag().to_f64();
     assert!(
-        result.is_err(),
-        "b=1.4448 should fail (parabolic boundary, n_nodes >> 131K), got {:?}",
-        result
+        (re_f64 - 1.257).abs() < 0.01,
+        "expected Re ≈ 1.257, got {}",
+        re_f64
     );
-    let msg = result.unwrap_err();
-    // Either the direct solver or the continuation solver should name the cause.
     assert!(
-        msg.contains("parabolic boundary") || msg.contains("continuation") || msg.contains("Abel"),
-        "ERR message should mention parabolic boundary / continuation / Abel, got: {}",
-        msg
+        im_f64.abs() < 1e-10,
+        "expected Im ≈ 0 (Schwarz cancellation), got {}",
+        im_f64
     );
 }

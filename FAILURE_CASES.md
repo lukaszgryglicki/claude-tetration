@@ -10,24 +10,38 @@ Legend:
 
 ---
 
-## A. Shell-Thron parabolic boundary band  (|λ| ≈ 1)
+## A. Shell-Thron parabolic boundary band  (|λ| ≈ 1)   — **PARTIAL: low-precision iε fallback**
 
 Schröder regular tetration converges too slowly here (logarithmic rate);
 Newton-Kantorovich Kouznetsov falls into a pathological scalability trap:
 `|arg(λ)|` is tiny (e.g. 0.1411 rad for b=1.45), so the strip must extend to
 `t_max ≈ π/|arg(λ)| ≈ 457`, requiring `n_nodes=65536`. Each LM matvec takes
-~19s; a single iteration runs 19s and many are needed. Wall time for convergence
-exceeds hours. **True algorithmic gap** — confirmed by 600s probe (only 1 LM
-iteration completed). Needs Écalle/Abel parabolic-iteration theory or
-Kouznetsov's Abel-function construction (Math. Comp. 2009, §6).
+~19s; convergence on this grid takes hours.
 
-| b_re | b_im | h_re | h_im | mode | note |
+**Fallback** (`dispatch.rs:try_iperturbation_extrapolation`) — when both the
+direct and continuation Kouznetsov solvers refuse for parabolic-cap reasons,
+the dispatcher pivots: it computes `F(b+0.1i, h)` and `F(b+0.05i, h)` (both
+of which take the OutsideShellThronGeneral / Kouznetsov path successfully
+because |arg(λ)| there is no longer ≈ 0), then quadratic-Richardson
+combines them as `(4·F(b+0.05i) − F(b+0.1i))/3`. By Schwarz reflection
+`Re(F(b+iε))` is even in ε with leading correction `O(ε²)`, so this cancels
+to `O(ε⁴)`; the imaginary part is odd in ε and collapses to zero.
+
+Practical reach is **~6 useful digits** regardless of the requested precision
+(Richardson cancellation amplifies noise from the perturbed evaluations).
+The CLI prints a stderr warning. For research-grade precision in this band a
+proper Abel/Écalle parabolic-iteration theory (or Kouznetsov's 2009 Abel-
+function construction, Math. Comp. §6) is still needed — see Class A2 below.
+
+| b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
-| 1.4446678610097661337 | 0 | 0.5 | 0 | ERR | exact η = e^(1/e) |
-| 1.444667861009766 | 0 | 0.5 | 0 | ERR | t710 covers this |
-| 1.45 | 0 | 0.5 | 0 | HANG | |λ|=1.003, |arg(λ)|=0.141 → t_max=457, n=65536, ~19s/iter |
-| 1.43 | 0 | 0.5 | 0 | OK | returns 1.2506... (Schröder works at this distance) |
-| 1.44 | 0 | 0.5 | 0 | ERR | now caught by Schröder post-validation (rel=4.7e-1) |
+| 1.4446678610097661337 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25716... + 0i |
+| 1.444667861009766 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25716... + 0i (t710) |
+| 1.4447 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25717... + 0i |
+| 1.4448 | 0 | 0.5 | 0 | OK (~6 digits via iε) | 1.25721... + 0i |
+| 1.45 | 0 | 0.5 | 0 | OK | continuation solver succeeds at |λ|=1.003 |
+| 1.43 | 0 | 0.5 | 0 | OK | Schröder works at this distance |
+| 1.44 | 0 | 0.5 | 0 | OK | Schröder converged (|λ|=0.873, post-validation rel=6.4e-29) |
 
 ---
 

@@ -160,7 +160,12 @@ pub fn setup_schroder(
     if !(lam_abs > 0.0 && lam_abs.is_finite()) {
         return Err(format!("Schröder: invalid |λ| = {}", lam_abs));
     }
-    if (lam_abs - 1.0).abs() < 0.05 {
+    // The build recursion divides by `λ^N − λ`, which vanishes only at
+    // λ ∈ root-of-unity. For |λ|=1 exactly (true parabolic), we'd hit a
+    // zero denominator at N=1 (since λ^1 − λ = 0 trivially). Block only
+    // a very tight band around |λ|=1; let σ̃-shift + extended N handle
+    // the boundary band (|λ|=0.95–0.99).
+    if (lam_abs - 1.0).abs() < 0.005 {
         return Err(format!(
             "Schröder unreliable on parabolic boundary (|λ| = {})",
             lam_abs
@@ -255,69 +260,69 @@ pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
         return Err(format!("Schröder: bad |t| = {}", t_abs));
     }
 
-    // Use sigma_inner_radius (the proven convergent radius from setup) as the
-    // target. For well-behaved bases this equals safe_radius and no extra
-    // shift is needed; for near-η bases it's smaller (e.g. 0.3 instead of
-    // 0.66), forcing enough additional shifts to keep σ̃⁻¹ accurate.
-    let target = state.sigma_inner_radius.min(state.safe_radius);
+    // The σ̃⁻¹ convergence radius can be smaller than sigma_inner_radius (which
+    // tracks σ̃ in the w-domain, not σ̃⁻¹ in the t-domain). The strategy:
+    //   1. Try direct eval_series_checked at |t|. If succeeds, return.
+    //   2. Otherwise, find the smallest k such that eval_series_checked succeeds
+    //      at |t · λ^k|. Each iteration halves the target.
+    //
+    // This handles bases near η where σ̃⁻¹ has a small effective radius even
+    // when sigma_inner_radius reports otherwise.
+    if let Ok(inv_t) = eval_series_checked(&state.sigma_inv, &t, prec) {
+        return Ok(Complex::with_val(prec, &state.l + &inv_t));
+    }
 
-    // Whether σ̃⁻¹ was already within target but series diverged there.
-    let needs_extra_reduction = if t_abs <= target {
-        // sigma_inner_radius is where σ̃ converged in w-domain; σ̃⁻¹ may have a
-        // smaller convergence radius in t-domain (e.g. near η, |s1| can exceed
-        // the true radius of σ̃⁻¹). Check convergence; if σ̃⁻¹ diverges here,
-        // fall through to the k-shift path to reduce |t| further.
-        if let Ok(inv_t) = eval_series_checked(&state.sigma_inv, &t, prec) {
-            return Ok(Complex::with_val(prec, &state.l + &inv_t));
-        }
-        // σ̃⁻¹ diverges even within sigma_inner_radius. Need a much smaller target.
-        true
-    } else {
-        false
-    };
-
-    // When σ̃⁻¹ failed inside the normal target, reduce |t| to 10% of its
-    // current value. This forces sufficient k-shifts even when σ̃⁻¹'s true
-    // convergence radius is much smaller than sigma_inner_radius.
-    let effective_target = if needs_extra_reduction {
-        t_abs * 0.1
-    } else {
-        target
-    };
-
-    // Shift integer k so |t · λ^k| ≤ effective_target.
     let log_lam_abs = state.lam_abs.ln(); // negative (|λ|<1) or positive (>1)
-    let ratio = (effective_target / t_abs).ln();
-    let k_raw = ratio / log_lam_abs;
-    let k: i64 = if log_lam_abs < 0.0 {
-        k_raw.ceil() as i64
-    } else {
-        k_raw.floor() as i64
-    };
-    if k == 0 {
-        return Err(format!(
-            "Schröder: shift computed zero (|t|={:.6e}, target={:.6e}, |λ|={:.6})",
-            t_abs, target, state.lam_abs
-        ));
-    }
-    if k.unsigned_abs() > 5000 {
-        return Err(format!(
-            "Schröder: requested shift |k|={} too large; argument too far from fixed point",
-            k.unsigned_abs()
-        ));
-    }
+    let initial_target = state.sigma_inner_radius.min(state.safe_radius).min(t_abs);
 
-    let h_shifted = Complex::with_val(prec, h + k);
-    let lam_h_shifted = lambda_pow(&h_shifted, &state.ln_lambda, prec);
-    let t_shifted = Complex::with_val(prec, &state.s1 * &lam_h_shifted);
-    let inv_t_shifted = eval_series(&state.sigma_inv, &t_shifted, prec);
-    let mut f = Complex::with_val(prec, &state.l + &inv_t_shifted);
+    let mut effective_target = initial_target * 0.5;
+    let mut found: Option<(i64, Complex)> = None;
+    for _attempt in 0..30 {
+        let ratio = (effective_target / t_abs).ln();
+        let k_raw = ratio / log_lam_abs;
+        let mut k: i64 = if log_lam_abs < 0.0 {
+            k_raw.ceil() as i64
+        } else {
+            k_raw.floor() as i64
+        };
+        if k == 0 {
+            // Need at least one shift to move strictly inside effective_target
+            k = if log_lam_abs < 0.0 { 1 } else { -1 };
+        }
+        if k.unsigned_abs() > 5000 {
+            return Err(format!(
+                "Schröder: requested shift |k|={} too large; argument too far from fixed point",
+                k.unsigned_abs()
+            ));
+        }
 
-    if cnum::verbose() {
-        let t_sh = Float::with_val(prec, t_shifted.abs_ref()).to_f64();
-        let f_sh = Float::with_val(prec, f.abs_ref()).to_f64();
-        eprintln!("schröder eval: k={} |t_shifted|={:.6} |F(h+k)|={:.6}", k, t_sh, f_sh);
+        let h_shifted = Complex::with_val(prec, h + k);
+        let lam_h_shifted = lambda_pow(&h_shifted, &state.ln_lambda, prec);
+        let t_shifted = Complex::with_val(prec, &state.s1 * &lam_h_shifted);
+        match eval_series_checked(&state.sigma_inv, &t_shifted, prec) {
+            Ok(inv_t_shifted) => {
+                let f0 = Complex::with_val(prec, &state.l + &inv_t_shifted);
+                found = Some((k, f0));
+                if cnum::verbose() {
+                    let t_sh = Float::with_val(prec, t_shifted.abs_ref()).to_f64();
+                    eprintln!(
+                        "schröder eval: k={} |t_shifted|={:.6e} (target={:.3e})",
+                        k, t_sh, effective_target
+                    );
+                }
+                break;
+            }
+            Err(_) => {
+                effective_target *= 0.5;
+            }
+        }
     }
+    let (k, mut f) = found.ok_or_else(|| {
+        format!(
+            "Schröder: σ̃⁻¹ never converged after k-shift attempts (|t|={:.3e}, |λ|={:.4})",
+            t_abs, state.lam_abs
+        )
+    })?;
 
     if k > 0 {
         // F(h) = log_b applied k times to F(h+k).
@@ -409,6 +414,13 @@ fn pick_n_terms(lambda_abs: f64, prec: u32) -> usize {
     // mechanism caps |t| ≲ 0.5·|1 − L|, making ρ ≲ 0.5 in adverse cases.
     // Hitting d decimal digits then needs N ≳ d/log10(1/ρ) ≈ 3.5·d. Scale
     // with decimal digits, not bits.
+    //
+    // The σ̃-shift mechanism (in eval_sigma_with_shift and eval_schroder)
+    // brings |w_curr| and |t| arbitrarily close to 0, so even when the series
+    // radius R_σ is small (near-boundary |λ|), we can use a moderate N. The
+    // O(N³) build cost dominates, so keep N capped at 1500 — adequate when
+    // σ̃-shift is doing its job. Cases that genuinely need N>1500 won't be
+    // helped by larger N (the build cost would be hours).
     let digits = (prec as f64 * std::f64::consts::LOG10_2) as usize;
     let near_boundary = 1.0 - lambda_abs;
     let bonus = if near_boundary < 0.2 { 250 } else if near_boundary < 0.4 { 80 } else { 0 };

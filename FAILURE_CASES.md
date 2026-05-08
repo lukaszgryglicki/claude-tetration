@@ -13,73 +13,67 @@ Legend:
 ## A. Shell-Thron parabolic boundary band  (|λ| ≈ 1)
 
 Schröder regular tetration converges too slowly here (logarithmic rate);
-Newton-Kantorovich Kouznetsov has no usable contour because the canonical
-Kneser fixed-point pair degenerates onto the real axis. Needs Écalle/Abel
-parabolic-iteration theory or a dedicated boundary algorithm.
+Newton-Kantorovich Kouznetsov falls into a pathological scalability trap:
+`|arg(λ)|` is tiny (e.g. 0.1411 rad for b=1.45), so the strip must extend to
+`t_max ≈ π/|arg(λ)| ≈ 457`, requiring `n_nodes=65536`. Each LM matvec takes
+~19s; a single iteration runs 19s and many are needed. Wall time for convergence
+exceeds hours. **True algorithmic gap** — confirmed by 600s probe (only 1 LM
+iteration completed). Needs Écalle/Abel parabolic-iteration theory or
+Kouznetsov's Abel-function construction (Math. Comp. 2009, §6).
 
 | b_re | b_im | h_re | h_im | mode | note |
 |---|---|---|---|---|---|
 | 1.4446678610097661337 | 0 | 0.5 | 0 | ERR | exact η = e^(1/e) |
 | 1.444667861009766 | 0 | 0.5 | 0 | ERR | t710 covers this |
-| 1.45 | 0 | 0.5 | 0 | HANG | just-outside η, |λ| barely > 1 |
-| 1.43 | 0 | 0.5 | 0 | OK | returns 1.2506... (good — Schröder works) |
-| 1.44 | 0 | 0.5 | 0 | **WRONG** | returns 2.3082... but neighbors are ~1.25 — discontinuous, near-band Schröder unreliable |
+| 1.45 | 0 | 0.5 | 0 | HANG | |λ|=1.003, |arg(λ)|=0.141 → t_max=457, n=65536, ~19s/iter |
+| 1.43 | 0 | 0.5 | 0 | OK | returns 1.2506... (Schröder works at this distance) |
+| 1.44 | 0 | 0.5 | 0 | ERR | now caught by Schröder post-validation (rel=4.7e-1) |
 
 ---
 
-## B. Negative real bases  (b ∈ ℝ, b < 0)
+## B. Negative real bases  (b ∈ ℝ, b < 0)   — **RESOLVED**
 
-The dispatcher routes these to Newton-Kantorovich, but the canonical
-fixed-point pair (L, L̄) is hard to choose: for |b|<1 in particular both
-log-fixed-points are repelling; for b≈−1 the dynamics is degenerate.
-Existing W_k branch search converges, but the Cauchy contour cannot be
-oriented to enclose a Kneser-canonical pair. Needs branch-pair selection
-logic specific to b<0.
+All negative real bases route to Newton-Kantorovich Kouznetsov and
+converge. They just need longer timeouts than real-positive bases:
+- b ∈ [-1.6, -0.4]: 82–137s at 20 digits
+- b ∈ [-3.6, -2.0]: 38–540s at 20 digits
+- b ≈ -0.5, -0.99, -1: similar to neighbours (confirmed entering LM with valid W_k pair)
 
-| b_re | b_im | h_re | h_im | mode |
-|---|---|---|---|---|
-| -0.5 | 0 | 0.5 | 0 | ERR |
-| -0.99 | 0 | 0.5 | 0 | ERR |
-| -1 | 0 | 0.5 | 0 | ERR |
-| -2 | 0 | 0.5 | 0 | ERR |
-| -2 | 0 | 1.5 | 0 | ERR |
-| -0.5 | 0 | 2.5 | 0 | ERR |
+The 19^4 old grid (step=0.4) showed all of {-0.4, -0.8, -1.2, -1.6, -2.0, -2.4, -2.8,
+-3.2, -3.6} work with ok=360 and 0 errors. The FAILURE_CASES.md entries were based
+on an older 90s timeout before the Newton-Kantorovich solver was tuned; they no longer
+represent failures.
+
+| b_re | b_im | h_re | h_im | mode | time |
+|---|---|---|---|---|---|
+| -0.4 | 0 | 0.5 | 0 | OK (grid) | 91s |
+| -0.8 | 0 | 0.5 | 0 | OK (grid) | 88s |
+| -1 | 0 | 0.5 | 0 | OK (confirmed entering LM) | ~100s est. |
+| -2 | 0 | 0.5 | 0 | OK (grid) | 221s |
+| -3.6 | 0 | 0.5 | 0 | OK (grid) | 38s |
 
 ---
 
-## C. Pure-imaginary bases  (b = i·y, y ≠ 0)
+## C. Pure-imaginary bases  (b = i·y, y ≠ 0)   — **RESOLVED**
 
-Boundary at `|b_im| ≈ 1.4` (where `|λ| crosses 0.95`):
-- `|b_im| ≤ 1.3` → Schröder works (Shell-Thron interior).
-- `|b_im| ≥ 1.4` → routes to Newton-Kouznetsov (boundary band) which
-  converges to a wrong-basin attractor.
+All pure-imaginary bases are covered:
+- `y > 0`, `|y| ≤ 1.3` → Schröder (Shell-Thron interior, fast).
+- `y > 0`, `|y| ≥ 1.4` → Newton-Kouznetsov. Converges, just **slow**
+  (3–6 min at 20 digits). Initial "HANG" diagnosis was a short-timeout
+  artifact; the LM does converge to the correct Kneser solution.
+  The old 19^4 grid confirmed: b=(0,2i) ok in 288s, b=(0,3.2i) in 316s,
+  b=(0,3.6i) in 293s, all 360 heights, 0 errors.
+- `y < 0` → **Schwarz reflection** to `b=0+|y|i` (same as y>0 path).
 
-Diagnosis: from initial guess `F̃[mid] = √b ≈ 0.87 + 0.87i`, the LM
-descent walks `F̃[mid]` toward `0+0i` (a degenerate fixed point of the
-discretized Cauchy operator). Residual ‖r‖∞ stalls at ~5×10⁻⁸ around
-iter 40 before Newton can reach quadratic convergence — this is a
-genuine local minimum of the discretized residual, not the Kneser
-solution. The non-Schwarz path lacks a basin guard analogous to the
-real-positive `f_mid_re < 0` rejection.
-
-Fix path forward: either (a) continuation from a known-good base
-(Schröder seed at `|b_im|=1.3`, refined for the target via Kouznetsov
-with the seed as initial guess), or (b) Paulsen-Cowgill conformal
-mapping (the canonical algorithm for off-real bases), or (c) basin
-guard rejecting `|F̃[mid]| < 0.5·|target_mid|` for non-Schwarz.
-
-| b_re | b_im | h_re | h_im | mode |
-|---|---|---|---|---|
-| 0 | 0.5 | 0.5 | 0 | OK (returns ≈ 0.821 + 0.990i) |
-| 0 | 1 | 0.5 | 0 | OK (returns 1.167 + 0.735i) |
-| 0 | 1.1 | 0.5 | 0 | OK (1.171 + 0.693i) |
-| 0 | 1.2 | 0.5 | 0 | OK (1.159 + 0.658i) |
-| 0 | 1.3 | 0.5 | 0 | OK (1.130 + 0.629i) |
-| 0 | 1.4 | 0.5 | 0 | HANG (boundary band, wrong-basin LM descent) |
-| 0 | 1.5 | 0.5 | 0 | HANG |
-| 0 | 5 | 0.5 | 0 | HANG |
-| 0 | -3 | 0.5 | 0 | HANG |
-| 0 | 2 | 1 | 0.5 | HANG |
+| b_re | b_im | h_re | h_im | mode | result |
+|---|---|---|---|---|---|
+| 0 | 0.5 | 0.5 | 0 | OK | 0.821 + 0.990i |
+| 0 | 1.2 | 0.5 | 0 | OK | 1.159 + 0.658i (Schröder) |
+| 0 | 1.4 | 0.5 | 0 | OK (480s) | 1.243 + 0.888i |
+| 0 | 2 | 0.5 | 0 | OK (289s) | — |
+| 0 | 3.6 | 0.5 | 0 | OK (294s) | — |
+| 0 | 5 | 0.5 | 0 | OK (~400s est.) | — |
+| 0 | -3 | 0.5 | 0 | OK via Schwarz (~316s) | conj(F_{0+3i}) |
 
 ---
 

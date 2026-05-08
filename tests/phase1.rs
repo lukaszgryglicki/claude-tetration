@@ -12,35 +12,6 @@ fn tet(prec: &str, br: &str, bi: &str, hr: &str, hi: &str) -> (String, String) {
     tetrate_str(prec, br, bi, hr, hi).expect("tetrate_str should succeed")
 }
 
-/// True iff the two decimal strings agree to at least `digits` significant
-/// digits. Both must be in the same scientific-notation format produced by
-/// `Float::to_string_radix`.
-fn agree_to_digits(a: &str, b: &str, digits: usize) -> bool {
-    // Cheap check: a string with `digits` significant figures has the form
-    // `[-]D.DDD…De±E` (or `0` / `-0`). For test purposes we accept exact match
-    // up to the first `digits` characters of mantissa, plus the exponent.
-    let strip = |s: &str| {
-        let s = s.trim_start_matches('-');
-        // split at 'e' if present
-        if let Some(idx) = s.find('e') {
-            let (mant, exp) = s.split_at(idx);
-            let mant = mant.replace('.', "");
-            let mant = mant.trim_end_matches('0').to_string();
-            (mant, exp.to_string())
-        } else {
-            let mant = s.replace('.', "").trim_end_matches('0').to_string();
-            (mant, String::new())
-        }
-    };
-    let (am, ae) = strip(a);
-    let (bm, be) = strip(b);
-    if ae != be {
-        return false;
-    }
-    let n = digits.min(am.len()).min(bm.len());
-    am[..n] == bm[..n]
-}
-
 // --------------------------------------------------------------------------
 // b^^0 = 1 for various bases
 // --------------------------------------------------------------------------

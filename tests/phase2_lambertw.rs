@@ -58,7 +58,7 @@ fn check_residual(w: &Complex, z: &Complex, prec: u32, tol_bits: u32) -> Result<
     // Try relative bound: |r| / |z| < 2^{-tol_bits}
     if !z_abs.is_zero() {
         let rel = Float::with_val(prec, &r_abs / &z_abs);
-        if rel.get_exp().map_or(true, |e| e <= bound_exp_abs) {
+        if rel.get_exp().is_none_or(|e| e <= bound_exp_abs) {
             return Ok(());
         }
         Err(format!(

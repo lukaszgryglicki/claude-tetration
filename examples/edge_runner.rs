@@ -199,7 +199,7 @@ enum BaseCache {
     SchroderCached(schroder::SchroderState),
     KouznetsovCached(kouznetsov::KouznetsovState),
     SetupError(String),
-    SetupErrorFallback(String),
+    SetupErrorFallback,
 }
 
 impl BaseCache {
@@ -210,7 +210,7 @@ impl BaseCache {
             BaseCache::SchroderCached(_)   => "schr",
             BaseCache::KouznetsovCached(_) => "kouz",
             BaseCache::SetupError(_)       => "err",
-            BaseCache::SetupErrorFallback(_)=> "fallback",
+            BaseCache::SetupErrorFallback  => "fallback",
         }
     }
 }
@@ -236,7 +236,7 @@ fn build_cache(b: &Complex, prec: u32, digits: u64) -> BaseCache {
         | regions::Region::OutsideShellThronGeneral(d) => {
             match kouznetsov::setup_kouznetsov(b, d, prec, digits) {
                 Ok(s) => BaseCache::KouznetsovCached(s),
-                Err(e) => BaseCache::SetupErrorFallback(format!("Kouznetsov setup: {}", e)),
+                Err(_) => BaseCache::SetupErrorFallback,
             }
         }
     }
@@ -255,7 +255,7 @@ fn eval_cell(
     match cache {
         BaseCache::SpecialBase
         | BaseCache::DispatchFallback
-        | BaseCache::SetupErrorFallback(_) => dispatch::tetrate(b, h, prec, digits),
+        | BaseCache::SetupErrorFallback   => dispatch::tetrate(b, h, prec, digits),
         BaseCache::SchroderCached(state)   => schroder::eval_schroder(state, h),
         BaseCache::KouznetsovCached(state) => kouznetsov::eval_kouznetsov(state, b, h),
         BaseCache::SetupError(e)           => Err(e.clone()),

@@ -2095,7 +2095,7 @@ fn solve_complex_lin(
     if n == 0 {
         return Ok(Vec::new());
     }
-    let mut a: Vec<Vec<Complex>> = a_in.iter().map(|row| row.clone()).collect();
+    let mut a: Vec<Vec<Complex>> = a_in.to_vec();
     let mut b: Vec<Complex> = b_in.to_vec();
 
     for k in 0..n {
@@ -2891,7 +2891,7 @@ pub fn setup_kouznetsov_continuation(
     // Starting point: far enough from η that the direct solver handles it
     // without triggering the parabolic-boundary cap.
     // b=1.75 has |arg(λ)|≈0.9, giving n_nodes≈4096 at 20 digits.
-    let b_start = (b_re_target + 0.35_f64).max(1.75_f64).min(2.5_f64);
+    let b_start = (b_re_target + 0.35_f64).clamp(1.75_f64, 2.5_f64);
 
     // Step count: ≤ 0.025 per step keeps the warm-start error small enough
     // for quadratic LM convergence in ≤ 5 iterations.

@@ -225,7 +225,7 @@ mod tests {
                 Complex::with_val(prec, (Float::with_val(prec, i as f64), Float::with_val(prec, (i * 2) as f64)))
             })
             .collect();
-        let original: Vec<Complex> = x.iter().cloned().collect();
+        let original: Vec<Complex> = x.to_vec();
         fft(&mut x, prec, false);
         fft(&mut x, prec, true);
         for i in 0..n {

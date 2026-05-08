@@ -19,11 +19,11 @@
 //! status ∈ {ok, undef, error}.
 //!   * `ok`      — algorithm produced a value at requested precision.
 //!   * `undef`   — cell lies in a mathematically-undefined domain
-//!                 (b=0 with non-integer height; h ≤ −2 integer where
-//!                 F(h) would require log_b(0)). Not an algorithm failure.
+//!     (b=0 with non-integer height; h ≤ −2 integer where
+//!     F(h) would require log_b(0)). Not an algorithm failure.
 //!   * `error`   — algorithm failed to produce a value despite the cell
-//!                 being well-defined; the error column carries the
-//!                 one-line reason.
+//!     being well-defined; the error column carries the
+//!     one-line reason.
 //!
 //! Progress (stderr): one line per base summarizing OK / ERROR counts and
 //! per-base wall time.

@@ -558,6 +558,7 @@ fn reverse_series(c: &[Complex], m: usize, prec: u32) -> Vec<Complex> {
 ///     its basin contract to 0. Compensate by `σ̃(w₀) = σ̃(φ⁻ⁿ(w₀)) · λⁿ`.
 ///     Uses principal log; this is fine as long as the orbit `L + φ⁻ᵏ(w)`
 ///     stays away from the origin (the log branch point).
+///
 /// Returns `(σ̃(w0), inner_radius)` where `inner_radius` is the `|w_curr|` at
 /// which the Taylor series was actually evaluated (after φ-shifts). This lets
 /// callers know the proven convergent radius for future `σ̃⁻¹` evaluations.

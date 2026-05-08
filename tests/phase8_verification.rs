@@ -380,3 +380,26 @@ fn t860_schwarz_reflection_conjugate_base() {
         );
     }
 }
+
+#[test]
+fn t870_parabolic_boundary_clean_err() {
+    // Class A: bases very close to η=e^(1/e) require |arg(λ)| ≈ 0 → n_nodes > 32K.
+    // Must return ERR quickly (< 5s), not hang.
+    let digits = 20u64;
+    let prec = cnum::digits_to_bits(digits);
+    // b=1.45: |arg(λ)|=0.141 → n_nodes=65536 > 32768 — parabolic guard triggers.
+    let b = parse("1.45", "0", prec);
+    let h = parse("0.5", "0", prec);
+    let result = dispatch::tetrate(&b, &h, prec, digits);
+    assert!(
+        result.is_err(),
+        "b=1.45 should fail with parabolic-boundary ERR, got {:?}",
+        result
+    );
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("parabolic boundary") || msg.contains("Abel"),
+        "ERR message should mention parabolic boundary or Abel, got: {}",
+        msg
+    );
+}

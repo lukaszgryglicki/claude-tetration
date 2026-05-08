@@ -254,6 +254,19 @@ pub fn setup_kouznetsov(
     // analyticity-strip width `|arg(λ)|` driving the per-node convergence rate.
     let n_nodes = pick_node_count(digits, t_max_f64, arg_lambda);
 
+    // Parabolic-boundary guard: near |λ|=1 with arg(λ)≈0 the strip height
+    // t_max = O(1/arg(λ)) blows up, requiring n_nodes ≫ 32 K and ~20s/LM-iter.
+    // We cannot converge in any reasonable time — bail with a clean ERR.
+    // (Kouznetsov 2009 §6 / Écalle theory needed for this regime.)
+    const N_MAX_PRACTICAL: usize = 32_768;
+    if n_nodes > N_MAX_PRACTICAL {
+        return Err(format!(
+            "Kouznetsov: |arg(λ)| = {:.4} too small (parabolic boundary), \
+             requires n_nodes={} > {} — not supported; needs Abel/Écalle theory",
+            arg_lambda, n_nodes, N_MAX_PRACTICAL
+        ));
+    }
+
     let nodes = build_uniform_nodes(&t_max, n_nodes, prec);
     let weights = build_trapezoidal_weights(&t_max, n_nodes, prec);
 

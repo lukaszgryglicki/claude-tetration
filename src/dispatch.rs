@@ -169,12 +169,16 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
                             return Ok(v);
                         }
                     }
+                    dprint("complex-base boundary: trying iε Richardson R₄ fallback");
+                    if let Ok(v) = try_iperturbation_extrapolation(b, h, prec, digits) {
+                        return Ok(v);
+                    }
                     Err(unsupported_msg(
                         "Shell-Thron parabolic boundary band (|λ| ≈ 1)",
                         &format!(
-                            "Schröder regular tetration converges too slowly here, \
-                             and Newton-Kantorovich Kouznetsov Cauchy iteration \
-                             failed: {}",
+                            "Schröder regular tetration converges too slowly here; \
+                             Newton-Kantorovich Kouznetsov failed: {}; \
+                             iε-perturbation Richardson also failed",
                             why
                         ),
                     ))
@@ -268,17 +272,34 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
                 return Ok(v);
             }
             dprint("Schröder unavailable; trying Newton-Kouznetsov for complex base");
-            kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits).map_err(|why| {
-                unsupported_msg(
-                    "general complex base outside Shell-Thron",
-                    &format!(
-                        "Schröder regular tetration not applicable, and \
-                         Newton-Kantorovich Kouznetsov Cauchy iteration \
-                         failed: {}",
+            match kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits) {
+                Ok(v) => Ok(v),
+                Err(why) => {
+                    // Final fallback for general complex bases when Kouznetsov
+                    // fails: iε R₄ Richardson, capped at ~15-17 digits but
+                    // unconditional (no algorithm-specific signal required).
+                    // Only triggered in the OutsideShellThronGeneral region,
+                    // i.e. |λ| > 1.05; nothing here recurses back into
+                    // ShellThronBoundary because the perturbed bases lift off
+                    // the parabolic curve.
+                    dprint(&format!(
+                        "Kouznetsov failed for complex base ({}); trying iε Richardson R₄",
                         why
-                    ),
-                )
-            })
+                    ));
+                    if let Ok(v) = try_iperturbation_extrapolation(b, h, prec, digits) {
+                        return Ok(v);
+                    }
+                    Err(unsupported_msg(
+                        "general complex base outside Shell-Thron",
+                        &format!(
+                            "Schröder regular tetration not applicable; \
+                             Newton-Kantorovich Kouznetsov failed: {}; \
+                             iε-perturbation Richardson also failed",
+                            why
+                        ),
+                    ))
+                }
+            }
         }
     }
 }
@@ -331,21 +352,29 @@ fn try_continuation(
     kouznetsov::eval_kouznetsov(&state, b, h)
 }
 
-/// Four-point Richardson fallback for real bases trapped in the parabolic band.
+/// Four-point Richardson fallback for bases trapped in the parabolic band.
 ///
 /// When direct Kouznetsov and continuation both fail because |arg(λ)| → 0
-/// (i.e. b is real and just above η = e^(1/e)), we leave the real axis and
-/// evaluate at b + iε for several ε values, then Richardson-extrapolate to
-/// ε = 0.
+/// (the iteration multiplier sits on the unit circle), we leave the boundary
+/// curve by perturbing `b` along the imaginary direction by ε, then
+/// Richardson-extrapolate `G(ε)` to ε = 0. Two regimes are handled:
 ///
-/// For real b ∈ ℝ the canonical Kneser tetration F_b(h) is real-valued. The
-/// Schwarz-symmetry F̄(b̄+iε̄, h̄) = F(b-iε, h) implies that on a real horizontal
-/// height segment Re(F(b+iε)) is even in ε while Im(F(b+iε)) is odd in ε.
-/// Thus `Re(F(b+iε, h)) = Re(F(b, h)) + a₂·ε² + a₄·ε⁴ + a₆·ε⁶ + O(ε⁸)` and
-/// `Im(F(b+iε, h)) = c₁·ε + c₃·ε³ + O(ε⁵) → 0`.
+///   * **Purely real b.** The canonical Kneser tetration F_b(h) is real-valued
+///     for real h, and Schwarz reflection F̄(b̄, h̄) = F(b, h) gives
+///     `F(b−iε, h) = conj(F(b+iε, conj h))`. We exploit that to compute
+///     `G(ε)` from a single perturbed branch:
+///       - real h: G(ε) := F(b+iε, h) (Re even / Im odd in ε; project to Re).
+///       - complex h: G(ε) := (F(b+iε, h) + conj(F(b+iε, conj h))) / 2.
+///
+///   * **Complex b.** Schwarz no longer ties `b+iε` to `b−iε`, so we compute
+///     both perturbed branches directly:
+///       G(ε) := (F(b+iε, h) + F(b−iε, h)) / 2.
+///     Because tetration is holomorphic in b away from the parabolic curve,
+///     the Taylor expansion in ε around any boundary point has only even
+///     powers in this average — exactly the structure the R₄ ladder wants.
 ///
 /// Romberg-style table on five evaluations at ε ∈ {0.1, 0.05, 0.025, 0.0125, 0.00625}:
-/// `R₁(ε) = (4·F(ε/2) − F(ε))/3` cancels ε² → O(ε⁴);
+/// `R₁(ε) = (4·G(ε/2) − G(ε))/3` cancels ε² → O(ε⁴);
 /// `R₂(ε) = (16·R₁(ε/2) − R₁(ε))/15` cancels ε⁴ → O(ε⁶);
 /// `R₃(ε) = (64·R₂(ε/2) − R₂(ε))/63` cancels ε⁶ → O(ε⁸);
 /// `R₄(ε) = (256·R₃(ε/2) − R₃(ε))/255` cancels ε⁸ → O(ε¹⁰).
@@ -356,31 +385,31 @@ fn try_continuation(
 /// b=1.4448. Theoretical residual O(0.00625¹⁰) ≈ 9e-23 is unattainable in
 /// practice — higher-order Taylor coefficients (a₈ ≈ 10³ at b=1.4448) grow
 /// rapidly near the parabolic boundary, eating most of the ε⁸ improvement.
-/// Cost: one additional perturbed Kouznetsov solve vs R₃ (~25% more wall
-/// time). The smallest ε used is 0.00625; empirically at b=1.4448 this
-/// gives |λ|≈0.899 (still well-interior in Shell-Thron), and the perturbed
-/// evaluation runs the Schröder interior path in ~8s at 20 digits.
+/// Cost: 5 perturbed Kouznetsov solves for real b, 10 for complex b. With
+/// rayon, all run in parallel; on multi-core systems this is close to one
+/// solve of wall-clock time.
 ///
-/// Constraints:
-///   * Only invoked for `b` purely real (Im(b) is exactly zero).
-///   * Calls `tetrate` recursively at the perturbed bases. The dispatcher
-///     routes b+iε as OutsideShellThronGeneral → Kouznetsov, so this does
-///     not re-enter the iε fallback.
+/// Recursion: the perturbed inputs route back through `tetrate`. For real
+/// b on the parabolic boundary, b±iε generically lifts off into
+/// OutsideShellThronGeneral or ShellThronInterior, so no recursion. For
+/// complex b on the boundary, the same holds because the boundary is a 1-D
+/// curve in 2-D — a generic perturbation direction lifts off it.
 fn try_iperturbation_extrapolation(
     b: &Complex,
     h: &Complex,
     prec: u32,
     digits: u64,
 ) -> Result<Complex, String> {
-    if !b.imag().is_zero() {
-        return Err("iε-perturbation only applies for purely real bases".to_string());
-    }
     let b_re = b.real().clone();
+    let b_im = b.imag().clone();
+    let b_is_real = b.imag().is_zero();
     let h_is_real = h.imag().is_zero();
 
     let prec_inner = prec.saturating_add(64);
-    let mk_pert = |eps: f64| -> Complex {
-        let im = Float::with_val(prec_inner, eps);
+    let mk_pert = |signed_eps: f64| -> Complex {
+        // Returns b + i·signed_eps with arbitrary-precision arithmetic.
+        let eps_f = Float::with_val(prec_inner, signed_eps);
+        let im = Float::with_val(prec_inner, &b_im) + eps_f;
         Complex::with_val(prec_inner, (b_re.clone(), im))
     };
     let h_inner = Complex::with_val(prec_inner, h);
@@ -389,7 +418,8 @@ fn try_iperturbation_extrapolation(
     let epss = [0.1f64, 0.05, 0.025, 0.0125, 0.00625];
 
     dprint(&format!(
-        "iε Richardson R₄: tetrate at b+{}i, b+{}i, b+{}i, b+{}i, b+{}i (h_is_real={})",
+        "iε Richardson R₄ ({}): ε ∈ {{{}, {}, {}, {}, {}}} (h_is_real={})",
+        if b_is_real { "real-base, Schwarz fold" } else { "complex-base, two-sided" },
         epss[0], epss[1], epss[2], epss[3], epss[4], h_is_real
     ));
     eprintln!(
@@ -397,31 +427,34 @@ fn try_iperturbation_extrapolation(
          expect roughly 15–17 useful digits regardless of requested precision."
     );
 
-    // Evaluate G(ε) at five ε. For real h, G(ε) := F(b+iε, h); the Schwarz
-    // symmetry F̄(b̄+iε̄, h̄) = F(b−iε, h) gives Re(G) even and Im(G) odd in ε,
-    // so the canonical real F(b, h) is the ε→0 limit of Re(G).
+    // Compute G(ε) at five ε. Strategy depends on whether b is real:
+    //   - real b, real h:    G(ε) = F(b+iε, h)            (Schwarz handles parity)
+    //   - real b, complex h: G(ε) = (F(b+iε, h) + conj(F(b+iε, conj h))) / 2
+    //   - complex b, any h:  G(ε) = (F(b+iε, h) + F(b−iε, h)) / 2
     //
-    // For complex h, the parity breaks. We restore it by symmetrizing manually:
-    //     G(ε) := (F(b+iε, h) + conj(F(b+iε, conj(h)))) / 2.
-    // This averages the b+iε branch with the b−iε branch (the latter is
-    // F(b−iε, h) = conj(F(b+iε, conj(h))) by Schwarz). The resulting G(ε) is
-    // even in ε with leading correction O(ε²), exactly like the real-h case;
-    // it is complex-valued (the desired F(b, h)).
-    //
-    // The five ε evaluations are independent — run them in parallel via
-    // rayon. Each Kouznetsov solve is single-threaded, so this gives close
-    // to a 5× speedup on multi-core systems.
+    // All ε evaluations are independent — run them in parallel via rayon.
+    // Each tetrate call is single-threaded, so this is close to a 5×
+    // (real b) or 10× (complex b, parallel pairs) speedup on multi-core.
     let eval = |eps: f64| -> Result<Complex, String> {
         let f_plus = tetrate(&mk_pert(eps), &h_inner, prec_inner, digits)
-            .map_err(|e| format!("iε-perturbation: tetrate(b+{}i, h) failed: {}", eps, e))?;
-        if h_is_real {
+            .map_err(|e| format!("iε R₄: tetrate(b+{}i, h) failed: {}", eps, e))?;
+        if b_is_real && h_is_real {
             return Ok(f_plus);
         }
-        let f_plus_conjh = tetrate(&mk_pert(eps), &h_inner_conj, prec_inner, digits)
-            .map_err(|e| format!("iε-perturbation: tetrate(b+{}i, conj(h)) failed: {}", eps, e))?;
-        let f_plus_conjh_conj = Complex::with_val(prec_inner, f_plus_conjh.conj_ref());
+        let f_minus = if b_is_real {
+            // Schwarz: F(b−iε, h) = conj(F(b+iε, conj h)). One extra perturbed
+            // call instead of computing b−iε directly.
+            let f_plus_conjh = tetrate(&mk_pert(eps), &h_inner_conj, prec_inner, digits)
+                .map_err(|e| format!("iε R₄: tetrate(b+{}i, conj h) failed: {}", eps, e))?;
+            Complex::with_val(prec_inner, f_plus_conjh.conj_ref())
+        } else {
+            // Complex b: compute the b−iε branch directly. Schwarz cannot
+            // bridge b+iε ↔ b−iε when b itself is off the real axis.
+            tetrate(&mk_pert(-eps), &h_inner, prec_inner, digits)
+                .map_err(|e| format!("iε R₄: tetrate(b−{}i, h) failed: {}", eps, e))?
+        };
         let two = Float::with_val(prec_inner, 2u32);
-        let avg = (f_plus + f_plus_conjh_conj) / Complex::with_val(prec_inner, &two);
+        let avg = (f_plus + f_minus) / Complex::with_val(prec_inner, &two);
         Ok(avg)
     };
 
@@ -470,7 +503,7 @@ fn try_iperturbation_extrapolation(
         );
     }
 
-    if h_is_real {
+    if b_is_real && h_is_real {
         // Force imag to 0 for real-base, real-h Kneser tetration.
         let r_real = Float::with_val(prec, r4.real());
         let zero = Float::with_val(prec, 0);

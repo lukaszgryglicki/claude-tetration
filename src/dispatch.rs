@@ -363,12 +363,11 @@ fn try_continuation(
 ///     for real h, and Schwarz reflection F̄(b̄, h̄) = F(b, h) gives
 ///     `F(b−iε, h) = conj(F(b+iε, conj h))`. We exploit that to compute
 ///     `G(ε)` from a single perturbed branch:
-///       - real h: G(ε) := F(b+iε, h) (Re even / Im odd in ε; project to Re).
-///       - complex h: G(ε) := (F(b+iε, h) + conj(F(b+iε, conj h))) / 2.
+///     - real h: G(ε) := F(b+iε, h) (Re even / Im odd in ε; project to Re).
+///     - complex h: G(ε) := (F(b+iε, h) + conj(F(b+iε, conj h))) / 2.
 ///
 ///   * **Complex b.** Schwarz no longer ties `b+iε` to `b−iε`, so we compute
-///     both perturbed branches directly:
-///       G(ε) := (F(b+iε, h) + F(b−iε, h)) / 2.
+///     both perturbed branches directly: G(ε) := (F(b+iε, h) + F(b−iε, h)) / 2.
 ///     Because tetration is holomorphic in b away from the parabolic curve,
 ///     the Taylor expansion in ε around any boundary point has only even
 ///     powers in this average — exactly the structure the R₄ ladder wants.

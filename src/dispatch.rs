@@ -30,6 +30,35 @@ fn dprint(s: &str) {
     }
 }
 
+/// Reject a Schröder result that cannot be the canonical Kneser tetration.
+///
+/// For a real-positive base and a real height, the canonical (Kneser) tetration
+/// is real-valued on the real axis. The Schröder construction at a *repelling*
+/// (|λ|>1, complex) fixed point — which the dispatcher attempts first in the
+/// boundary band and the real-positive outside region — produces a holomorphic
+/// `F` satisfying `F(z+1)=b^F(z)` and `F(0)=1`, yet it is **not necessarily real
+/// on the real axis** (documented in `schroder.rs`). Such a value would pass the
+/// functional-equation post-check (which both the canonical and non-canonical
+/// branches satisfy) and be returned as a wrong-but-plausible answer.
+///
+/// We detect the failure by its tell-tale: a non-negligible imaginary part for a
+/// real `(b, h)`. Returning `false` makes the caller fall through to the
+/// Kouznetsov path, which constructs the canonical real-on-real solution. The
+/// test is a no-op for complex bases / complex heights (whose canonical result
+/// is genuinely complex), so it never rejects a legitimately-complex value.
+fn schroder_result_is_canonical(b: &Complex, h: &Complex, v: &Complex, prec: u32) -> bool {
+    let b_real_pos =
+        b.imag().is_zero() && b.real().is_sign_positive() && !b.real().is_zero();
+    if !(b_real_pos && h.imag().is_zero()) {
+        return true;
+    }
+    let im_abs = Float::with_val(prec, v.imag().abs_ref()).to_f64();
+    let scale = Float::with_val(prec, v.real().abs_ref()).to_f64().max(1.0);
+    // Canonical roundoff is ~10^-(prec) (≈1e-30+); a non-canonical branch has an
+    // O(1) imaginary part. 1e-9 cleanly separates the two regardless of digits.
+    (im_abs / scale) < 1e-9
+}
+
 /// Compute `F_b(h)` at the given precision (in MPC bits). `digits` is the
 /// requested decimal precision and is used for precision-ceiling warnings.
 pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Complex, String> {
@@ -122,10 +151,15 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
             // For complex bases on the boundary, |arg(λ)| can already be large,
             // so direct Kouznetsov often works; we keep the original order.
             match schroder::tetrate_schroder(b, h, d, prec) {
-                Ok(v) => {
+                Ok(v) if schroder_result_is_canonical(b, h, &v, prec) => {
                     dprint("Schröder succeeded at boundary band");
                     return Ok(v);
                 }
+                Ok(_) => dprint(
+                    "Schröder produced a non-real result for a real base+height at the \
+                     boundary band (non-canonical repelling branch); rejecting and \
+                     falling through to the canonical path",
+                ),
                 Err(e) => dprint(&format!("Schröder failed at boundary band: {}", e)),
             }
             let is_real_base =
@@ -193,10 +227,15 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
             // Cauchy iteration, which produces the natural real-on-real
             // tetration via samples on Re(z)=0.5 refined by Cauchy's formula.
             match schroder::tetrate_schroder(b, h, d, prec) {
-                Ok(v) => {
+                Ok(v) if schroder_result_is_canonical(b, h, &v, prec) => {
                     dprint("Schröder succeeded at repelling fixed point");
                     return Ok(v);
                 }
+                Ok(_) => dprint(
+                    "Schröder produced a non-real result for a real base+height \
+                     (non-canonical repelling branch); rejecting and switching to \
+                     Newton-Kouznetsov",
+                ),
                 Err(e) => dprint(&format!("Schröder unavailable ({}); switching to Newton-Kouznetsov", e)),
             }
             match kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits) {

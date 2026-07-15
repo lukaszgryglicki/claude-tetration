@@ -376,7 +376,7 @@ pub fn setup_kouznetsov(
     // such that F(δ) = 1, then for user height h evaluate F(h + δ). That maps
     // our (arbitrary-phase) F onto the natural F̃ via F̃(h) = F(h + δ).
     let shift = find_normalization_shift(
-        &samples, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
+        &samples, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits, use_schwarz,
     )?;
     if debug_phase {
         eprintln!("kouz phase: find_normalization_shift done ({:.2}s)", phase_start.elapsed().as_secs_f64());
@@ -443,6 +443,7 @@ fn find_normalization_shift(
     ln_b: &Complex,
     prec: u32,
     digits: u64,
+    real_axis: bool,
 ) -> Result<Complex, String> {
     let one = Complex::with_val(prec, (1u32, 0));
     let two = Float::with_val(prec, 2u32);
@@ -455,6 +456,23 @@ fn find_normalization_shift(
     let two_eps = Complex::with_val(prec, (Float::with_val(prec, &eps_f * &two), 0));
 
     let debug_norm = cnum::verbose();
+
+    // For real-positive bases the natural Kneser F satisfies Schwarz reflection
+    // F(z̄)=F̄(z), so F̃ is real on the real axis and the normalization shift δ
+    // (the unique solution of F̃(δ)=1) MUST be real — otherwise F(real h)=F̃(real
+    // h+δ) acquires a spurious imaginary part and is no longer the canonical
+    // real-on-real tetration. The Newton solve runs in complex arithmetic and a
+    // complex root chosen by the grid search (conjugate pairs share |c|) would
+    // silently break this. `finalize` projects the converged δ onto the real
+    // axis when `real_axis` is set; the grid search below is also restricted to
+    // real seeds in that case so the projected root genuinely satisfies F̃(δ)=1.
+    let finalize = |c: Complex| -> Complex {
+        if real_axis {
+            Complex::with_val(prec, (Float::with_val(prec, c.real()), Float::new(prec)))
+        } else {
+            c
+        }
+    };
 
     // Newton-Kantorovich step. Returns the best (c, |F(c)-1|) seen during
     // iteration. Two return cases:
@@ -539,7 +557,7 @@ fn find_normalization_shift(
                 Float::with_val(prec, c0.imag()).to_f64(),
             );
         }
-        return Ok(c0);
+        return Ok(finalize(c0));
     }
 
     // Slower path: grid search + Newton from EACH seed. Collect every
@@ -553,7 +571,13 @@ fn find_normalization_shift(
     let re_steps = [
         0.0f64, 0.25, -0.25, 0.5, -0.5, 0.75, -0.75, 1.0, -1.0, 1.25, -1.25, 1.5, -1.5,
     ];
-    let im_steps = [0.0f64, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0];
+    // Real-positive bases: only seed on the real axis so the converged root is
+    // real (δ must be real for Schwarz canonicality — see `finalize`).
+    let im_steps: &[f64] = if real_axis {
+        &[0.0f64]
+    } else {
+        &[0.0f64, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0]
+    };
 
     #[derive(Clone)]
     struct Root {
@@ -565,7 +589,7 @@ fn find_normalization_shift(
     let mut roots: Vec<Root> = Vec::new();
     let mut best_resid_seed: Option<(Complex, f64)> = None;
     for &cr in &re_steps {
-        for &ci in &im_steps {
+        for &ci in im_steps {
             let seed = Complex::with_val(
                 prec,
                 (Float::with_val(prec, cr), Float::with_val(prec, ci)),
@@ -613,7 +637,7 @@ fn find_normalization_shift(
                 chosen.re, chosen.im, chosen.abs,
             );
         }
-        return Ok(chosen.c);
+        return Ok(finalize(chosen.c));
     }
 
     // No seed converged Newton. If a partial-progress seed has low residual,
@@ -630,7 +654,7 @@ fn find_normalization_shift(
                     rval
                 );
             }
-            return Ok(c_partial);
+            return Ok(finalize(c_partial));
         }
     }
     Err(format!(
@@ -2012,6 +2036,29 @@ fn validate_best_residual(
         5.0
     };
     if best_residual.is_finite() && best_residual <= threshold {
+        // Accepted, but the LM did not reach the full-precision target
+        // (10^-(digits+3)); the boundary residual bounds the achievable accuracy
+        // from below. Warn the user honestly when the delivered precision is
+        // materially short of what was requested, with an order-of-magnitude
+        // estimate of the digits actually achieved (≈ -log10(residual)).
+        let full_target = 10f64.powf(-(digits as f64) - 3.0);
+        if best_residual > full_target.max(1e-300) {
+            let achieved = if best_residual > 0.0 {
+                (-best_residual.log10()).max(0.0)
+            } else {
+                digits as f64
+            };
+            eprintln!(
+                "warning: Kouznetsov did not reach full requested precision \
+                 ({reason}); boundary residual {best_residual:.2e} bounds accuracy \
+                 at roughly {achieved:.0} digits (requested {digits}).{}",
+                if use_schwarz {
+                    ""
+                } else {
+                    " Non-real bases use a relaxed acceptance gate; treat trailing digits as unverified."
+                }
+            );
+        }
         Ok(())
     } else {
         Err(format!(
@@ -2155,7 +2202,7 @@ fn eval_at_height(
     ln_b: &Complex,
     prec: u32,
 ) -> Result<Complex, String> {
-    // Integer-shift h so 0 ≤ Re(h_strip) ≤ 1.
+    // Integer-shift h so 0 ≤ Re(h_strip) < 1.
     let re_h = h.real().to_f64();
     let shift = re_h.floor() as i64;
     let h_strip = Complex::with_val(prec, h - shift);
@@ -3024,6 +3071,7 @@ pub fn setup_kouznetsov_continuation(
             &ln_b,
             prec,
             digits,
+            true, // continuation solver only supports real b → real shift
         )?;
 
         prev_state = Some(KouznetsovState {

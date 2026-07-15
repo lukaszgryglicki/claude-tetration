@@ -21,3 +21,5 @@ target
 #.idea/
 *.lock
 .claude/
+src*.txt
+/tet

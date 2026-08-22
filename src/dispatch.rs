@@ -32,24 +32,36 @@ fn dprint(s: &str) {
 
 /// Reject a Schröder result that cannot be the canonical Kneser tetration.
 ///
-/// For a real-positive base and a real height, the canonical (Kneser) tetration
-/// is real-valued on the real axis. The Schröder construction at a *repelling*
-/// (|λ|>1, complex) fixed point — which the dispatcher attempts first in the
-/// boundary band and the real-positive outside region — produces a holomorphic
-/// `F` satisfying `F(z+1)=b^F(z)` and `F(0)=1`, yet it is **not necessarily real
-/// on the real axis** (documented in `schroder.rs`). Such a value would pass the
-/// functional-equation post-check (which both the canonical and non-canonical
-/// branches satisfy) and be returned as a wrong-but-plausible answer.
+/// For a real-positive base `b > e^{-e}` and a real height, the canonical
+/// (Kneser) tetration is real-valued on the real axis. The Schröder
+/// construction at a *repelling* (|λ|>1, complex) fixed point — which the
+/// dispatcher attempts first in the boundary band and the real-positive
+/// outside region — produces a holomorphic `F` satisfying `F(z+1)=b^F(z)` and
+/// `F(0)=1`, yet it is **not necessarily real on the real axis** (documented
+/// in `schroder.rs`). Such a value would pass the functional-equation
+/// post-check (which both the canonical and non-canonical branches satisfy)
+/// and be returned as a wrong-but-plausible answer.
 ///
 /// We detect the failure by its tell-tale: a non-negligible imaginary part for a
 /// real `(b, h)`. Returning `false` makes the caller fall through to the
 /// Kouznetsov path, which constructs the canonical real-on-real solution. The
 /// test is a no-op for complex bases / complex heights (whose canonical result
 /// is genuinely complex), so it never rejects a legitimately-complex value.
+///
+/// **Cut bases 0 < b < e^{-e}** are exempt: there the real fixed point is
+/// repelling with λ real < −1 (period-doubling), no real-analytic tetration
+/// exists, and the canonical value — defined as the boundary limit
+/// `lim_{ε→0⁺} F(b+iε, h)`, consistent with the Schwarz-reflection convention
+/// used for Im(b) < 0 — is genuinely complex for non-integer real heights.
+/// The principal branch of ln λ used by the Schröder construction matches
+/// that limit (arg λ(b+iε) → +π as ε → 0⁺).
 fn schroder_result_is_canonical(b: &Complex, h: &Complex, v: &Complex, prec: u32) -> bool {
     let b_real_pos =
         b.imag().is_zero() && b.real().is_sign_positive() && !b.real().is_zero();
     if !(b_real_pos && h.imag().is_zero()) {
+        return true;
+    }
+    if b.real().to_f64() < ETA_LOWER_F64 {
         return true;
     }
     let im_abs = Float::with_val(prec, v.imag().abs_ref()).to_f64();
@@ -59,9 +71,38 @@ fn schroder_result_is_canonical(b: &Complex, h: &Complex, v: &Complex, prec: u32
     (im_abs / scale) < 1e-9
 }
 
+/// e^{-e} ≈ 0.06598803584531254: the lower endpoint of the Shell-Thron
+/// interval on the real axis. Real bases below it sit on the period-doubling
+/// cut where canonical tetration is complex-valued (one-sided limit from
+/// Im(b) > 0).
+const ETA_LOWER_F64: f64 = 0.065_988_035_845_312_54;
+
+/// Real-positive base strictly below e^{-e} (the "cut" segment).
+fn is_cut_base(b: &Complex) -> bool {
+    b.imag().is_zero()
+        && b.real().is_sign_positive()
+        && !b.real().is_zero()
+        && b.real().to_f64() < ETA_LOWER_F64
+}
+
 /// Compute `F_b(h)` at the given precision (in MPC bits). `digits` is the
 /// requested decimal precision and is used for precision-ceiling warnings.
 pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Complex, String> {
+    tetrate_impl(b, h, prec, digits, true)
+}
+
+/// Internal dispatcher. `allow_ipert` gates the iε-perturbation Richardson
+/// fallback: the five perturbed inner solves must never recurse into iε
+/// themselves (a failing inner solve would otherwise spawn 5 more perturbed
+/// solves each — an exponential process tree). Inner solves get
+/// `allow_ipert = false` and fail honestly instead.
+fn tetrate_impl(
+    b: &Complex,
+    h: &Complex,
+    prec: u32,
+    digits: u64,
+    allow_ipert: bool,
+) -> Result<Complex, String> {
     // ---- Special-case bases (don't need fixed-point computation) ----
     if cnum::is_one(b) {
         dprint("special case b=1 → 1");
@@ -90,7 +131,7 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
         dprint("Schwarz reflection: Im(b)<0, dispatching as conj(F_{b̄}(h̄))");
         let b_conj = Complex::with_val(prec, b.conj_ref());
         let h_conj = Complex::with_val(prec, h.conj_ref());
-        let result = tetrate(&b_conj, &h_conj, prec, digits)?;
+        let result = tetrate_impl(&b_conj, &h_conj, prec, digits, allow_ipert)?;
         return Ok(Complex::with_val(prec, result.conj_ref()));
     }
 
@@ -181,7 +222,7 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
                     "continuation failed: {}; trying iε-perturbation Richardson",
                     cont_err
                 ));
-                if let Ok(v) = try_iperturbation_extrapolation(b, h, prec, digits) {
+                if let Ok(v) = try_iperturbation_extrapolation(b, h, prec, digits, allow_ipert) {
                     return Ok(v);
                 }
                 return Err(unsupported_msg(
@@ -204,7 +245,7 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
                         }
                     }
                     dprint("complex-base boundary: trying iε Richardson R₄ fallback");
-                    if let Ok(v) = try_iperturbation_extrapolation(b, h, prec, digits) {
+                    if let Ok(v) = try_iperturbation_extrapolation(b, h, prec, digits, allow_ipert) {
                         return Ok(v);
                     }
                     Err(unsupported_msg(
@@ -236,7 +277,46 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
                      (non-canonical repelling branch); rejecting and switching to \
                      Newton-Kouznetsov",
                 ),
-                Err(e) => dprint(&format!("Schröder unavailable ({}); switching to Newton-Kouznetsov", e)),
+                Err(e) => {
+                    if is_cut_base(b) {
+                        // 0 < b < e^{-e}: the canonical value is the analytic
+                        // continuation from the upper half b-plane (equal to
+                        // the one-sided limit lim_{ε→0⁺} F(b+iε, h)), complex
+                        // for non-integer real h. The bi-asymptotic Kouznetsov
+                        // construction works *at* the real base with the
+                        // germ-tracked (W₀, W₊₁) fixed-point pair, but only
+                        // via warm ε-continuation from b+2i (cold solves sit
+                        // outside the Newton basin near the cut).
+                        dprint(&format!(
+                            "Schröder failed for cut base ({}); ε-continuation Kouznetsov",
+                            e
+                        ));
+                        eprintln!(
+                            "warning: cut base 0 < b < e^{{-e}} — walking ε-continuation from b+2i \
+                             (several warm Kouznetsov solves; this can take many minutes)."
+                        );
+                        return (|| -> Result<Complex, String> {
+                            let b_re = Float::with_val(prec, b.real());
+                            let st = kouznetsov::setup_kouznetsov_cut_base(&b_re, prec, digits)?;
+                            let b_exact = Complex::with_val(prec, (b_re, Float::new(prec)));
+                            kouznetsov::eval_kouznetsov(&st, &b_exact, h)
+                        })()
+                        .map_err(|ke| {
+                            unsupported_msg(
+                                "real base on the cut 0 < b < e^{-e}",
+                                &format!(
+                                    "Schröder: {}; \
+                                     ε-continuation Kouznetsov: {}",
+                                    e, ke
+                                ),
+                            )
+                        });
+                    }
+                    dprint(&format!(
+                        "Schröder unavailable ({}); switching to Newton-Kouznetsov",
+                        e
+                    ));
+                }
             }
             match kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits) {
                 Ok(v) => Ok(v),
@@ -268,7 +348,7 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
                                 cont_err
                             ));
                             if let Ok(v) =
-                                try_iperturbation_extrapolation(b, h, prec, digits)
+                                try_iperturbation_extrapolation(b, h, prec, digits, allow_ipert)
                             {
                                 return Ok(v);
                             }
@@ -325,7 +405,7 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
                         "Kouznetsov failed for complex base ({}); trying iε Richardson R₄",
                         why
                     ));
-                    if let Ok(v) = try_iperturbation_extrapolation(b, h, prec, digits) {
+                    if let Ok(v) = try_iperturbation_extrapolation(b, h, prec, digits, allow_ipert) {
                         return Ok(v);
                     }
                     Err(unsupported_msg(
@@ -411,6 +491,10 @@ fn try_continuation(
 ///     the Taylor expansion in ε around any boundary point has only even
 ///     powers in this average — exactly the structure the R₄ ladder wants.
 ///
+/// (Cut bases `0 < b < e^{-e}` do **not** come through here: their canonical
+/// value is computed directly at the real base by
+/// `kouznetsov::setup_kouznetsov_cut_base` — no regularization needed.)
+///
 /// Romberg-style table on five evaluations at ε ∈ {0.1, 0.05, 0.025, 0.0125, 0.00625}:
 /// `R₁(ε) = (4·G(ε/2) − G(ε))/3` cancels ε² → O(ε⁴);
 /// `R₂(ε) = (16·R₁(ε/2) − R₁(ε))/15` cancels ε⁴ → O(ε⁶);
@@ -437,7 +521,14 @@ fn try_iperturbation_extrapolation(
     h: &Complex,
     prec: u32,
     digits: u64,
+    allow_ipert: bool,
 ) -> Result<Complex, String> {
+    if !allow_ipert {
+        return Err(
+            "iε Richardson suppressed: already inside a perturbed solve (no nested iε)"
+                .to_string(),
+        );
+    }
     let b_re = b.real().clone();
     let b_im = b.imag().clone();
     let b_is_real = b.imag().is_zero();
@@ -457,7 +548,11 @@ fn try_iperturbation_extrapolation(
 
     dprint(&format!(
         "iε Richardson R₄ ({}): ε ∈ {{{}, {}, {}, {}, {}}} (h_is_real={})",
-        if b_is_real { "real-base, Schwarz fold" } else { "complex-base, two-sided" },
+        if b_is_real {
+            "real-base, Schwarz fold"
+        } else {
+            "complex-base, two-sided"
+        },
         epss[0], epss[1], epss[2], epss[3], epss[4], h_is_real
     ));
     eprintln!(
@@ -473,73 +568,57 @@ fn try_iperturbation_extrapolation(
     // All ε evaluations are independent — run them in parallel via rayon.
     // Each tetrate call is single-threaded, so this is close to a 5×
     // (real b) or 10× (complex b, parallel pairs) speedup on multi-core.
-    let eval = |eps: f64| -> Result<Complex, String> {
-        let f_plus = tetrate(&mk_pert(eps), &h_inner, prec_inner, digits)
-            .map_err(|e| format!("iε R₄: tetrate(b+{}i, h) failed: {}", eps, e))?;
-        if b_is_real && h_is_real {
-            return Ok(f_plus);
-        }
-        let f_minus = if b_is_real {
-            // Schwarz: F(b−iε, h) = conj(F(b+iε, conj h)). One extra perturbed
-            // call instead of computing b−iε directly.
-            let f_plus_conjh = tetrate(&mk_pert(eps), &h_inner_conj, prec_inner, digits)
-                .map_err(|e| format!("iε R₄: tetrate(b+{}i, conj h) failed: {}", eps, e))?;
-            Complex::with_val(prec_inner, f_plus_conjh.conj_ref())
-        } else {
-            // Complex b: compute the b−iε branch directly. Schwarz cannot
-            // bridge b+iε ↔ b−iε when b itself is off the real axis.
-            tetrate(&mk_pert(-eps), &h_inner, prec_inner, digits)
-                .map_err(|e| format!("iε R₄: tetrate(b−{}i, h) failed: {}", eps, e))?
+    let gs: Vec<Complex> = {
+        let eval = |eps: f64| -> Result<Complex, String> {
+            let f_plus = tetrate_impl(&mk_pert(eps), &h_inner, prec_inner, digits, false)
+                .map_err(|e| format!("iε R₄: tetrate(b+{}i, h) failed: {}", eps, e))?;
+            if b_is_real && h_is_real {
+                return Ok(f_plus);
+            }
+            let f_minus = if b_is_real {
+                // Schwarz: F(b−iε, h) = conj(F(b+iε, conj h)). One extra perturbed
+                // call instead of computing b−iε directly.
+                let f_plus_conjh =
+                    tetrate_impl(&mk_pert(eps), &h_inner_conj, prec_inner, digits, false)
+                        .map_err(|e| format!("iε R₄: tetrate(b+{}i, conj h) failed: {}", eps, e))?;
+                Complex::with_val(prec_inner, f_plus_conjh.conj_ref())
+            } else {
+                // Complex b: compute the b−iε branch directly. Schwarz cannot
+                // bridge b+iε ↔ b−iε when b itself is off the real axis.
+                tetrate_impl(&mk_pert(-eps), &h_inner, prec_inner, digits, false)
+                    .map_err(|e| format!("iε R₄: tetrate(b−{}i, h) failed: {}", eps, e))?
+            };
+            let two = Float::with_val(prec_inner, 2u32);
+            let avg = (f_plus + f_minus) / Complex::with_val(prec_inner, &two);
+            Ok(avg)
         };
-        let two = Float::with_val(prec_inner, 2u32);
-        let avg = (f_plus + f_minus) / Complex::with_val(prec_inner, &two);
-        Ok(avg)
+
+        use rayon::prelude::*;
+        epss.par_iter()
+            .map(|&eps| eval(eps))
+            .collect::<Result<Vec<_>, _>>()?
     };
-
-    use rayon::prelude::*;
-    let gs: Vec<Complex> = epss
-        .par_iter()
-        .map(|&eps| eval(eps))
-        .collect::<Result<Vec<_>, _>>()?;
-    let g0 = &gs[0];
-    let g1 = &gs[1];
-    let g2 = &gs[2];
-    let g3 = &gs[3];
-    let g4 = &gs[4];
-
-    // R₁ on G — four values at consecutive (ε, ε/2) pairs cancel ε² → O(ε⁴).
-    let three = Complex::with_val(prec_inner, 3u32);
-    let four = Complex::with_val(prec_inner, 4u32);
-    let r1_a: Complex = (four.clone() * g1 - g0) / three.clone(); // pair (eps0, eps1)
-    let r1_b: Complex = (four.clone() * g2 - g1) / three.clone(); // pair (eps1, eps2)
-    let r1_c: Complex = (four.clone() * g3 - g2) / three.clone(); // pair (eps2, eps3)
-    let r1_d: Complex = (four * g4 - g3) / three; // pair (eps3, eps4)
-
-    // R₂: cancels ε⁴ → O(ε⁶).
-    let fifteen = Complex::with_val(prec_inner, 15u32);
-    let sixteen = Complex::with_val(prec_inner, 16u32);
-    let r2_a: Complex = (sixteen.clone() * &r1_b - &r1_a) / fifteen.clone();
-    let r2_b: Complex = (sixteen.clone() * &r1_c - &r1_b) / fifteen.clone();
-    let r2_c: Complex = (sixteen * &r1_d - &r1_c) / fifteen;
-
-    // R₃: cancels ε⁶ → O(ε⁸).
-    let sixty_three = Complex::with_val(prec_inner, 63u32);
-    let sixty_four = Complex::with_val(prec_inner, 64u32);
-    let r3_a: Complex = (sixty_four.clone() * &r2_b - &r2_a) / sixty_three.clone();
-    let r3_b: Complex = (sixty_four * &r2_c - &r2_b) / sixty_three;
-
-    // R₄: cancels ε⁸ → O(ε¹⁰).
-    let two_fifty_five = Complex::with_val(prec_inner, 255u32);
-    let two_fifty_six = Complex::with_val(prec_inner, 256u32);
-    let r4: Complex = (two_fifty_six * &r3_b - &r3_a) / two_fifty_five;
-
-    if debug_enabled() {
-        let r3_diff: Complex = Complex::with_val(prec_inner, &r3_a - &r3_b);
-        eprintln!(
-            "tet: iε Richardson R₃(a)−R₃(b) = {} (≈ leading O(ε⁸))",
-            r3_diff
-        );
+    // Richardson ladder. The folded/two-sided G(ε) has an even-power
+    // expansion (ε², ε⁴, ε⁶, ε⁸ → factors 4, 16, 64, 256).
+    // Each level: R(ε) = (f·R_prev(ε/2) − R_prev(ε))/(f−1).
+    let factors: [u32; 4] = [4, 16, 64, 256];
+    let mut level: Vec<Complex> = gs;
+    for &f in factors.iter() {
+        if debug_enabled() && level.len() == 2 {
+            let d = Complex::with_val(prec_inner, &level[0] - &level[1]);
+            eprintln!("tet: iε Richardson penultimate diff = {} (≈ leading error)", d);
+        }
+        let fc = Complex::with_val(prec_inner, f);
+        let den = Complex::with_val(prec_inner, f - 1);
+        let mut next: Vec<Complex> = Vec::with_capacity(level.len() - 1);
+        for i in 0..level.len() - 1 {
+            let v: Complex =
+                (fc.clone() * &level[i + 1] - &level[i]) / den.clone();
+            next.push(v);
+        }
+        level = next;
     }
+    let r4 = level.into_iter().next().expect("Richardson ladder empty");
 
     if b_is_real && h_is_real {
         // Force imag to 0 for real-base, real-h Kneser tetration.

@@ -59,6 +59,7 @@ use crate::{
 /// Hoisting this out of `tetrate_kouznetsov` lets a grid evaluator amortize
 /// the expensive setup (typically dominating per-call cost) across many
 /// heights for the same base.
+#[derive(Clone)]
 pub struct KouznetsovState {
     pub samples: Vec<Complex>,
     pub nodes: Vec<Float>,
@@ -145,27 +146,38 @@ pub fn setup_kouznetsov(
         })?;
         let im_plus = Float::with_val(prec, l_plus.imag()).to_f64();
         let im_minus_init = Float::with_val(prec, l_minus.imag()).to_f64();
-        // If Newton-from-conjugate landed in the same half-plane as L_+, the
-        // rectangle Cauchy formula's boundary conditions become ill-posed.
-        // Search W_k branches (k = 1, -2, 2, -3, 3, …) for a fixed point in
-        // the opposite half-plane. This is a heuristic Paulsen-Cowgill-style
-        // branch selection; for negative real bases and far-complex bases the
-        // resulting tetration may not be the canonical Kneser-Kouznetsov F,
-        // but it satisfies F(0)=1 and F(z+1)=b^F(z), which is verified by
-        // the iteration's residual.
+        // Decay-direction of a fixed point's modes on the sample line: a
+        // perturbation c·λ^z decays as Im z → +∞ iff arg λ > 0 and as
+        // Im z → −∞ iff arg λ < 0. The *pair* must contain one of each —
+        // this, not the spatial Im-half-plane of L, is the real invariant
+        // (e.g. near the cut band the correct partner W₊₁ sits in the SAME
+        // half-plane as L_+ but has arg λ < 0).
+        let arg_lam_of = |l: &Complex| -> f64 {
+            let lam = Complex::with_val(prec, &ln_b * l);
+            let re = Float::with_val(prec, lam.real()).to_f64();
+            let im = Float::with_val(prec, lam.imag()).to_f64();
+            im.atan2(re)
+        };
+        let arg_lam_plus = arg_lam_of(&l_plus);
+        let arg_lam_minus_init = arg_lam_of(&l_minus);
+        // If Newton-from-conjugate landed on a mode-incompatible partner
+        // (same decay direction — including the degenerate real-base case
+        // where it returns L_+ itself), the rectangle Cauchy formula's
+        // boundary conditions become ill-posed.
         let mut _wk_used = false;
-        if im_plus.signum() == im_minus_init.signum()
-            && im_plus.abs() > 1e-12
-            && im_minus_init.abs() > 1e-12
+        if arg_lam_plus.signum() == arg_lam_minus_init.signum()
+            || (im_plus - im_minus_init).abs() < 1e-12
         {
-            // Search W_k for an opposite-half-plane fixed point. k=-1 is the
+            // Search W_k for a decay-compatible fixed point. k=-1 is the
             // canonical Kneser partner for real bases (since conj(W_0) ≈ W_-1
-            // there); for complex bases where Newton-from-conjugate fails, W_-1
-            // is still typically the correct analytic continuation. We collect
-            // ALL valid candidates and rank by:
-            //   1. |Im(L_k)| > 0.05 (avoid degenerate near-real-axis strips —
+            // there); near the b-plane cut band (0, e^{-e}] the continuation
+            // of the Kneser germ is W_+1 instead. We collect ALL valid
+            // candidates and rank by:
+            //   1. arg λ_k of opposite sign to arg λ_+ (mode-decay
+            //      compatibility — the hard requirement),
+            //   2. |Im(L_k)| > 0.05 (avoid degenerate near-real-axis strips —
             //      W_+1 for b=(-0.8,0.4i) gives Im=-0.01, useless),
-            //   2. smallest |k| (closest to canonical Kneser pair).
+            //   3. smallest |k| (closest to canonical Kneser pair).
             const W_K_SEARCH: &[i32] = &[-1, 1, -2, 2, -3, 3, -4, 4, -5, 5];
             const MIN_IM_STRIP: f64 = 0.05;
             let debug_wk = cnum::verbose();
@@ -195,15 +207,17 @@ pub fn setup_kouznetsov(
                     Complex::with_val(prec, &bz - &l_k).abs_ref(),
                 )
                 .to_f64();
-                let opposite = im_k.signum() != im_plus.signum()
-                    && im_k.abs() > MIN_IM_STRIP;
+                let arg_lam_k = arg_lam_of(&l_k);
+                let decay_ok = arg_lam_k.signum() != arg_lam_plus.signum()
+                    && arg_lam_k.abs() > 1e-6;
+                let strip_ok = im_k.abs() > MIN_IM_STRIP;
                 if debug_wk {
                     eprintln!(
-                        "kouz wk search: k={:>+}  L={:.4}+{:.4}i  resid={:.2e}  opposite={}  |im|>{}={}",
-                        k, re_k, im_k, resid, opposite, MIN_IM_STRIP, im_k.abs() > MIN_IM_STRIP
+                        "kouz wk search: k={:>+}  L={:.4}+{:.4}i  resid={:.2e}  argλ={:+.4} (vs argλ₊={:+.4})  decay_ok={}  strip_ok={}",
+                        k, re_k, im_k, resid, arg_lam_k, arg_lam_plus, decay_ok, strip_ok
                     );
                 }
-                if opposite && resid < 1e-6 {
+                if decay_ok && strip_ok && resid < 1e-6 {
                     candidates.push((k, l_k, im_k));
                 }
             }
@@ -219,7 +233,7 @@ pub fn setup_kouznetsov(
                 _wk_used = true;
             } else {
                 return Err(format!(
-                    "Kouznetsov: fixed-point pair (L_+ = {:.4}+{:.4}i, L_- = {:.4}+{:.4}i) lies in the same half-plane; W_k search across k∈±[1..5] found no opposite-half-plane partner with |Im|>{}. Paulsen-Cowgill conformal mapping is required.",
+                    "Kouznetsov: fixed-point pair (L_+ = {:.4}+{:.4}i, L_- = {:.4}+{:.4}i) has mode-incompatible decay directions; W_k search across k∈±[1..5] found no partner with opposite sign(arg λ) and |Im|>{}. Paulsen-Cowgill conformal mapping is required.",
                     Float::with_val(prec, l_plus.real()).to_f64(),
                     im_plus,
                     Float::with_val(prec, l_minus.real()).to_f64(),
@@ -228,19 +242,58 @@ pub fn setup_kouznetsov(
                 ));
             }
         }
-        let im_minus = Float::with_val(prec, l_minus.imag()).to_f64();
-        if im_plus >= im_minus {
-            (l_minus, l_plus)
+        // Orient the pair by mode decay: "upper" (Im z → +∞ asymptote) must
+        // have arg λ > 0; "lower" arg λ < 0. Fall back to Im L ordering only
+        // if the args degenerate to the same sign (should not happen after
+        // the search above).
+        let arg_lam_minus = arg_lam_of(&l_minus);
+        if arg_lam_plus.signum() != arg_lam_minus.signum() {
+            if arg_lam_plus > 0.0 {
+                (l_minus, l_plus)
+            } else {
+                (l_plus, l_minus)
+            }
         } else {
-            (l_plus, l_minus)
+            let im_minus = Float::with_val(prec, l_minus.imag()).to_f64();
+            if im_plus >= im_minus {
+                (l_minus, l_plus)
+            } else {
+                (l_plus, l_minus)
+            }
         }
     };
-    // λ_upper = (ln b)·L_upper drives the contour decay rate.
+    setup_kouznetsov_core(b, l_upper, l_lower, prec, digits, use_schwarz, None, false)
+}
+
+/// Core Kouznetsov solver: given the asymptotic fixed-point pair
+/// (`l_upper` for t → +∞, `l_lower` for t → −∞ on the sample line
+/// Re z = 1/2), build the grid, run the LM Newton-Kantorovich iteration
+/// (with multi-start retries) and normalize. Split out of
+/// [`setup_kouznetsov`] so callers that must *override* the pair-selection
+/// heuristics (e.g. the cut-base path, whose pair is (W₀, W₊₁) — both
+/// fixed points in the closed upper half-plane, which the generic
+/// opposite-half-plane search would reject) can inject the pair directly.
+fn setup_kouznetsov_core(
+    b: &Complex,
+    l_upper: Complex,
+    l_lower: Complex,
+    prec: u32,
+    digits: u64,
+    use_schwarz: bool,
+    warm_guess: Option<&(dyn Fn(&Float) -> Result<Complex, String> + Sync)>,
+    warm_only: bool,
+) -> Result<KouznetsovState, String> {
+    let ln_b = Complex::with_val(prec, b.ln_ref());
+    // λ = (ln b)·L drives each side's decay rate. F → L_upper as t → +∞ like
+    // λ_up^{it} (rate |arg λ_up|) and F → L_lower as t → −∞ (rate |arg λ_low|).
+    // For Schwarz-conjugate pairs the two rates coincide; for asymmetric pairs
+    // (cut bases) the smaller one is binding.
     let lambda_upper = Complex::with_val(prec, &ln_b * &l_upper);
+    let lambda_lower = Complex::with_val(prec, &ln_b * &l_lower);
 
     // Decay rate of F → fixed point: ~ exp(-T·|arg(λ̄)|). Pick T so the tail
     // beyond ±T is below 10^{-(digits+8)}.
-    let arg_lambda = arg_abs_f64(&lambda_upper, prec);
+    let arg_lambda = arg_abs_f64(&lambda_upper, prec).min(arg_abs_f64(&lambda_lower, prec));
     if arg_lambda <= 1e-3 {
         return Err(format!(
             "Kouznetsov: |arg(λ)| = {} too small (degenerate contour)",
@@ -300,12 +353,59 @@ pub fn setup_kouznetsov(
         init
     };
 
-    let initial = make_initial(None);
-    if debug_phase {
-        eprintln!("kouz phase: initial_guess done ({:.2}s)", phase_start.elapsed().as_secs_f64());
-    }
-    let phase_start = std::time::Instant::now();
-    // Default solver: Levenberg-Marquardt Newton-Kantorovich. Newton's
+    // Warm start: if the caller supplied a pointwise guess F(0.5+it), try the
+    // LM solve from it before falling back to the cold tanh/sech bridge. Used
+    // by the cut-base path, where the cold guess sits outside the Newton
+    // basin but a Schröder solve at a nearby ST-interior base is available.
+    let warm_result: Option<Result<Vec<Complex>, String>> = warm_guess.map(|wg| {
+        use rayon::prelude::*;
+        let winit_res: Result<Vec<Complex>, String> = nodes
+            .par_iter()
+            .map(|t| {
+                wg(t).map_err(|e| {
+                    format!(
+                        "warm guess eval failed at t={:.3}: {}",
+                        Float::with_val(53, t).to_f64(),
+                        e
+                    )
+                })
+            })
+            .collect();
+        let mut winit = winit_res?;
+        winit[0] = l_lower.clone();
+        winit[n_nodes - 1] = l_upper.clone();
+        if use_schwarz {
+            symmetrize_schwarz(&mut winit, prec);
+        }
+        if debug_phase {
+            eprintln!(
+                "kouz phase: warm-start guess built ({} nodes, {:.2}s)",
+                n_nodes,
+                phase_start.elapsed().as_secs_f64()
+            );
+        }
+        iterate_newton(
+            winit, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
+            use_schwarz,
+        )
+    });
+
+    let lm_result = match warm_result {
+        Some(Ok(s)) => Ok(s),
+        warm_outcome => {
+            if let Some(Err(ref e)) = warm_outcome {
+                if warm_only {
+                    return Err(format!("Kouznetsov warm-only solve failed: {}", e));
+                }
+                if debug_phase {
+                    eprintln!("kouz: warm start failed ({}); falling back to cold guess", e);
+                }
+            }
+            let initial = make_initial(None);
+            if debug_phase {
+                eprintln!("kouz phase: initial_guess done ({:.2}s)", phase_start.elapsed().as_secs_f64());
+            }
+            // Default solver: Levenberg-Marquardt Newton-Kantorovich. Newton's
     // Jacobian-based step finds the right descent direction even when the
     // Cauchy operator T has spectral radius > 1 (which it does for typical
     // real bases b > e^(1/e)), where Picard / Anderson without history
@@ -313,21 +413,23 @@ pub fn setup_kouznetsov(
     //   * `TET_KOUZ_ANDERSON=1`: Anderson-accelerated Picard (works when T
     //     is a contraction, fails for higher b).
     //   * `TET_KOUZ_PICARD=1`: damped Picard, useful for spectrum diagnosis.
-    let lm_result = if std::env::var_os("TET_KOUZ_ANDERSON").is_some() {
-        iterate_anderson(
-            initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
-            use_schwarz,
-        )
-    } else if std::env::var_os("TET_KOUZ_PICARD").is_some() {
-        iterate_picard(
-            initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
-            use_schwarz,
-        )
-    } else {
-        iterate_newton(
-            initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
-            use_schwarz,
-        )
+            if std::env::var_os("TET_KOUZ_ANDERSON").is_some() {
+                iterate_anderson(
+                    initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
+                    use_schwarz,
+                )
+            } else if std::env::var_os("TET_KOUZ_PICARD").is_some() {
+                iterate_picard(
+                    initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
+                    use_schwarz,
+                )
+            } else {
+                iterate_newton(
+                    initial, &nodes, &weights, &t_max, &l_upper, &l_lower, &ln_b, prec, digits,
+                    use_schwarz,
+                )
+            }
+        }
     };
 
     // Multi-start: if the default initial guess fails to converge (LM "no
@@ -336,11 +438,15 @@ pub fn setup_kouznetsov(
     // values. Two retries cover the b∈[η,e²] gap.
     let samples = match lm_result {
         Ok(s) => s,
-        Err(ref e) if e.contains("no descent step") || e.contains("no convergence") => {
+        Err(ref e)
+            if e.contains("no descent step")
+                || e.contains("no convergence")
+                || e.contains("stagnation") =>
+        {
             if debug_phase {
                 eprintln!("kouz: LM failed with default guess ({}); retrying with alternative initial guesses", e);
             }
-            let retry_targets: &[f64] = &[0.75, 1.1, 0.5, 1.25];
+            let retry_targets: &[f64] = &[0.75, 1.1, 0.5, 1.25, 0.9, 1.4];
             let mut last_err = e.clone();
             let mut found = None;
             for &target in retry_targets {
@@ -402,9 +508,18 @@ pub fn setup_kouznetsov(
 /// Evaluate `F_b(h)` from a precomputed `KouznetsovState`. Cheap (one Cauchy
 /// integral plus integer-shifting via b^· / log_b iterations); reuses the
 /// expensive samples and normalization shift from `setup_kouznetsov`.
+///
+/// Every result is post-validated against the functional equation
+/// `F(h+1) = b^F(h)` (relative tolerance 1e-3). The Cauchy reconstruction of
+/// `F(h)` and `F(h+1)` uses independent kernel evaluations, so a state that
+/// converged to a wrong basin or stalled at an O(1) residual produces a
+/// functional-equation violation here and is refused instead of silently
+/// returned. Overflow-regime values (either side non-finite) skip the check —
+/// they cannot be compared meaningfully.
 pub fn eval_kouznetsov(state: &KouznetsovState, b: &Complex, h: &Complex) -> Result<Complex, String> {
-    let h_shifted = Complex::with_val(state.prec, h + &state.shift);
-    eval_at_height(
+    let prec = state.prec;
+    let h_shifted = Complex::with_val(prec, h + &state.shift);
+    let f_h = eval_at_height(
         b,
         &h_shifted,
         &state.samples,
@@ -414,8 +529,48 @@ pub fn eval_kouznetsov(state: &KouznetsovState, b: &Complex, h: &Complex) -> Res
         &state.l_upper,
         &state.l_lower,
         &state.ln_b,
-        state.prec,
-    )
+        prec,
+    )?;
+
+    // Functional-equation post-check.
+    let one = Float::with_val(prec, 1u32);
+    let h_plus = Complex::with_val(prec, &h_shifted + &one);
+    let f_h_plus = eval_at_height(
+        b,
+        &h_plus,
+        &state.samples,
+        &state.nodes,
+        &state.weights,
+        &state.t_max,
+        &state.l_upper,
+        &state.l_lower,
+        &state.ln_b,
+        prec,
+    )?;
+    let exp_arg = Complex::with_val(prec, &f_h * &state.ln_b);
+    let b_pow_f = Complex::with_val(prec, exp_arg.exp_ref());
+    let f_plus_abs = Float::with_val(prec, f_h_plus.abs_ref()).to_f64();
+    let b_pow_abs = Float::with_val(prec, b_pow_f.abs_ref()).to_f64();
+    if f_plus_abs.is_finite() && b_pow_abs.is_finite() {
+        let diff = Complex::with_val(prec, &f_h_plus - &b_pow_f);
+        let diff_abs = Float::with_val(prec, diff.abs_ref()).to_f64();
+        let rel = diff_abs / f_plus_abs.max(1.0);
+        if !rel.is_finite() || rel > 1e-3 {
+            return Err(format!(
+                "Kouznetsov post-validation failed: |F(h+1) − b^F(h)| / max(|F(h+1)|, 1) \
+                 = {:.3e} exceeds 1e-3 — the converged state does not represent a valid \
+                 tetration at this height (wrong basin or unresolved boundary residual)",
+                rel
+            ));
+        }
+        if cnum::verbose() {
+            eprintln!(
+                "kouz eval post-validation OK: |F(h+1) − b^F(h)| rel = {:.3e}",
+                rel
+            );
+        }
+    }
+    Ok(f_h)
 }
 
 /// Find the unique real shift δ such that `F(δ) = 1`, where `F` is the
@@ -655,6 +810,29 @@ fn find_normalization_shift(
                 );
             }
             return Ok(finalize(c_partial));
+        }
+    }
+    if debug_norm {
+        // Diagnostic landscape: F̃ on a coarse c-grid, to distinguish
+        // "search box too small" from "spurious operator fixed point".
+        eprintln!("kouz norm: FAILURE landscape F̃(c):");
+        for ci in [-2.0f64, -1.0, 0.0, 1.0, 2.0] {
+            for cr in [-1.5f64, -0.75, 0.0, 0.75, 1.5] {
+                let c = Complex::with_val(
+                    prec,
+                    (Float::with_val(prec, cr), Float::with_val(prec, ci)),
+                );
+                let f_c = cauchy_eval(
+                    &c, samples, nodes, weights, t_max, l_upper, l_lower, ln_b, prec,
+                );
+                eprintln!(
+                    "  F̃({:+.2}{:+.2}i) = {:+.4}{:+.4}i",
+                    cr,
+                    ci,
+                    Float::with_val(prec, f_c.real()).to_f64(),
+                    Float::with_val(prec, f_c.imag()).to_f64()
+                );
+            }
         }
     }
     Err(format!(
@@ -1100,6 +1278,120 @@ fn initial_guess_with_target(
         .collect()
 }
 
+/// Branch-corrected `ln(samples[j])` along the mid-line sample curve.
+///
+/// The left rectangle edge represents `F(−0.5+it) = log_b F(0.5+it)`. The
+/// true left-edge values are continuous in `t` and approach `L_up` at the
+/// top, which forces the branch anchor `ln F → ln_b·L_up` (the fixed-point
+/// identity `log_b L_up = L_up` in log form) and *continuous* branch
+/// selection down the curve; the same argument at the bottom shows the true
+/// curve's unwrapped log lands on `ln_b·L_low` automatically. A pointwise
+/// principal log breaks continuity whenever the sample curve crosses
+/// `(−∞, 0]` — which happens for cut-band bases, where `L_low` sits at
+/// `Re < 0` and the curve spirals into it — silently kinking the discrete
+/// operator by `2πi/ln_b` at the crossing nodes. LM then stalls on an
+/// O(1e-2) residual plateau it cannot descend from (observed on the
+/// cut-base ε-walk near ε ≈ 1.35). Unwrapping restores a continuous
+/// operator; for curves that never cross the cut (all previously working
+/// bases) it reduces to the principal log exactly.
+///
+/// **Two-sided anchoring**: the top half of the curve (`j ≥ n/2`) is
+/// unwrapped walking *down* from the `ln_b·L_up` anchor; the bottom half
+/// walking *up* from the `ln_b·L_low` anchor. Both asymptote tails are
+/// therefore always branch-consistent with their own limits. For the
+/// *true* solution continuity forces the two walks to agree at the joint
+/// (net winding m = 0), so the result equals the single-anchor unwrap.
+/// Transient LM iterates — notably the cold tanh-bridge guess — can sit
+/// in a wrong homotopy class rel the origin (odd number of cut
+/// crossings); then the two halves disagree by `2πi·m` at the *one fixed
+/// interior joint node*, a localized integrand error from which LM
+/// descends fine. The historical alternative — reverting the whole curve
+/// to the pointwise principal log when m ≠ 0 — made the discrete operator
+/// *discontinuous* in the samples (trial steps toggling the m
+/// classification switch the operator wholesale), which near the
+/// Shell–Thron crossing of the cut-base ε-walk (ε ≈ 1.55 at x = 0.04)
+/// produced Jacobian/residual inconsistency and "no descent at iter 0"
+/// from arbitrarily good warm starts. Two-sided anchoring keeps the
+/// operator continuous in every homotopy class; the joint index is fixed
+/// (n/2) so no data-dependent placement can reintroduce a discontinuity.
+fn unwrapped_ln_samples(
+    samples: &[Complex],
+    l_upper: &Complex,
+    l_lower: &Complex,
+    ln_b: &Complex,
+    prec: u32,
+) -> Vec<Complex> {
+    let n = samples.len();
+    let two_pi = Float::with_val(prec, Constant::Pi) * 2u32;
+    let two_pi_f64 = two_pi.to_f64();
+    let debug = std::env::var_os("TET_KOUZ_UNWRAP_DEBUG").is_some();
+    // Joint between the two anchored walks: fixed mid index (samples are
+    // ordered bottom→top; nodes near n/2 sit mid-curve where |F| is
+    // largest for cut bases, far from both the origin and the asymptotes).
+    let joint = n / 2;
+    let mut any_nonzero = false;
+    // Top half [joint..n): walk down from the ln_b·L_up anchor.
+    let top_anchor = Complex::with_val(prec, ln_b * l_upper);
+    let mut ref_im = Float::with_val(prec, top_anchor.imag()).to_f64();
+    let mut top: Vec<Complex> = Vec::with_capacity(n - joint);
+    for j in (joint..n).rev() {
+        let pl = Complex::with_val(prec, samples[j].ln_ref());
+        let pl_im = Float::with_val(prec, pl.imag()).to_f64();
+        let k = ((ref_im - pl_im) / two_pi_f64).round();
+        let adjusted = if k == 0.0 {
+            pl
+        } else {
+            any_nonzero = true;
+            let delta = Float::with_val(prec, &two_pi * &Float::with_val(prec, k));
+            let delta_c = Complex::with_val(prec, (Float::new(prec), delta));
+            Complex::with_val(prec, &pl + &delta_c)
+        };
+        ref_im = Float::with_val(prec, adjusted.imag()).to_f64();
+        top.push(adjusted);
+    }
+    top.reverse();
+    // Bottom half [0..joint): walk up from the ln_b·L_low anchor.
+    let bot_anchor = Complex::with_val(prec, ln_b * l_lower);
+    let mut ref_im = Float::with_val(prec, bot_anchor.imag()).to_f64();
+    let mut out: Vec<Complex> = Vec::with_capacity(n);
+    for sample in samples.iter().take(joint) {
+        let pl = Complex::with_val(prec, sample.ln_ref());
+        let pl_im = Float::with_val(prec, pl.imag()).to_f64();
+        let k = ((ref_im - pl_im) / two_pi_f64).round();
+        let adjusted = if k == 0.0 {
+            pl
+        } else {
+            any_nonzero = true;
+            let delta = Float::with_val(prec, &two_pi * &Float::with_val(prec, k));
+            let delta_c = Complex::with_val(prec, (Float::new(prec), delta));
+            Complex::with_val(prec, &pl + &delta_c)
+        };
+        ref_im = Float::with_val(prec, adjusted.imag()).to_f64();
+        out.push(adjusted);
+    }
+    out.extend(top);
+    if debug && any_nonzero {
+        // Joint mismatch (2π multiples) indicates a wrong-homotopy-class
+        // iterate; the error stays localized at the joint node (see doc).
+        let lo_im = Float::with_val(prec, out[joint.saturating_sub(1)].imag()).to_f64();
+        let hi_im = Float::with_val(prec, out[joint.min(n - 1)].imag()).to_f64();
+        let m = ((hi_im - lo_im) / two_pi_f64).round();
+        let mut n_dev = 0usize;
+        for (u, s) in out.iter().zip(samples.iter()) {
+            let pl = Complex::with_val(prec, s.ln_ref());
+            let d = Float::with_val(prec, Complex::with_val(prec, u - &pl).abs_ref()).to_f64();
+            if d > 1.0 {
+                n_dev += 1;
+            }
+        }
+        eprintln!(
+            "kouz unwrap: joint winding m = {}, {} nodes branch-corrected (of {})",
+            m, n_dev, n
+        );
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cauchy_eval(
     z0: &Complex,
@@ -1114,6 +1406,7 @@ fn cauchy_eval(
 ) -> Complex {
     let cp1 = Complex::with_val(prec, (Float::with_val(prec, 1.5f64), 0));
     let cm1 = Complex::with_val(prec, (Float::with_val(prec, -0.5f64), 0));
+    let ln_unwrapped = unwrapped_ln_samples(samples, l_upper, l_lower, ln_b, prec);
 
     let mut r_int = cnum::zero(prec);
     let mut l_int = cnum::zero(prec);
@@ -1128,9 +1421,9 @@ fn cauchy_eval(
         let term_r = Complex::with_val(prec, &b_f / &denom_r);
         r_int += Complex::with_val(prec, &term_r * &weights[k]);
 
-        // F(c-1+it_k) = log_b(samples[k]) = ln(F) / ln_b
-        let ln_s = Complex::with_val(prec, samples[k].ln_ref());
-        let log_b_s = Complex::with_val(prec, &ln_s / ln_b);
+        // F(c-1+it_k) = log_b(samples[k]) = ln(F) / ln_b, with the branch of
+        // ln(F) unwrapped along the sample curve (anchored at ln_b·L_up).
+        let log_b_s = Complex::with_val(prec, &ln_unwrapped[k] / ln_b);
         let cm1_plus_it = Complex::with_val(prec, &cm1 + &it);
         let denom_l = Complex::with_val(prec, &cm1_plus_it - z0);
         let term_l = Complex::with_val(prec, &log_b_s / &denom_l);
@@ -1749,6 +2042,25 @@ fn iterate_newton(
                 iter, r_norm, mu, xm_re, xm_im, target, matvec_secs
             );
         }
+        if std::env::var_os("TET_KOUZ_RESID_DUMP").is_some() {
+            let path = format!("/tmp/kouz_resid_iter{}.tsv", iter);
+            if let Ok(mut fh) = std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                use std::io::Write;
+                let _ = writeln!(fh, "t\tre_F\tim_F\tabs_r\tre_T\tim_T");
+                for i in 0..n {
+                    let _ = writeln!(
+                        fh,
+                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        Float::with_val(prec, &nodes[i]).to_f64(),
+                        Float::with_val(prec, x[i].real()).to_f64(),
+                        Float::with_val(prec, x[i].imag()).to_f64(),
+                        Float::with_val(prec, r[i].abs_ref()).to_f64(),
+                        Float::with_val(prec, f[i].real()).to_f64(),
+                        Float::with_val(prec, f[i].imag()).to_f64(),
+                    );
+                }
+            }
+        }
 
         if r_norm.is_nan() || !r_norm.is_finite() {
             if debug {
@@ -1773,11 +2085,14 @@ fn iterate_newton(
         // cases where each iter makes ~1% progress but we'll never reach
         // `target` (e.g., W_k-search negative real bases hitting the
         // discretization floor at ~1e-8 regardless of node count).
+        // TET_KOUZ_PATIENT=1 disables both stagnation cutoffs (diagnostic:
+        // distinguishes "slow curved-valley crawl" from a true floor).
+        let patient = std::env::var_os("TET_KOUZ_PATIENT").is_some();
         if iter == 10 {
             slow_progress_anchor = best_residual;
             slow_progress_anchor_iter = 10;
         } else if iter > 10 && iter == slow_progress_anchor_iter + 15 {
-            if best_residual > 0.1 * slow_progress_anchor {
+            if best_residual > 0.1 * slow_progress_anchor && !patient {
                 if debug {
                     eprintln!(
                         "kouz LM: slow-progress stagnation at iter {} (anchor {:.3e} -> best {:.3e}, <10x in 15 iters)",
@@ -1796,7 +2111,7 @@ fn iterate_newton(
         // (~10^-3 to 10^-5 depending on b and N). Return the best iterate.
         if r_norm > prev_residual * 0.999 {
             stagnation += 1;
-            if stagnation > 8 {
+            if stagnation > 8 && !patient {
                 if debug {
                     eprintln!(
                         "kouz LM: stagnated at iter {} (residual {:.3e}, likely discretization floor); best {:.3e}",
@@ -2020,10 +2335,17 @@ fn iterate_newton(
 ///     Threshold is `10^(-digits/3)` clamped to `[1e-6, 1e-3]`.
 ///   * `use_schwarz = false` (complex / negative-real / unit-circle bases):
 ///     the iteration is harder — Newton may stall at a discretization floor
-///     well above zero while the Cauchy reconstruction at user heights is
-///     still smooth and satisfies `F(z+1) = b^F(z)` to many digits. Be more
-///     permissive: accept best-effort up to residual ~5, refusing only the
-///     truly catastrophic cases (non-finite, residual ≥ 5).
+///     somewhat above the Schwarz-case target while the Cauchy reconstruction
+///     at user heights is still smooth and satisfies `F(z+1) = b^F(z)` to
+///     several digits. Be more permissive than the Schwarz gate — but not
+///     unboundedly so: an O(1) residual means ~0 correct digits, and passing
+///     such a state downstream poisons the iε-Richardson fallback (which
+///     Richardson-combines perturbed solves and amplifies their errors).
+///     Threshold is `10^(-digits/3)` clamped to `[1e-6, 1e-2]`; genuinely
+///     converged runs sit many orders below this, while catastrophic stalls
+///     (residual ~1e-1 … 2, observed on the Shell-Thron boundary near the
+///     real axis) are refused so the dispatcher can fall through to
+///     continuation / iε-Richardson / a clean error.
 fn validate_best_residual(
     best_residual: f64,
     digits: u64,
@@ -2033,7 +2355,7 @@ fn validate_best_residual(
     let threshold = if use_schwarz {
         10f64.powf(-(digits as f64) / 3.0).clamp(1e-6, 1e-3)
     } else {
-        5.0
+        10f64.powf(-(digits as f64) / 3.0).clamp(1e-6, 1e-2)
     };
     if best_residual.is_finite() && best_residual <= threshold {
         // Accepted, but the LM did not reach the full-precision target
@@ -2498,13 +2820,14 @@ pub(crate) fn apply_t_fft(
     // cross-correlation result is the in-strip part of T(F).
     let mut a_r: Vec<Complex> = Vec::with_capacity(n);
     let mut a_l: Vec<Complex> = Vec::with_capacity(n);
+    let ln_unwrapped = unwrapped_ln_samples(samples, l_upper, l_lower, ln_b, prec);
     for j in 0..n {
         let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
         let exp_arg = Complex::with_val(prec, ln_b * &samples[j]);
         let bf = Complex::with_val(prec, exp_arg.exp_ref());
         a_r.push(Complex::with_val(prec, &bf * &w_over_2pi));
-        let ln_s = Complex::with_val(prec, samples[j].ln_ref());
-        let log_b_s = Complex::with_val(prec, &ln_s / ln_b);
+        // Branch-unwrapped ln along the curve (see unwrapped_ln_samples).
+        let log_b_s = Complex::with_val(prec, &ln_unwrapped[j] / ln_b);
         a_l.push(Complex::with_val(prec, &log_b_s * &w_over_2pi));
     }
 
@@ -3096,4 +3419,434 @@ pub fn setup_kouznetsov_continuation(
     let _ = fp_target;
 
     prev_state.ok_or_else(|| "continuation: no state produced".into())
+}
+
+/// Direct Kouznetsov solver for **cut bases** (real `0 < b < e^{-e}`).
+///
+/// ## Which tetration is "the" tetration here?
+///
+/// For a cut base the canonical value is the analytic continuation of
+/// complex-base tetration from the upper half `b`-plane, i.e. the limit
+/// `lim_{ε→0⁺} F(b+iε, ·)` (Paulsen's complex-base construction; the
+/// `b`-plane branch cut along `(0, e^{-e}]` gives the conjugate family from
+/// below). That family is the **bi-asymptotic** one: `F(z) → L_up` as
+/// `Im z → +∞` and `F(z) → L_low` as `Im z → −∞`.
+///
+/// ## The fixed-point pair — the subtle part
+///
+/// Continuing the Kneser pair `(−W₀(−ln b)/ln b, conj)` from `b = 2` through
+/// the upper half `b`-plane down to the cut band shows (numerically, germ
+/// tracking by Newton along many paths):
+///
+///   * `L_up` stays the principal `W₀` point; at real cut `b` it is **real**
+///     (e.g. `0.33747` at `b = 0.04`) with `λ_up = ln(b)·L_up < −1`
+///     (repelling, `arg λ_up = π` — period-doubling side, *not* parabolic).
+///   * `L_low` is **not** the `W₋₁` point. The Kneser germ continues to the
+///     `W₊₁` fixed point, which at real cut `b` lies in the **upper**
+///     half-plane (e.g. `−0.114 + 1.439i` at `b = 0.04`), with
+///     `arg λ_low ≈ −1.49`.
+///
+/// Nothing degenerates at ε = 0: the pair stays distinct, top modes decay
+/// like `e^{−π t}` (`arg λ_up = π`), bottom modes like `e^{−(2π+arg λ_low)|t|}`
+/// (rate ≈ 4.8). So **no iε regularization or Richardson ladder is needed**:
+/// the rectangle Cauchy-integral solver works *at* the real base directly —
+/// full requested precision, not a 9–11-digit extrapolation ceiling. The
+/// resulting `F` is genuinely complex on the real height axis (the cut is
+/// real: `F` from below is its conjugate), so no Schwarz symmetrization.
+///
+/// ## Solve strategy: ε-continuation walk
+///
+/// Even with the **correct** pair injected, the plain rectangle solver does
+/// *not* converge cold at the real base: every cold bridge guess (all
+/// `target_mid` retries) sits outside the LM Newton basin and stagnates at
+/// O(1) residual, as does a warm start spliced from an attracting-Schröder
+/// solve at `b + 0.1i` (that solve belongs to a *different* analytic family
+/// — regular iteration at the attracting fixed point differs from the
+/// bi-asymptotic continuation by a nontrivial 1-periodic factor, so the
+/// splice is O(1) inconsistent and LM stagnates at ≈2.2).
+///
+/// What does work is **continuation in the base**: cold-solve at the anchor
+/// `b + 2i` (outside Shell–Thron, proven convergent, and the W_k partner
+/// search there deterministically picks the `W₊₁` germ), then walk ε down a
+/// geometric schedule, at each step germ-tracking the fixed-point pair by
+/// Newton from the previous values and warm-starting the LM solve by
+/// Cauchy-resampling the previous solution onto the new grid. Steps that
+/// fail are bisected (geometric mean; arithmetic for the final hop to 0).
+///
+/// The walk crosses the Shell–Thron *interior* band (`|λ_up| < 1` for
+/// ε ∈ (0.083, 1.55) at x = 0.04): this is harmless — bi-asymptotic
+/// solutions on the vertical line need only `arg λ_up > 0 > arg λ_low`
+/// (vertical mode decay), not `|λ| > 1`, and walk steps inside the band
+/// converge to 1e-21 residuals. An earlier version of this walk stalled
+/// near ε ≈ 1.35; the cause was principal-log branch kinks in the Cauchy
+/// operator's left edge (fixed by `unwrapped_ln_samples`, the
+/// branch-continuous curve logarithm), not any family degeneracy.
+pub fn setup_kouznetsov_cut_base(
+    b_re: &Float,
+    prec: u32,
+    digits: u64,
+) -> Result<KouznetsovState, String> {
+    let x_f64 = Float::with_val(64, b_re).to_f64();
+    if !(x_f64 > 0.0 && x_f64 < 0.066) {
+        return Err(format!(
+            "cut-base solve: Re b = {:.6} is not in the cut band (0, e^-e)",
+            x_f64
+        ));
+    }
+
+    let verbose = cnum::verbose();
+    let base_at = |eps: f64| -> Complex {
+        Complex::with_val(prec, (b_re.clone(), Float::with_val(prec, eps)))
+    };
+    let arg_of = |z: &Complex| -> f64 {
+        let re = Float::with_val(prec, z.real()).to_f64();
+        let im = Float::with_val(prec, z.imag()).to_f64();
+        im.atan2(re)
+    };
+    let dist = |a: &Complex, c: &Complex| -> f64 {
+        let d = Complex::with_val(prec, a - c);
+        Float::with_val(prec, d.abs_ref()).to_f64()
+    };
+    // Walk-continuous argument: principal arg shifted by 2πk to land within
+    // π of the previous step's value (germ consistency across the ±π seam —
+    // at ε = 0, λ_up is real negative and the one-sided limit is arg = +π).
+    let arg_cont = |z: &Complex, prev: f64| -> f64 {
+        let mut a = arg_of(z);
+        while a - prev > std::f64::consts::PI {
+            a -= 2.0 * std::f64::consts::PI;
+        }
+        while a - prev < -std::f64::consts::PI {
+            a += 2.0 * std::f64::consts::PI;
+        }
+        a
+    };
+
+    // ---- Anchor: cold solve at b + iε_anchor (outside Shell–Thron) ----
+    let eps_anchor: f64 = std::env::var("TET_KOUZ_CUT_ANCHOR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2.0);
+    let sched_ratio: f64 = std::env::var("TET_KOUZ_CUT_RATIO")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.72);
+    let b_anchor = base_at(eps_anchor);
+    let ln_b_anchor = Complex::with_val(prec, b_anchor.ln_ref());
+    let neg_ln_b_anchor = Complex::with_val(prec, -&ln_b_anchor);
+    let w0_val = lambertw::w0(&neg_ln_b_anchor, prec)?;
+    let neg_w0 = Complex::with_val(prec, -&w0_val);
+    let mut l_up = Complex::with_val(prec, &neg_w0 / &ln_b_anchor);
+    let w1_val = lambertw::wk(&neg_ln_b_anchor, 1, prec)?;
+    let neg_w1 = Complex::with_val(prec, -&w1_val);
+    let mut l_low = Complex::with_val(prec, &neg_w1 / &ln_b_anchor);
+
+    let mut arg_up = arg_of(&Complex::with_val(prec, &ln_b_anchor * &l_up));
+    let mut arg_low = arg_of(&Complex::with_val(prec, &ln_b_anchor * &l_low));
+    if !(arg_up > 1e-3 && arg_low < -1e-3) {
+        return Err(format!(
+            "cut-base walk: anchor pair at b+{}i is not decay-compatible (arg λ_up={:.4}, arg λ_low={:.4})",
+            eps_anchor, arg_up, arg_low
+        ));
+    }
+    if verbose {
+        eprintln!(
+            "kouz cut-base walk: anchor ε={}  L_up={:.4}+{:.4}i (argλ={:+.4})  L_low(W₊₁)={:.4}+{:.4}i (argλ={:+.4})",
+            eps_anchor,
+            Float::with_val(prec, l_up.real()).to_f64(),
+            Float::with_val(prec, l_up.imag()).to_f64(),
+            arg_up,
+            Float::with_val(prec, l_low.real()).to_f64(),
+            Float::with_val(prec, l_low.imag()).to_f64(),
+            arg_low,
+        );
+    }
+    let mut state = setup_kouznetsov_core(
+        &b_anchor,
+        l_up.clone(),
+        l_low.clone(),
+        prec,
+        digits,
+        false,
+        None,
+        false,
+    )
+    .map_err(|e| format!("cut-base walk: anchor solve at b+{}i failed: {}", eps_anchor, e))?;
+    let mut eps_cur = eps_anchor;
+
+    // ---- Geometric descent schedule, then the final hop to ε = 0 ----
+    let mut queue: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
+    let mut e = eps_anchor * sched_ratio;
+    while e > 1e-3 {
+        queue.push_back(e);
+        e *= sched_ratio;
+    }
+    queue.push_back(0.0);
+
+    let mut budget: u32 = 200;
+    while let Some(eps_next) = queue.pop_front() {
+        if budget == 0 {
+            return Err(format!(
+                "cut-base walk: solve budget exhausted at ε={:.6e} (walk from ε={:.6e})",
+                eps_next, eps_cur
+            ));
+        }
+        budget -= 1;
+
+        let b_next = base_at(eps_next);
+        let ln_b_next = Complex::with_val(prec, b_next.ln_ref());
+
+        // Germ-track the pair by Newton from the previous values; W-branch
+        // labels are meaningless mid-walk (L_low crosses Im = 0 near ε≈0.7).
+        let track = |seed: &Complex| -> Result<Complex, String> {
+            newton_fixed_point(&ln_b_next, seed, prec)
+        };
+        let step_fail = |msg: String,
+                         queue: &mut std::collections::VecDeque<f64>,
+                         eps_cur: f64,
+                         eps_next: f64|
+         -> Result<(), String> {
+            // Bisect: geometric mean for interior steps, arithmetic halving
+            // for the final hop to 0. Give up when the interval collapses.
+            let mid = if eps_next > 0.0 {
+                (eps_cur * eps_next).sqrt()
+            } else {
+                eps_cur * 0.5
+            };
+            if mid >= eps_cur * 0.995 || mid <= 1e-8 {
+                return Err(format!(
+                    "cut-base walk: stuck at ε={:.6e} → {:.6e} ({}); bisection floor reached",
+                    eps_cur, eps_next, msg
+                ));
+            }
+            if cnum::verbose() {
+                eprintln!(
+                    "kouz cut-base walk: step ε={:.6e} → {:.6e} failed ({}); bisecting at ε={:.6e}",
+                    eps_cur, eps_next, msg, mid
+                );
+            }
+            queue.push_front(eps_next);
+            queue.push_front(mid);
+            Ok(())
+        };
+
+        let (l_up_next, l_low_next) = match (track(&l_up), track(&l_low)) {
+            (Ok(u), Ok(l)) => (u, l),
+            (u, l) => {
+                let msg = format!(
+                    "fixed-point tracking failed: up={:?} low={:?}",
+                    u.err(),
+                    l.err()
+                );
+                step_fail(msg, &mut queue, eps_cur, eps_next)?;
+                continue;
+            }
+        };
+
+        // Sanity guards: bounded per-step movement, non-collapsed pair,
+        // walk-continuous decay compatibility.
+        let move_up = dist(&l_up_next, &l_up);
+        let move_low = dist(&l_low_next, &l_low);
+        let sep = dist(&l_up_next, &l_low_next);
+        let arg_up_next = arg_cont(&Complex::with_val(prec, &ln_b_next * &l_up_next), arg_up);
+        let arg_low_next = arg_cont(&Complex::with_val(prec, &ln_b_next * &l_low_next), arg_low);
+        if move_up > 1.0 || move_low > 1.0 || sep < 0.05 {
+            let msg = format!(
+                "pair guard tripped (move_up={:.3}, move_low={:.3}, sep={:.3})",
+                move_up, move_low, sep
+            );
+            step_fail(msg, &mut queue, eps_cur, eps_next)?;
+            continue;
+        }
+        if !(arg_up_next > 1e-3 && arg_low_next < -1e-3) {
+            let msg = format!(
+                "decay compatibility lost (arg λ_up={:.4}, arg λ_low={:.4})",
+                arg_up_next, arg_low_next
+            );
+            step_fail(msg, &mut queue, eps_cur, eps_next)?;
+            continue;
+        }
+
+        if verbose {
+            eprintln!(
+                "kouz cut-base walk: ε={:.6e} → {:.6e}  L_up={:.4}+{:.4}i (argλ={:+.4})  L_low={:.4}+{:.4}i (argλ={:+.4})  [{} solves left]",
+                eps_cur,
+                eps_next,
+                Float::with_val(prec, l_up_next.real()).to_f64(),
+                Float::with_val(prec, l_up_next.imag()).to_f64(),
+                arg_up_next,
+                Float::with_val(prec, l_low_next.real()).to_f64(),
+                Float::with_val(prec, l_low_next.imag()).to_f64(),
+                arg_low_next,
+                budget,
+            );
+        }
+
+        // Warm start: Cauchy-resample the previous solution onto the new
+        // grid. Beyond the previous strip height, clamp t — out there F is
+        // within grid accuracy of the fixed points anyway.
+        let t_clamp = 0.92 * Float::with_val(prec, &state.t_max).to_f64();
+        let prev = state;
+        let warm = {
+            let samples = prev.samples.clone();
+            let nodes = prev.nodes.clone();
+            let weights = prev.weights.clone();
+            let t_max = prev.t_max.clone();
+            let lu = prev.l_upper.clone();
+            let ll = prev.l_lower.clone();
+            let lnb = prev.ln_b.clone();
+            move |t: &Float| -> Result<Complex, String> {
+                let tf = Float::with_val(53, t).to_f64();
+                let tc = tf.clamp(-t_clamp, t_clamp);
+                let z0 = Complex::with_val(
+                    prec,
+                    (Float::with_val(prec, 0.5f64), Float::with_val(prec, tc)),
+                );
+                Ok(cauchy_eval(
+                    &z0, &samples, &nodes, &weights, &t_max, &lu, &ll, &lnb, prec,
+                ))
+            }
+        };
+        match setup_kouznetsov_core(
+            &b_next,
+            l_up_next.clone(),
+            l_low_next.clone(),
+            prec,
+            digits,
+            false,
+            Some(&warm),
+            true,
+        ) {
+            Ok(s) => {
+                state = s;
+                eps_cur = eps_next;
+                l_up = l_up_next;
+                l_low = l_low_next;
+                arg_up = arg_up_next;
+                arg_low = arg_low_next;
+            }
+            Err(e) => {
+                state = prev;
+                // ---- Homotopy-wall rescue ----
+                // At some ε* on the vertical path a zero of F crosses the
+                // sample line Re z = 1/2: the lower fixed point's log-branch
+                // identity moves from ln L_low = λ_low (anchor side) to
+                // ln L_low = λ_low + 2πi (cut side), so the true curve
+                // t ↦ F(1/2+it) *jumps winding class* around 0 at ε*. LM
+                // cannot tunnel between classes, so every resampled warm
+                // guess from above the wall stalls ("no descent" at small
+                // residual) and bisection merely converges to ε*. Rescue:
+                // multiply the warm profile by the smooth phase corrector
+                // e^{∓2πi·ramp(t)} — ≡1 at both tails (endpoint values and
+                // pins unchanged) but winding once around 0 across the pinch
+                // node (min |F|, where the zero crosses and values are
+                // cheapest to rotate) — i.e. jump the class by hand, then
+                // let LM polish. Only attempted once bisection has ground
+                // the step down (wall signature), not on ordinary failures.
+                let wall_signature = e.contains("no descent") || e.contains("stagnation");
+                let step_tight = (eps_next > 0.0 && eps_cur - eps_next < 0.02 * eps_cur)
+                    || (eps_next == 0.0 && eps_cur < 1e-2);
+                let mut rescued = false;
+                if wall_signature && step_tight {
+                    let mut t_p = 0.0f64;
+                    let mut min_abs = f64::INFINITY;
+                    for (k, s) in state.samples.iter().enumerate() {
+                        if k == 0 || k + 1 == state.samples.len() {
+                            continue;
+                        }
+                        let a = Float::with_val(prec, s.abs_ref()).to_f64();
+                        if a < min_abs {
+                            min_abs = a;
+                            t_p = Float::with_val(53, &state.nodes[k]).to_f64();
+                        }
+                    }
+                    let t_clamp = 0.92 * Float::with_val(prec, &state.t_max).to_f64();
+                    for sign in [-1.0f64, 1.0] {
+                        if verbose {
+                            eprintln!(
+                                "kouz cut-base walk: homotopy-wall rescue at ε={:.6e} (sign {:+}), pinch t={:.3} (|F|min={:.3e})",
+                                eps_next, sign, t_p, min_abs
+                            );
+                        }
+                        let warm_jump = {
+                            let samples = state.samples.clone();
+                            let nodes = state.nodes.clone();
+                            let weights = state.weights.clone();
+                            let t_max = state.t_max.clone();
+                            let lu = state.l_upper.clone();
+                            let ll = state.l_lower.clone();
+                            let lnb = state.ln_b.clone();
+                            move |t: &Float| -> Result<Complex, String> {
+                                let tf = Float::with_val(53, t).to_f64();
+                                let tc = tf.clamp(-t_clamp, t_clamp);
+                                let z0 = Complex::with_val(
+                                    prec,
+                                    (Float::with_val(prec, 0.5f64), Float::with_val(prec, tc)),
+                                );
+                                let v = cauchy_eval(
+                                    &z0, &samples, &nodes, &weights, &t_max, &lu, &ll, &lnb,
+                                    prec,
+                                );
+                                // ramp: →1 deep below the pinch, →0 above it.
+                                let ramp = 0.5 * (1.0 - ((tf - t_p) / 0.75).tanh());
+                                let theta = sign * 2.0 * std::f64::consts::PI * ramp;
+                                let phase_arg = Complex::with_val(
+                                    prec,
+                                    (Float::new(prec), Float::with_val(prec, theta)),
+                                );
+                                let phase = Complex::with_val(prec, phase_arg.exp_ref());
+                                Ok(Complex::with_val(prec, &v * &phase))
+                            }
+                        };
+                        match setup_kouznetsov_core(
+                            &b_next,
+                            l_up_next.clone(),
+                            l_low_next.clone(),
+                            prec,
+                            digits,
+                            false,
+                            Some(&warm_jump),
+                            true,
+                        ) {
+                            Ok(s) => {
+                                if verbose {
+                                    eprintln!(
+                                        "kouz cut-base walk: homotopy-wall rescue converged at ε={:.6e} (sign {:+})",
+                                        eps_next, sign
+                                    );
+                                }
+                                state = s;
+                                eps_cur = eps_next;
+                                l_up = l_up_next.clone();
+                                l_low = l_low_next.clone();
+                                arg_up = arg_up_next;
+                                arg_low = arg_low_next;
+                                rescued = true;
+                                break;
+                            }
+                            Err(e2) => {
+                                if verbose {
+                                    eprintln!(
+                                        "kouz cut-base walk: rescue (sign {:+}) failed: {}",
+                                        sign, e2
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                if !rescued {
+                    step_fail(format!("LM solve failed: {}", e), &mut queue, eps_cur, eps_next)?;
+                    continue;
+                }
+            }
+        }
+    }
+
+    if eps_cur != 0.0 {
+        return Err(format!(
+            "cut-base walk: schedule ended at ε={:.6e} without reaching 0",
+            eps_cur
+        ));
+    }
+    Ok(state)
 }

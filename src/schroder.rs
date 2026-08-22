@@ -197,6 +197,17 @@ pub fn setup_schroder(
     //   * |λ|>1 (repelling): backward-iterate φ⁻¹(w) = log_b(L+w) − L; 0 is
     //     attracting for φ⁻¹ (multiplier 1/λ, |1/λ|<1), so a starting point in
     //     its basin contracts to 0.
+    //
+    // Note (cut bases / dead backward orbits): when the repelling backward
+    // orbit of w₀ = 1−L hits the log singularity (w₁ = −L exactly, i.e. the
+    // tetration backward orbit 1 → 0 → −∞), no finite σ̃(w₀) on the canonical
+    // branch exists: w₀ = φ(−L) is the image of φ's asymptotic value, so w₀
+    // is a *singular value* of the Poincaré function ψ = σ̃⁻¹ and −L is its
+    // Picard-omitted value. Any root of ψ(s) = w₀ then lies on a non-principal
+    // 2πik/ln(b) branch, producing an entire solution with F(−1) ≠ 0 — a
+    // different function from the canonical (Kneser/Kouznetsov) tetration,
+    // whose F(−1) = 0 and F(−2) = −∞. We therefore *fail honestly* here and
+    // let the dispatcher use the one-sided iε Richardson limit instead.
     let (s1, sigma_inner_radius) = eval_sigma_with_shift(&sigma, b, l, lambda, prec, &w0)?;
 
     let ln_lambda = Complex::with_val(prec, lambda.ln_ref());
@@ -324,19 +335,41 @@ pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
         )
     })?;
 
+    // The unwinding chains below must never pass through an exact 0 / ∞ /
+    // NaN. For very large |ln b| (e.g. b = 10⁶) the `b^·` chain can underflow
+    // to an exact ±0 in one step (Re(f·ln b) below the exponent range), after
+    // which the orbit degenerates to the …, 0, 1, b, … alternation. Such a
+    // chain SELF-VALIDATES the functional equation (both F(h) and F(h+1) come
+    // from the same corrupted alternation), so the guard must live here, not
+    // in the post-check. Similarly, the log chain dies if it hits 0 exactly.
+    let check_chain = |f: &Complex, step: i64| -> Result<(), String> {
+        let fa = Float::with_val(prec, f.abs_ref());
+        let fa64 = fa.to_f64();
+        if !fa64.is_finite() || fa.is_zero() {
+            return Err(format!(
+                "Schröder: integer-shift chain degenerated at step {} \
+                 (|F| = {}); result would be underflow/overflow garbage",
+                step, fa64
+            ));
+        }
+        Ok(())
+    };
     if k > 0 {
         // F(h) = log_b applied k times to F(h+k).
-        for _ in 0..k {
+        for step in 0..k {
+            check_chain(&f, step)?;
             let ln_f = Complex::with_val(prec, f.ln_ref());
             f = Complex::with_val(prec, &ln_f / &state.ln_b);
         }
     } else {
         // k < 0: F(h) = b^· applied |k| times to F(h+k) = F(h−|k|).
-        for _ in 0..(-k) {
+        for step in 0..(-k) {
             let exponent = Complex::with_val(prec, &f * &state.ln_b);
             f = Complex::with_val(prec, exponent.exp_ref());
+            check_chain(&f, step)?;
         }
     }
+    check_chain(&f, k.unsigned_abs() as i64)?;
     Ok(f)
 }
 

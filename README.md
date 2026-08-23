@@ -679,6 +679,51 @@ genuinely different sub-problems:
    conditional high precision at Brjuno points, honest refusal
    elsewhere.
 
+**Decision (2026-08-23, project owner): descoped — too expensive for
+this campaign.** Documented here in enough detail that a motivated
+implementer (or a future campaign) can pick it up. Roadmap for the
+feasible part (item 1, the exact parabolic points):
+
+* *Step 1 — formal Abel series.* At `b = e^{1/e}`: `L = e`, `λ = 1`,
+  expand `f(L+w) = L + w + a₂w² + a₃w³ + …` (coefficients from
+  `ln b = 1/e`, exact recursion, trivial at arbitrary precision).
+  The Abel equation `α(f(z)) = α(z) + 1` has the classical
+  Écalle/Fatou solution `α(w) = c₋₁/w + ρ·ln w + Σ_{k≥1} c_k wᵏ`
+  with `c₋₁ = −1/a₂`, `ρ = a₃/a₂² − 1` (Milnor, *Complex Dynamics*,
+  § 10; Kouznetsov 2009 § 6). Coefficients by recursion.
+* *Step 2 — beat the divergence.* The series is divergent
+  (Gevrey-1); full precision does **not** need Borel–Laplace
+  summation: use the standard push-in trick
+  `α(w) = α_series(f^{∘N}(w)) − N`, iterating `N ≈ O(digits)` steps
+  deep into the attracting petal until the optimally-truncated tail
+  is below target (error `~e^{−c/|w|}`). All machinery (arbitrary-
+  precision iteration, series evaluation) already exists in this
+  repo.
+* *Step 3 — petals, sewing, normalization.* λ = 1 has a two-petal
+  Leau–Fatou flower: the attracting-petal Abel inverse gives the
+  regular super-exponential from below (`F → e⁻`), the repelling
+  petal the exotic one from above; complex heights need `α⁻¹` off
+  the real axis plus exact FE steps, and the `F(0)=1` shift.
+  Reference values and the four-solution portrait are published
+  (Trappmann–Kouznetsov, base-η super-exponentials) — ideal
+  validation targets.
+* *Step 4 — λ = −1* (`b = e^{−e}`): parabolic for `f∘f`; solve the
+  Abel equation of the second iterate with a half-step twist
+  (`α(f(z)) = α(z) + ½`). Same theory, double bookkeeping. This
+  would also give the cut-segment endpoint *from the left*,
+  cross-validating the ε-walker.
+* *Expected problems:* certified truncation bounds for the
+  asymptotic tail (needs an honest error model, not just heuristics);
+  petal-boundary evaluation for heights near the singular directions;
+  matching the two petals into one Kneser-canonical function
+  (this is where the real research content is — uniqueness of the
+  sewing); performance of the `f^{∘N}` push-in at high digits.
+* *Estimate:* 2–6 weeks full-time. *Research directions:* Écalle
+  resurgence / transseries for rigorous tails; Lanlan–Shishikura-
+  style near-parabolic renormalization to cover the *approach* to
+  the boundary (item 2) uniformly; Brjuno-conditional linearization
+  for item 3 (with an explicit refusal at non-Brjuno θ).
+
 **(b) *"Truly pathological complex bases whose fixed-point pairs fall
 in the same half-plane and defeat the germ-tracked injection would
 need Paulsen–Cowgill conformal-map machinery (not implemented); such
@@ -701,6 +746,42 @@ half-plane) has its own dedicated machinery (§ 6.7). If you can
 exhibit a concrete base that defeats the current solver, please post
 it on the [forum thread](https://tetrationforum.org/showthread.php?tid=1826)
 — it would immediately become the priority test case.
+
+**Decision (2026-08-23, project owner): descoped — too expensive for
+this campaign.** For a future implementer, the shape of the work:
+
+* *What P–C actually compute:* a Kneser-style construction for
+  complex `b` — Fatou/Abel coordinates at the two fixed points, the
+  "sickle" region between an orbit and its image, a numerical
+  Riemann map of that sickle onto a strip/annulus, and an iterative
+  sewing step enforcing the functional equation on the seam (in the
+  original paper: polynomial least-squares on boundary
+  correspondence, double precision).
+* *Expected problems:* (i) **certified arbitrary-precision conformal
+  mapping** is the crux — crowding phenomenon makes naive mappers
+  lose digits exponentially in elongated regions, so a
+  Schwarz–Christoffel/Theodorsen-class solver with rigorous error
+  control would have to be built from scratch (nothing suitable
+  exists in the Rust/MPFR ecosystem); (ii) the sewing iteration has
+  no published convergence proof — acceptance would need the same
+  kind of residual-gate honesty used elsewhere in this repo;
+  (iii) published reference values are ~double precision only, so
+  validation targets would first have to be regenerated
+  independently.
+* *Estimate:* months full-time.
+* *Cheaper research directions to try first* (ordered):
+  1. **Base-plane continuation with the existing walker** — the
+     ε-walker (§ 6.7) is a special case of walking `b` along an
+     arbitrary path; a general "walk from a covered base to the
+     suspect base" driver reuses all existing machinery (germ
+     tracking, homotopy jumps, gates) and would likely cover most
+     hypothetical pathological bases at ~days of work, *if a witness
+     is ever found*.
+  2. A merged-fixed-point iteration in the style of sheldonison's
+     `fatou.gp` ([forum thread](https://tetrationforum.org/showthread.php?tid=1017)),
+     which handles complex bases via both fixed points without an
+     explicit Riemann map.
+  3. Full P–C only if 1–2 fail on a concrete witness.
 
 **(c) *"Cut segment 0 < b < e^{−e}: ε-walker research frontier as
 described in § 6.7; the ε = 0 endpoint is not yet certified at

@@ -188,6 +188,11 @@ as `walk12` under the multi-pinch binary; its previous frontier was 0.889.
 
 ## 4. Next steps
 
+0. OWNER DECISION (2026-08-23): Écalle/Abel parabolic implementation and
+   Paulsen–Cowgill conformal machinery are DESCOPED (weeks/months-scale).
+   Both documented in detail in README §8.1 (verdicts, estimates, expected
+   problems, research directions). Remaining active work = cut segment only.
+
 1. Let walk13 (b=0.04) and cut006e (b=0.06) run under the multi-pinch +
    node-boost binary. Walls crossed so far: winding-zero band (gate 1e-8),
    double-zero class wall at ε≈0.196 (multi-pinch), resolution wall at

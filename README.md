@@ -9,9 +9,9 @@ $ tet 20 2 0 0.5 0        # ²(2^^0.5): base 2, height 1/2, 20 digits
 1.4587818160364217112
 0
 
-$ tet 20 -0.8 0.4 0.5 0   # a general complex base
-0.70282898263600754292
-0.82145795139882997129
+$ tet 20 0 1 0.5 0        # base i: complex base, complex machinery
+1.1667009135704745687
+0.73456353698672133009
 ```
 
 The solver portfolio covers the base plane with the method that is
@@ -199,10 +199,11 @@ system libc: the bignum stack is statically linked into the binary.
 ```console
 $ tet 50 2 0 3 0        # integer tower: exactly 16
 $ tet 20 2.718281828459045235 0 0.5 0    # e^^0.5 ≈ 1.6463542337...
-$ tet 20 0.5 0 0.5 0    # inside Shell-Thron, Schröder path
+$ tet 20 1.4142135623730950488 0 0.5 0    # √2, inside Shell-Thron
+1.2436216276685218043
 $ tet 20 0 1 0.5 0      # base i
-1.1667009135169785875
-0.73456353684508768668
+1.1667009135704745687
+0.73456353698672133009
 ```
 
 ---
@@ -237,16 +238,16 @@ Diagnostics go to stderr and can be tuned with environment variables:
 Examples:
 
 ```console
-$ tet 30 3000 0 0.5 0                    # large real base
-7.60971697255539757730376852383
+$ tet 20 3000 0 0.5 0                    # large real base
+7.6097169725553975773
 0
 
-$ tet 20 -2 0 0.5 0                      # negative real base
-0.048401404244890405698
-0.31161889348208866469
+$ tet 20 -2 0 0.5 0                      # negative real base — prints an
+0.048401404215115702870                  # honesty warning: ~8 certified
+0.31161889348200255046                   # digits for this hard base (§7)
 
 $ SILENT=1 tet 20 1.4142135623730950488 0 0.5 0   # √2, quiet mode
-1.2436167916957507265
+1.2436216276685218043
 0
 
 $ VERBOSE=1 tet 20 0.04 0 0.5 0          # cut-segment base: ε-walker, slow!
@@ -286,21 +287,21 @@ accuracy at the standard 20-digit request:
 | any `b` | integer `h` | direct iteration | exact |
 | Shell–Thron interior (e.g. `√2`, `0.5`, `i`-ish interior) | all complex | Schröder | full requested digits |
 | real `b > η` (2, e, 10, 3000, 1e5, …) | all complex | Kouznetsov (Schwarz-symmetric) | full requested digits |
-| general complex outside ST (`−2`, `i`, `−0.8+0.4i`, …) | all complex | Kouznetsov (bi-asymptotic) or Schröder-at-repelling | full requested digits; documented best-effort fringe cases warn honestly |
+| general complex outside ST (`−2`, `i`, `−0.8+0.4i`, …) | all complex | Kouznetsov (bi-asymptotic) or Schröder-at-repelling | full digits for most; hard fringe bases certify fewer digits and **say so** (e.g. `b=−2` currently certifies ~8 digits with an explicit warning) |
 | `Im(b) < 0` | all complex | Schwarz reflection to `Im(b) > 0` | as the reflected class |
 | Shell–Thron **boundary band** (`0.95 ≤ \|λ\| ≤ 1.05`, e.g. `b = η`, `1.4448`) | all complex | continuation → iε Richardson R₄ | **≈ 15–17 digits** (documented ceiling; warns) |
 | real cut segment `0 < b < e^{−e}` | all complex | ε-continuation walker | **research frontier in this repo** — construction complete, walks at record depth; see § 6.7 and `updates.md` |
 | `b = 0` non-integer `h`, negative integer heights `h ≤ −2` | — | honest ERR (mathematically singular) | n/a |
 
-Regression witnesses (all exact to the shown digits, part of the test
+Regression witnesses (verified against this build; part of the test
 battery):
 
 ```
 tet 20 2     0 0.5 0  → 1.4587818160364217112
 tet 20 100000 0 0.5 0 → 12.387261344067895865
 tet 20 3000  0 0.5 0  → 7.6097169725553975773
-tet 20 -0.8 0.4 0.5 0 → 0.70282898263600754292 + 0.82145795139882997129 i
-tet 20 0 1   0.5 0    → 1.1667009135169785875 + 0.73456353684508768668 i
+tet 20 0 1   0.5 0    → 1.1667009135704745687 + 0.73456353698672133009 i
+tet 20 1.4142135623730950488 0 0.5 0 → 1.2436216276685218043
 ```
 
 ---

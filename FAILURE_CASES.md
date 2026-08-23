@@ -310,12 +310,15 @@ ten walk campaigns at b = 0.04:
   Stagnation-accepted garbage (residual ~1e-7 … 1) is rejected and
   triggers bisection.
 * **Adaptive node boost**: when the previous curve's deepest pinch has
-  |F|min < 0.12 the next solve doubles its node count. A zero within ~0.1
+  |F|min < 0.12 the next solve doubles its node count; below 0.05 it
+  quadruples (n=16384, still ≤ N_MAX_PRACTICAL). A zero within ~0.1
   of the line makes the left-edge integrand ln F near-singular; at the
   standard density the trapezoidal floor then lands at the gate scale
   (observed: clean convergence flooring at 1.022e-8, b=0.06, ε≈0.102 —
-  killed the walk despite correct winding class). Doubling the density
-  squares the floor away; healthy pinches (|F| ≈ 0.2–0.5) never trigger.
+  killed the walk despite correct winding class; then jump rejections
+  skating at 1.04–1.07e-8 on the doubled grid at ε≈0.089–0.092).
+  Boosting squares the floor away; healthy pinches (|F| ≈ 0.2–0.5)
+  never trigger.
 * **Wall-band pacing**: after any rescue, the next ≤ 5 targets are fine
   (1.5 %) steps — immediately jump-eligible, ~1 solve per band step instead
   of fail → bisect cascades.

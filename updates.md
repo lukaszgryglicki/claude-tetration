@@ -147,6 +147,15 @@ than any previous campaign — before failing in a qualitatively new way:
   solve (n 4096→8192; floor squares away, ~1e-16). Healthy pinches
   (0.2–0.5) never trigger it. Relaunched as walk13 (b=0.04) and cut006e
   (b=0.06) with 16h budgets.
+* **2026-08-23 ~17:45 UTC — RECORD BROKEN (cut006e): ε ≈ 0.092.** The
+  node-boost binary passed the ε=0.102 resolution wall (boost fired,
+  n=8192 through the deep-pinch zone, residuals 3e-10–9e-10, honest
+  warnings printed) and entered unexplored territory. Currently in
+  turbulence approaching the second ST crossing (~0.08): steps toward
+  0.088 rejected at O(0.1) residual (wrong-class signature), walker
+  bisecting per design. All prior walls crossed in one run: winding band
+  (gate), 0.196 double-zero (multi-pinch, pattern [0,-1,0] dominant),
+  0.102 resolution (boost).
 
 `walk11` (b=0.04, single-pinch binary) was stopped at ε≈1.24 and relaunched
 as `walk12` under the multi-pinch binary; its previous frontier was 0.889.

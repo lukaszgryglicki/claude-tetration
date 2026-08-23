@@ -3812,8 +3812,17 @@ pub fn setup_kouznetsov_cut_base(
         // acceptance gate (observed: clean quadratic convergence flooring at
         // 1.0e-8, b=0.06, ε≈0.102, |F|min=4.2e-2 — a pure resolution kill,
         // not a class problem). Double the node density there; healthy band
-        // pinches sit at |F| ≈ 0.2–0.5 and never trigger this.
-        let node_boost = if pinches[0].1 < 0.12 { 2 } else { 1 };
+        // pinches sit at |F| ≈ 0.2–0.5 and never trigger this. Second tier:
+        // below |F|min<0.05 even the doubled grid skates at the gate
+        // (observed: rejections at 1.04–1.07e-8 with n=8192, b=0.06,
+        // ε≈0.089–0.092), so quadruple instead (16384, still ≤ N_MAX).
+        let node_boost = if pinches[0].1 < 0.05 {
+            4
+        } else if pinches[0].1 < 0.12 {
+            2
+        } else {
+            1
+        };
         let make_warm = |combo: &[f64]| {
             let samples = prev.samples.clone();
             let nodes = prev.nodes.clone();

@@ -198,5 +198,20 @@ as `walk12` under the multi-pinch binary; its previous frontier was 0.889.
 3. If a walk reaches ε=0: validate FE internally + mpmath cross-check, anchor
    robustness check (TET_KOUZ_CUT_ANCHOR=1.8), spot-check complex/negative
    heights, add results to the baseline table.
-4. Remove `/tmp/tet-base` worktree; archive walk logs; commit everything with
+4. (2026-08-23 14:20 UTC re-verification, current build) All battery witnesses
+   re-confirmed: 2/1e5/3000/√2/i/e exact to 20 digits, 3000@30 digits exact.
+   Two observations on hard complex bases:
+   - b=−2: honest warning, ~8 certified digits (residual 6.44e-9) — value's
+     leading 8 digits match reference; acceptable, documented in README §5.2.
+   - b=−0.8+0.4i (t860): final value still exact to all 20 reference digits,
+     but the run now takes ~10 min (multi-start retries) and the warning
+     quotes the residual of a FAILED attempt (1.58, "0 digits") rather than
+     the accepted solve — over-pessimistic honesty reporting. Value correct;
+     warning-attribution fix is a pending polish item (do not silence, just
+     attribute the right residual).
+5. Remove `/tmp/tet-base` worktree; archive walk logs; commit everything with
    the Co-authored-by trailer.
+6. README.md added (2026-08-23): full academic-audience documentation with §0
+   Tetration Forum credits (forum thread tid=1826 is the project's companion
+   thread), verified-value examples only, coverage map with
+   Verified/Pending/Known-bad sections. Keep in sync with walk outcomes.

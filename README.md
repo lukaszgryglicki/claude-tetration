@@ -1,5 +1,58 @@
 # `tet` — arbitrary-precision complex tetration
 
+## 0. To the Tetration Forum — first, the credits
+
+**This work exists because of, and for, the
+[Tetration Forum](https://tetrationforum.org) community.** Nearly two
+decades of open mathematics on that forum — constructions, proofs,
+counterexamples, working code, and honest negative results — are the
+foundation this implementation stands on. Before anything else, credit
+where it belongs:
+
+* **[bo198214 (Henryk Trappmann)](https://tetrationforum.org/member.php?action=profile&uid=1)** —
+  founder of the forum, and co-author of the uniqueness theory for
+  holomorphic Abel functions at complex fixed-point pairs that makes
+  "*the*" canonical tetration a well-posed target at all.
+* **Dmitrii Kouznetsov** — the Cauchy-integral construction
+  (Math. Comp. 2009) that is the computational heart of this
+  repository, developed and stress-tested in the open on the forum.
+* **[sheldonison (Sheldon Levenstein)](https://tetrationforum.org/member.php?action=profile&uid=42)** —
+  [fast accurate Kneser sexp algorithm](https://tetrationforum.org/showthread.php?tid=486),
+  the [fatou.gp / merged-fixed-point program](https://tetrationforum.org/showthread.php?tid=1017),
+  and the [complex-base tetration program](https://tetrationforum.org/showthread.php?tid=729)
+  — for years the practical gold standard this project measures
+  itself against.
+* **[mike3](https://tetrationforum.org/member.php?action=profile&uid=56)** —
+  the [Cauchy Integral Experiment](https://tetrationforum.org/showthread.php?tid=359)
+  and [tetration for ALL bases, real and complex](https://tetrationforum.org/showthread.php?tid=828)
+  threads, which map exactly the "cover the whole base plane"
+  ambition (including the cut segment) pursued here.
+* **[andydude (Andrew Robbins)](https://tetrationforum.org/member.php?action=profile&uid=2)** —
+  the natural slog / Abel-matrix approach and
+  [Designing a Tetration Library](https://tetrationforum.org/showthread.php?tid=146).
+* **[Gottfried Helms](https://tetrationforum.org/member.php?action=profile&uid=9)** —
+  the matrix (Carleman) operator school, including
+  [fixpoint comparisons](https://tetrationforum.org/showthread.php?tid=83)
+  directly relevant to this repo's fixed-point-pair machinery.
+* **[jaydfox (Jay D. Fox)](https://tetrationforum.org/member.php?action=profile&uid=7)** —
+  [accelerated slog via Abel-matrix inversion](https://tetrationforum.org/showthread.php?tid=1203).
+* **[JmsNxn (James Nixon)](https://tetrationforum.org/member.php?action=profile&uid=163)** —
+  the β-method and infinite-composition theory, and much of the
+  forum's modern analytic energy.
+* **[tommy1729](https://tetrationforum.org/member.php?action=profile&uid=47)**,
+  **Ember Edison**, **MphLee**, and the many members whose questions,
+  conjectures, and counterexamples shaped what "getting it right"
+  means for every regime handled below.
+* **William Paulsen & Samuel Cowgill** — whose complex-base papers
+  grew from and fed back into these community discussions.
+
+This repository's companion thread on the forum is
+[Arbitrary Tetration in rust](https://tetrationforum.org/showthread.php?tid=1826)
+(Computation board) — discussion, bug reports, and mathematical
+critique are most welcome there or via GitHub issues.
+
+---
+
 **Tetration** `F_b(h)` — the analytic extension of the tower
 `b^(b^(b^…))` of height `h` — for **complex bases** and **complex
 heights**, at any requested decimal precision, in Rust.
@@ -44,6 +97,7 @@ is an **honest error**, never a plausible-looking wrong number.
 
 ## Table of contents
 
+0. [To the Tetration Forum — first, the credits](#0-to-the-tetration-forum--first-the-credits)
 1. [Mathematical background](#1-mathematical-background)
    1. [What tetration is](#11-what-tetration-is)
    2. [Conventions and normalization](#12-conventions-and-normalization)
@@ -52,6 +106,9 @@ is an **honest error**, never a plausible-looking wrong number.
 3. [Command-line usage](#3-command-line-usage)
 4. [Library usage](#4-library-usage)
 5. [Coverage map](#5-coverage-map)
+   1. [✅ Verified](#51--verified)
+   2. [⏳ Pending / in progress](#52--pending--in-progress)
+   3. [❌ Known-bad / missing](#53--known-bad--missing-by-design-or-documented-ceiling)
 6. [The algorithms, in detail](#6-the-algorithms-in-detail)
    1. [Classification](#61-classification-fixed-points-and-)
    2. [Exact cases](#62-exact-cases)
@@ -293,8 +350,11 @@ accuracy at the standard 20-digit request:
 | real cut segment `0 < b < e^{−e}` | all complex | ε-continuation walker | **research frontier in this repo** — construction complete, walks at record depth; see § 6.7 and `updates.md` |
 | `b = 0` non-integer `h`, negative integer heights `h ≤ −2` | — | honest ERR (mathematically singular) | n/a |
 
-Regression witnesses (verified against this build; part of the test
-battery):
+### 5.1 ✅ Verified
+
+Everything below is re-checked by the test battery and was re-verified
+against the current build; witness values are exact to the shown
+digits:
 
 ```
 tet 20 2     0 0.5 0  → 1.4587818160364217112
@@ -302,7 +362,45 @@ tet 20 100000 0 0.5 0 → 12.387261344067895865
 tet 20 3000  0 0.5 0  → 7.6097169725553975773
 tet 20 0 1   0.5 0    → 1.1667009135704745687 + 0.73456353698672133009 i
 tet 20 1.4142135623730950488 0 0.5 0 → 1.2436216276685218043
+tet 20 2.718281828459045235 0 0.5 0  → 1.6463542337511945809
+tet 50 2 0 3 0 → 16 (exact)
 ```
+
+Covered classes: exact special cases; integer heights for any base;
+Shell–Thron interior (Schröder, full digits); real bases `b > η` from
+just past the boundary up to at least `10⁵` (Kouznetsov, full digits);
+`Im(b) < 0` by Schwarz reflection; complex heights across all of the
+above (spot-checked against mpmath and the FE post-check).
+
+### 5.2 ⏳ Pending / in progress
+
+* **Cut segment `0 < b < e^{−e}` at exactly `Im b = 0`** — the
+  ε-walker (§ 6.7) is actively descending; three successive walls have
+  been diagnosed and fixed this campaign (record depth `ε ≈ 0.102` at
+  `b = 0.06`, from `ε ≈ 0.92` at the start). The `ε = 0` endpoint is
+  not yet certified. Live status: [`updates.md`](updates.md),
+  [`FAILURE_CASES.md`](FAILURE_CASES.md) § J. Note complex bases
+  arbitrarily close to the cut (`b + iε`, any fixed `ε > 0`) already
+  work as ordinary complex bases.
+* **Hard fringe complex bases** (e.g. `b = −2`, some bases with
+  awkward fixed-point geometry): currently certify fewer digits than
+  requested and print an explicit accuracy warning; improving their
+  conditioning is ongoing.
+
+### 5.3 ❌ Known-bad / missing (by design or documented ceiling)
+
+* **Shell–Thron boundary band** (`0.95 ≤ |λ| ≤ 1.05`): hard ceiling of
+  **≈ 15–17 digits** via iε-Richardson regardless of requested
+  precision; full precision would require Abel/Écalle parabolic
+  iteration (not implemented). The program warns rather than
+  overclaims.
+* **`b = 0` at non-integer heights** — no principal-branch value
+  exists: honest ERR.
+* **Negative integer heights `h ≤ −2`** — genuine singularities
+  (`F(−2) = log_b 0 = −∞`): honest ERR.
+* **Paulsen–Cowgill conformal-map machinery** — not implemented;
+  pathological bases that would need it error out cleanly instead of
+  guessing.
 
 ---
 

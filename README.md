@@ -119,6 +119,7 @@ is an **honest error**, never a plausible-looking wrong number.
    7. [The cut-base ε-walker](#67-the-cut-base-ε-walker-0--b--e−e)
 7. [Numerical honesty](#7-numerical-honesty)
 8. [Known limitations](#8-known-limitations)
+   1. [Feasibility verdicts for the open gaps](#81-how-hard-would-closing-each-gap-be-feasibility-verdicts)
 9. [Repository layout](#9-repository-layout)
 10. [Testing](#10-testing)
 11. [References](#11-references)
@@ -629,6 +630,94 @@ quotable in a research context:
 * The cut-base walker is **slow** (hours: hundreds of warm
   arbitrary-precision PDE-sized solves), inherently sequential, and
   currently research-grade rather than production-grade.
+
+### 8.1 How hard would closing each gap be? (feasibility verdicts)
+
+An honest engineering assessment of the three open items above — what
+is achievable with effort, what is blocked, and what is mathematically
+impossible as stated.
+
+**(a) *"Parabolic boundary band (0.95 ≤ |λ| ≤ 1.05): ≈ 15–17 digits via
+iε-Richardson, independent of requested precision. Full precision there
+needs Abel/Écalle parabolic-iteration theory (Kouznetsov 2009 § 6) —
+not implemented."***
+
+Verdict: **implementable in part; mathematically obstructed in part.
+Not implemented at the moment (large, delicate project); the 15–17
+digit fallback is the honest state.** The band decomposes into three
+genuinely different sub-problems:
+
+1. *Exactly parabolic real points* — `b = e^{1/e}` (λ = 1) and
+   `b = e^{−e}` (λ = −1). Here the theory is complete (Écalle/Fatou
+   coordinates; Kouznetsov 2009 § 6; the Kouznetsov–Trappmann base-η
+   "exotic" construction): the Abel function has a known asymptotic
+   expansion `α(z) ∼ c/(z−L) + ρ·ln(z−L) + Σ…` and full precision is
+   reachable. This is the *feasible* part: an estimated few weeks of
+   focused work (new asymptotic-series module, sector matching,
+   validated against the published base-η values). Highest-value
+   future work.
+2. *Near-parabolic bases* (`|λ| ≠ 1` but within the band). Not a
+   theory gap but a **cost wall**: the Kouznetsov contour height and
+   the iε ladder cost grow like `1/|arg λ|` resp. `1/ε`, so each
+   additional certified digit costs exponentially more compute. The
+   R₄ ladder at the current settings lands at 15–17 digits; more is
+   purchasable but brutally expensive, and the parabolic Taylor
+   growth (`a₈, a₁₀, …`) caps polynomial extrapolation. Full
+   requested precision here also reduces to implementing (1) and
+   continuing off it.
+3. *Irrationally-neutral boundary points* (`λ = e^{2πiθ}`, θ
+   irrational). Here lies a **genuine mathematical obstruction**,
+   not an implementation gap: by classical complex dynamics
+   (Siegel/Brjuno/Cremer), the fixed point is linearizable only when
+   θ satisfies the Brjuno condition; at Cremer-type points **no
+   analytic linearization exists at all**, small-divisor terms
+   `1/(λⁿ−λ)` are unbounded, and any fixed-point-asymptotics
+   definition of canonical tetration becomes ill-posed. "Full
+   precision on the whole band" is therefore **impossible as
+   stated** — the best any implementation can offer on the boundary
+   curve itself is: full precision at the parabolic points (item 1),
+   conditional high precision at Brjuno points, honest refusal
+   elsewhere.
+
+**(b) *"Truly pathological complex bases whose fixed-point pairs fall
+in the same half-plane and defeat the germ-tracked injection would
+need Paulsen–Cowgill conformal-map machinery (not implemented); such
+bases error out cleanly."***
+
+Verdict: **implementable in principle, not ATM — months-scale project
+with no currently known base that needs it.** Paulsen–Cowgill (2017)
+build the complex-base Kneser map via numerical conformal mapping
+(Riemann-map/theta-series machinery). Porting that to certified
+arbitrary precision (MPC) means implementing a validated numerical
+Riemann mapper — an order of magnitude more infrastructure than any
+single module in this repo, with its own conditioning research. Two
+facts keep it de-prioritized: (i) every concrete base in the test
+battery and every base class exercised so far is already covered by
+the germ-tracked bi-asymptotic Kouznetsov solver — the "defeating"
+class is at present *hypothetical*: no witness base is known to us;
+(ii) the one known systematically-hard family (the real cut segment,
+where both relevant fixed points do sit in the closed upper
+half-plane) has its own dedicated machinery (§ 6.7). If you can
+exhibit a concrete base that defeats the current solver, please post
+it on the [forum thread](https://tetrationforum.org/showthread.php?tid=1826)
+— it would immediately become the priority test case.
+
+**(c) *"Cut segment 0 < b < e^{−e}: ε-walker research frontier as
+described in § 6.7; the ε = 0 endpoint is not yet certified at
+production precision. Complex bases arbitrarily near the cut work."***
+
+Verdict: **no known obstruction — active work, being finalized now.**
+This is not believed impossible, merely unfinished: three successive
+walls have already been diagnosed and mechanically fixed this campaign
+(winding-band gate → multi-pinch homotopy rescue → adaptive node
+boost), each fix strictly extending the record depth (ε ≈ 0.92 →
+0.196 → 0.102 → walks in flight). The remaining risk is that new wall
+*types* keep appearing as ε → 0 (each costs a diagnosis-fix-rerun
+cycle of hours-to-days), or that walk economics (hundreds of
+arbitrary-precision solves, inherently sequential) make the final
+stretch impractically slow — in which case the honest fallback is a
+certified value at small fixed ε plus a documented extrapolation, as
+in § 6.6. Progress is logged live in [`updates.md`](updates.md).
 
 ## 9. Repository layout
 

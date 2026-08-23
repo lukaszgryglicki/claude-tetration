@@ -255,6 +255,80 @@ post-validation.
 
 ---
 
+## J. Real bases on the cut segment  0 < b < e^{-e}   — **PARTIAL: ε-continuation walker**
+
+**Cases:** `tet <digits> 0.04 0 h_re h_im`, `tet <digits> 0.06 0 0.5 0`, …
+(any real base strictly between 0 and η_low = e^{-e} ≈ 0.0659880358…).
+
+**Mathematical status.** On this segment the real fixed point of `b^z` is
+repelling with λ real < −1 (period-doubling regime): **no real-analytic
+Kneser tetration exists**. The canonical value is *defined* here as the
+boundary limit `lim_{ε→0⁺} F(b+iε, h)` — the analytic continuation from the
+upper half b-plane, consistent with the Schwarz-reflection convention this
+program uses for `Im(b) < 0`. It is genuinely **complex for non-integer real
+heights**. Any fallback that forces a real result (e.g. the Schwarz-folded
+iε-Richardson used on the parabolic band) is *invalid* here; the dispatcher
+routes every cut base to the ε-continuation walker from both regions that
+can contain one (`OutsideShellThronRealPositive` and `ShellThronBoundary`,
+see `dispatch.rs:tetrate_cut_base`).
+
+**Why direct solves fail.** At the real base the germ-tracked fixed-point
+pair is (W₀, W₊₁) — *both* in the closed upper half-plane (the generic
+opposite-half-plane W_k search rejects it), with genuinely asymmetric decay
+rates. Cold Kouznetsov solves sit outside the Newton basin; Schröder's σ̃
+series diverges (`σ̃ Taylor radius < |1−L|`).
+
+**Construction** (`kouznetsov.rs:setup_kouznetsov_cut_base`): anchor a clean
+Kouznetsov solve at `b + 2i`, then walk ε ↓ 0 along `b + iε` with
+warm-started LM solves, tracking the (W₀, W₊₁) germ. Machinery grown over
+ten walk campaigns at b = 0.04:
+
+* **Two-sided anchored log-unwrap** (`unwrapped_ln_samples`, `two_sided =
+  true` — cut walker ONLY; every other base class uses the pointwise
+  principal log, see section below): keeps the left-edge integrand
+  continuous when the sample curve crosses `(−∞, 0]`, which it always does
+  near the cut (`L_low` has `Re < 0`).
+* **Shell-Thron crossing wall** (ε ≈ 1.55 → ≈ 1.0 at b = 0.04): the walk
+  crosses the ST boundary, where a *winding zero* of F rides along the
+  sample line. Plain warm steps stall ("no descent"); the walker recovers
+  with **homotopy jumps** — warm starts perturbed by ±1 winding at up to
+  three pinch points (well-separated interior local minima of |F|; near
+  the ε→0 endgame SEVERAL zeros straddle the line simultaneously, observed
+  at b = 0.06, ε ≈ 0.196 with |F| minima 4.6e-2 at t = −29.4 and ~1e-1 at
+  t = −32.3, and a single-pinch corrector cannot reach the true class) —
+  accepted only from **tight steps** (< 2 % of ε): every
+  tight jump ever observed (40+) landed on the true continuation, while the
+  only wrong-family "ghost" ever produced came from a since-forbidden 28 %
+  coarse jump.
+* **Residual gate** (uniform over plain steps and jumps): accept only
+  cleanly converged solves, `residual ≤ 10^(−0.4·digits)` (1e-8 at 20
+  digits). True-continuation conditioning floors RISE as the winding zero
+  nears the line (observed 1.4e-21 → 5.7e-18 → 3e-14 → ~1e-12 across
+  campaigns, decelerating toward a ~1e-11…1e-10 peak), while wrong-family
+  stalls only ever appeared at 1.9e-7 and above; anything accepted above
+  `10^-(digits+1)` prints an honesty warning with the achieved residual.
+  Stagnation-accepted garbage (residual ~1e-7 … 1) is rejected and
+  triggers bisection.
+* **Wall-band pacing**: after any rescue, the next ≤ 5 targets are fine
+  (1.5 %) steps — immediately jump-eligible, ~1 solve per band step instead
+  of fail → bisect cascades.
+
+**Verified working baseline** (20 digits): `b = −0.8+0.4i` (general complex,
+regression witness for the two_sided split) →
+`0.70282898263600754292 + 0.82145795139882997129i`.
+
+**Honest limits / open items:**
+
+* The walk is expensive: hours of warm solves for deep-in-the-band bases
+  (b = 0.04). Shallow bases (0.05, 0.06) cross a thinner wall.
+* At `b = 0.04 + 2i` with complex heights, an older reference value
+  (`0.1772+0.4972i` for h = 0.04+2i-related grids) proved **grid-dependent
+  and invalid**; only FE-validated values are quotable.
+* If every attempt at a band step fails the gate, the walk fails honestly
+  ("bisection floor reached") rather than continuing on a suspect state.
+
+---
+
 ## Working baseline (for reference / regression checks)
 
 These currently succeed and should remain green.
@@ -269,6 +343,11 @@ These currently succeed and should remain green.
 | 1 | 0 | 3.7 | 1.2 | 1 (b=1 special case) |
 | 2 | 0 | 3 | 0 | 16 (integer height) |
 | 2 | 0 | -1 | 0 | 0 |
+| 2 | 0 | 0.5 | 0 | 1.4587818160364217112 |
+| 100000 | 0 | 0.5 | 0 | 12.387261344067895865 |
+| 3000 | 0 | 0.5 | 0 | 7.6097169725553975773 |
+| -2 | 0 | 0.5 | 0 | 0.0484014042…+0.3116188934…i |
+| -0.8 | 0.4 | 0.5 | 0 | 0.70282898263600754292+0.82145795139882997129i (relaxed-gate best-effort; accuracy-warning expected) |
 
 ---
 

@@ -85,6 +85,50 @@ fn is_cut_base(b: &Complex) -> bool {
         && b.real().to_f64() < ETA_LOWER_F64
 }
 
+/// Canonical tetration for a cut base `0 < b < e^{-e}`: the analytic
+/// continuation from the upper half b-plane (equal to the one-sided limit
+/// `lim_{ε→0⁺} F(b+iε, h)`), complex for non-integer real `h`. The
+/// bi-asymptotic Kouznetsov construction works *at* the real base with the
+/// germ-tracked (W₀, W₊₁) fixed-point pair, but only via warm ε-continuation
+/// from b+2i (cold solves sit outside the Newton basin near the cut).
+///
+/// Every real-base fallback that forces a real-valued result — notably the
+/// Schwarz-folded iε Richardson used on the parabolic band — is *invalid* on
+/// the cut segment (the canonical value is genuinely complex), so cut bases
+/// must route here from every dispatch region that can contain them.
+fn tetrate_cut_base(
+    b: &Complex,
+    h: &Complex,
+    prec: u32,
+    digits: u64,
+    schroder_err: &str,
+) -> Result<Complex, String> {
+    dprint(&format!(
+        "Schröder failed for cut base ({}); ε-continuation Kouznetsov",
+        schroder_err
+    ));
+    eprintln!(
+        "warning: cut base 0 < b < e^{{-e}} — walking ε-continuation from b+2i \
+         (several warm Kouznetsov solves; this can take many minutes)."
+    );
+    (|| -> Result<Complex, String> {
+        let b_re = Float::with_val(prec, b.real());
+        let st = kouznetsov::setup_kouznetsov_cut_base(&b_re, prec, digits)?;
+        let b_exact = Complex::with_val(prec, (b_re, Float::new(prec)));
+        kouznetsov::eval_kouznetsov(&st, &b_exact, h)
+    })()
+    .map_err(|ke| {
+        unsupported_msg(
+            "real base on the cut 0 < b < e^{-e}",
+            &format!(
+                "Schröder: {}; \
+                 ε-continuation Kouznetsov: {}",
+                schroder_err, ke
+            ),
+        )
+    })
+}
+
 /// Compute `F_b(h)` at the given precision (in MPC bits). `digits` is the
 /// requested decimal precision and is used for precision-ceiling warnings.
 pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Complex, String> {
@@ -206,6 +250,19 @@ fn tetrate_impl(
             let is_real_base =
                 b.imag().is_zero() && !b.real().is_sign_negative();
             if is_real_base {
+                // Cut segment inside the band (b just below η = e^{-e}):
+                // the canonical value is complex; the folded-Richardson
+                // fallback below would force a (wrong) real value, so route
+                // to the ε-continuation walker instead.
+                if is_cut_base(b) {
+                    return tetrate_cut_base(
+                        b,
+                        h,
+                        prec,
+                        digits,
+                        "too slow on the parabolic band",
+                    );
+                }
                 // Direct Kouznetsov is essentially hopeless for real bases on
                 // the parabolic boundary (|arg λ| → 0 forces t_max → ∞). We
                 // skip it entirely and try, in order:
@@ -279,38 +336,7 @@ fn tetrate_impl(
                 ),
                 Err(e) => {
                     if is_cut_base(b) {
-                        // 0 < b < e^{-e}: the canonical value is the analytic
-                        // continuation from the upper half b-plane (equal to
-                        // the one-sided limit lim_{ε→0⁺} F(b+iε, h)), complex
-                        // for non-integer real h. The bi-asymptotic Kouznetsov
-                        // construction works *at* the real base with the
-                        // germ-tracked (W₀, W₊₁) fixed-point pair, but only
-                        // via warm ε-continuation from b+2i (cold solves sit
-                        // outside the Newton basin near the cut).
-                        dprint(&format!(
-                            "Schröder failed for cut base ({}); ε-continuation Kouznetsov",
-                            e
-                        ));
-                        eprintln!(
-                            "warning: cut base 0 < b < e^{{-e}} — walking ε-continuation from b+2i \
-                             (several warm Kouznetsov solves; this can take many minutes)."
-                        );
-                        return (|| -> Result<Complex, String> {
-                            let b_re = Float::with_val(prec, b.real());
-                            let st = kouznetsov::setup_kouznetsov_cut_base(&b_re, prec, digits)?;
-                            let b_exact = Complex::with_val(prec, (b_re, Float::new(prec)));
-                            kouznetsov::eval_kouznetsov(&st, &b_exact, h)
-                        })()
-                        .map_err(|ke| {
-                            unsupported_msg(
-                                "real base on the cut 0 < b < e^{-e}",
-                                &format!(
-                                    "Schröder: {}; \
-                                     ε-continuation Kouznetsov: {}",
-                                    e, ke
-                                ),
-                            )
-                        });
+                        return tetrate_cut_base(b, h, prec, digits, &e);
                     }
                     dprint(&format!(
                         "Schröder unavailable ({}); switching to Newton-Kouznetsov",

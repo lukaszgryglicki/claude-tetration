@@ -133,7 +133,20 @@ than any previous campaign — before failing in a qualitatively new way:
 * Fix implemented (this session): **multi-pinch rescue** — detect up to 3
   well-separated interior |F| minima, try ±1 correctors at each singly and
   all four sign pairs at the two deepest, remember the winning pattern
-  across steps. Both walks relaunched under it (walk12, cut006d).
+  across steps. Relaunched as cut006d: **passed the double-zero wall** at
+  ε≈0.196 (winning corrector: pair −1@t=−29.4, +1@t=+46.0) and set a new
+  record ε≈0.102 before dying to a THIRD, again distinct, wall:
+* **Resolution wall at ε≈0.102** (cut006d): the solve converged cleanly but
+  floored at residual 1.022e-8 — 2.2% above the gate. Pure conditioning:
+  a zero of F sits at distance ~0.09 from the line (|F|min=4.2e-2), the
+  left-edge integrand ln F is near-singular there, and the trapezoidal
+  floor at n=4096 lands exactly at the gate scale. Not a class problem
+  (all 12 corrector combos floored identically).
+* Fix implemented: **adaptive node boost** — when the previous curve's
+  deepest pinch has |F|min < 0.12, double the node count for the next
+  solve (n 4096→8192; floor squares away, ~1e-16). Healthy pinches
+  (0.2–0.5) never trigger it. Relaunched as walk13 (b=0.04) and cut006e
+  (b=0.06) with 16h budgets.
 
 `walk11` (b=0.04, single-pinch binary) was stopped at ε≈1.24 and relaunched
 as `walk12` under the multi-pinch binary; its previous frontier was 0.889.
@@ -163,7 +176,8 @@ as `walk12` under the multi-pinch binary; its previous frontier was 0.889.
 * `src/kouznetsov.rs` — two_sided plumbing; baseline restorations (W_k search,
   t_max, validate threshold); uniform residual gate + final 1e-8 tuning with
   full floor-history comment; multi-pinch homotopy rescue (up to 3 pinch
-  points, sign combos, pattern memory); anchor-snap removal.
+  points, sign combos, pattern memory); adaptive node boost near deep
+  pinches; anchor-snap removal.
 * `src/dispatch.rs` — `tetrate_cut_base()` helper; both region arms route cut
   bases to the walker.
 * `FAILURE_CASES.md` — section J (cut segment: math status, construction,
@@ -174,10 +188,11 @@ as `walk12` under the multi-pinch binary; its previous frontier was 0.889.
 
 ## 4. Next steps
 
-1. Let walk12 (b=0.04) and cut006d (b=0.06) run under the multi-pinch rescue
-   binary — expect cut006d to pass ε≈0.196 via a pair corrector; if it still
-   dies with all combos stalling, try ±2 single-pinch windings or contour
-   deformation, else document partial coverage honestly.
+1. Let walk13 (b=0.04) and cut006e (b=0.06) run under the multi-pinch +
+   node-boost binary. Walls crossed so far: winding-zero band (gate 1e-8),
+   double-zero class wall at ε≈0.196 (multi-pinch), resolution wall at
+   ε≈0.102 (node boost). If a new distinct wall appears, iterate; if walks
+   reach ε=0, proceed to validation.
 2. Update FAILURE_CASES.md section J with the final outcome; mark J RESOLVED
    or PARTIAL accordingly.
 3. If a walk reaches ε=0: validate FE internally + mpmath cross-check, anchor

@@ -251,7 +251,9 @@ pub fn setup_kouznetsov(
             (l_plus, l_minus)
         }
     };
-    setup_kouznetsov_core(b, l_upper, l_lower, prec, digits, use_schwarz, None, false, false, false)
+    setup_kouznetsov_core(
+        b, l_upper, l_lower, prec, digits, use_schwarz, None, false, false, false, 1,
+    )
 }
 
 /// Core Kouznetsov solver: given the asymptotic fixed-point pair
@@ -266,6 +268,13 @@ pub fn setup_kouznetsov(
 /// `skip_norm` skips the F(δ)=1 normalization search (~40 s per solve) and
 /// stores δ = 0; only valid for states used as continuation warm sources,
 /// never for states whose heights are evaluated directly.
+///
+/// `node_boost` multiplies the automatic node count (power-of-2 preserving).
+/// The cut-base walker passes 2 when the previous curve has a deep pinch
+/// (a zero of F within ~0.1 of the sample line): the left-edge integrand
+/// `ln F` is then near-singular and the trapezoidal floor at the standard
+/// density sits right at the acceptance gate (observed 1.0e-8 at b=0.06,
+/// ε≈0.102, |F|min=4.2e-2); doubling the density squares that floor away.
 #[allow(clippy::too_many_arguments)]
 fn setup_kouznetsov_core(
     b: &Complex,
@@ -278,6 +287,7 @@ fn setup_kouznetsov_core(
     warm_only: bool,
     skip_norm: bool,
     two_sided: bool,
+    node_boost: usize,
 ) -> Result<KouznetsovState, String> {
     let ln_b = Complex::with_val(prec, b.ln_ref());
     // λ = (ln b)·L drives each side's decay rate. F → L_upper as t → +∞ like
@@ -309,7 +319,7 @@ fn setup_kouznetsov_core(
 
     // Trapezoidal node count: scales with both `digits` and `t_max`, with the
     // analyticity-strip width `|arg(λ)|` driving the per-node convergence rate.
-    let n_nodes = pick_node_count(digits, t_max_f64, arg_lambda);
+    let n_nodes = pick_node_count(digits, t_max_f64, arg_lambda) * node_boost.max(1);
 
     // Parabolic-boundary guard: near |λ|=1 with arg(λ)≈0 the strip height
     // t_max = O(1/arg(λ)) blows up, requiring n_nodes ≫ 32 K and ~20s/LM-iter.
@@ -3612,6 +3622,7 @@ pub fn setup_kouznetsov_cut_base(
         false,
         true,
         true, // two-sided anchored unwrap: load-bearing for the cut walk
+        1,
     )
     .map_err(|e| format!("cut-base walk: anchor solve at b+{}i failed: {}", eps_anchor, e))?;
     let mut eps_cur = eps_anchor;
@@ -3796,6 +3807,13 @@ pub fn setup_kouznetsov_cut_base(
             }
             kept
         };
+        // Deep pinch ⇒ the left-edge integrand ln F is near-singular on the
+        // line and the trapezoidal floor at standard density sits at the
+        // acceptance gate (observed: clean quadratic convergence flooring at
+        // 1.0e-8, b=0.06, ε≈0.102, |F|min=4.2e-2 — a pure resolution kill,
+        // not a class problem). Double the node density there; healthy band
+        // pinches sit at |F| ≈ 0.2–0.5 and never trigger this.
+        let node_boost = if pinches[0].1 < 0.12 { 2 } else { 1 };
         let make_warm = |combo: &[f64]| {
             let samples = prev.samples.clone();
             let nodes = prev.nodes.clone();
@@ -3934,6 +3952,7 @@ pub fn setup_kouznetsov_cut_base(
                 true,
                 eps_next != 0.0,
                 true,
+                node_boost,
             ) {
                 Ok(s) => {
                     if s.residual.is_nan() || s.residual > clean_target {

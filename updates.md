@@ -261,6 +261,22 @@ resume from saved ε, not from the ε₀=2 anchor).
 
 ---
 
+### 2.5 Dense multi-view 3D gallery + share-ready hero JPG (§ 5.4)
+
+The first-draft charts (~1000 pts) drew the period-2 weave as 8-segment
+polygons (one winding per Δx = 2 vs a 0.25 step). Re-swept all three bases
+at 5× density — 3 × 5073 points, **zero solver errors** — and rewrote
+`plot3d.py` as a true orthographic turntable renderer (arbitrary az/el,
+painter-sorted depth shading, isotropic complex plane so spirals render as
+true circles, `--xrange` region crops). 16 dense views now in
+`docs/charts/` (oblique per-base + overlay, turntable az ∈ {12,55,75,90},
+el=62 top, end-on weave/forest portraits — the "swirling circles" — region
+close-ups, seam) plus `tet3d_hero.jpg` (3000×1875 raster, near-axial
+vortex view) for sharing. `scripts/chartgallery.sh` reproduces everything;
+`chartgen.sh` gained a numeric step-multiplier arg (0.2 = dense).
+
+---
+
 ## 3. Files changed (uncommitted, on top of 566c753)
 
 * `src/kouznetsov.rs` — two_sided plumbing; baseline restorations (W_k search,

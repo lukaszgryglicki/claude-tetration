@@ -237,6 +237,21 @@ as `walk12` under the multi-pinch binary; its previous frontier was 0.889.
 
 ---
 
+### 2.4 Walker checkpoint/resume (`TET_KOUZ_CUT_CKPT`)
+
+Deep walks are multi-hour and were all-or-nothing: walk13 (b=0.04, 20
+digits) died to an external timeout mid-solve at ε≈1.006 after ~7 h with
+nothing salvageable. Now every accepted step atomically serializes the
+full continuation state (base, digits, ε, branch args, t_max, fixed-point
+pair, nodes/weights/samples at full decimal precision) to the file named
+by `TET_KOUZ_CUT_CKPT`; on startup a checkpoint matching `b` (1e-12 rel)
+and digits resumes from the saved frontier — anchor and all crossed walls
+are never re-paid. Mismatch/corruption ⇒ silent cold start; save I/O
+errors never kill a walk. Round-trip verified live (kill mid-walk →
+resume from saved ε, not from the ε₀=2 anchor).
+
+---
+
 ## 3. Files changed (uncommitted, on top of 566c753)
 
 * `src/kouznetsov.rs` — two_sided plumbing; baseline restorations (W_k search,
@@ -248,7 +263,9 @@ as `walk12` under the multi-pinch binary; its previous frontier was 0.889.
   `apply_dt_v_fft` pre-scale, `apply_t_fft` edge build + boundary rows);
   reactive near-miss node-tier escalation in the walker attempt loop
   (§ 2.2 fourth wall); complex-base stalled-solve honesty gate in
-  `setup_kouznetsov` (§ 1.6).
+  `setup_kouznetsov` (§ 1.6) with two-sided-unwrap retry (§ 1.7); walker
+  checkpoint/resume `save_cut_ckpt`/`load_cut_ckpt` + resume-aware anchor
+  block (§ 2.4).
 * `src/mt.rs` — NEW: opt-in MT mode (`TET_MT` env; unset/0 = serial default,
   1 = all cores, n≥2 = fixed pool). Parsed once via OnceLock.
 * `src/fft.rs` — `fft()` dispatches serial (default, original code moved

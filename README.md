@@ -291,6 +291,7 @@ Diagnostics go to stderr and can be tuned with environment variables:
 | `TET_KOUZ_ANDERSON=1` / `TET_KOUZ_PICARD=1` | force alternative Kouznetsov iterators (diagnostics) |
 | `TET_KOUZ_NO_EM=1`, `TET_KOUZ_EM_K=<n>` | Euler–Maclaurin correction A/B switches |
 | `TET_KOUZ_CUT_ANCHOR=<ε₀>`, `TET_KOUZ_CUT_RATIO=<r>` | cut-walker anchor height (default 2.0) and schedule ratio (default 0.72) |
+| `TET_KOUZ_CUT_CKPT=<file>` | cut-walker checkpoint/resume file: every accepted step is saved (atomic tmp+rename, full-precision decimal); on start, a matching checkpoint (same `b`, same digits) resumes the walk from its saved frontier instead of re-anchoring at `b + iε₀` |
 | `TET_KOUZ_UNWRAP_DEBUG=1` | branch-unwrap winding diagnostics |
 | `TET_KOUZ_RESID_DUMP=<file>` | dump residual profiles for offline analysis |
 | `TET_MT=<n>` | **opt-in multithreading.** Unset/`0` (default): fully serial, the original code paths, untouched. `1`: parallel across all logical cores. `n ≥ 2`: parallel with exactly `n` threads. Outputs are **bit-identical** to serial mode (see below). |
@@ -683,6 +684,16 @@ injects it directly). The construction:
    than continuing on a suspect state.
 7. At `ε = 0` the state is normalized and evaluated like any other
    Kouznetsov state, and the usual FE post-check applies.
+8. **Checkpoint/resume** (`TET_KOUZ_CUT_CKPT=<file>`). Deep walks are
+   multi-hour; a crash or timeout used to lose everything (one 7-hour
+   walk died mid-solve at `ε ≈ 1.006`). With a checkpoint file set,
+   every accepted step serializes the full continuation state (base,
+   digits, ε, both branch args, `t_max`, fixed-point pair, all nodes/
+   weights/samples at full precision) atomically; a restart with the
+   same `b` and digits resumes from the saved frontier — the anchor
+   and every wall already crossed are never re-paid. Mismatched or
+   corrupt checkpoints are ignored (cold start), and checkpoint I/O
+   errors never kill a walk.
 
 Status: the machinery above carries walks monotonically deeper with
 each fix (record frontier `ε ≈ 0.068` at `b = 0.06`, from `0.92` at

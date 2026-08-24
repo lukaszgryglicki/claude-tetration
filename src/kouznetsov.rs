@@ -3606,6 +3606,170 @@ pub fn setup_kouznetsov_continuation(
     prev_state.ok_or_else(|| "continuation: no state produced".into())
 }
 
+/// Serialize a mid-walk continuation state to `path` (atomic tmp+rename).
+/// Best-effort: checkpointing must never kill a walk, so all I/O errors are
+/// swallowed (a VERBOSE note is printed). Format: line-oriented decimal at
+/// full precision; see `load_cut_ckpt` for the exact layout.
+fn save_cut_ckpt(
+    path: &str,
+    b_re: &Float,
+    digits: u64,
+    eps_cur: f64,
+    arg_up: f64,
+    arg_low: f64,
+    state: &KouznetsovState,
+) {
+    use std::io::Write;
+    let f = |x: &Float| x.to_string_radix(10, None);
+    let mut buf = String::new();
+    buf.push_str("TETCKPT1\n");
+    buf.push_str(&format!("{}\n", f(b_re)));
+    buf.push_str(&format!("{}\n", digits));
+    buf.push_str(&format!(
+        "{:.17e} {:.17e} {:.17e} {:.17e}\n",
+        eps_cur, arg_up, arg_low, state.residual
+    ));
+    buf.push_str(&format!("{}\n", f(&state.t_max)));
+    buf.push_str(&format!(
+        "{} {}\n",
+        f(&Float::with_val(state.prec, state.l_upper.real())),
+        f(&Float::with_val(state.prec, state.l_upper.imag()))
+    ));
+    buf.push_str(&format!(
+        "{} {}\n",
+        f(&Float::with_val(state.prec, state.l_lower.real())),
+        f(&Float::with_val(state.prec, state.l_lower.imag()))
+    ));
+    buf.push_str(&format!(
+        "{} {}\n",
+        f(&Float::with_val(state.prec, state.ln_b.real())),
+        f(&Float::with_val(state.prec, state.ln_b.imag()))
+    ));
+    buf.push_str(&format!("{}\n", state.samples.len()));
+    for i in 0..state.samples.len() {
+        buf.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            f(&state.nodes[i]),
+            f(&state.weights[i]),
+            f(&Float::with_val(state.prec, state.samples[i].real())),
+            f(&Float::with_val(state.prec, state.samples[i].imag()))
+        ));
+    }
+    let tmp = format!("{}.tmp", path);
+    let ok = std::fs::File::create(&tmp)
+        .and_then(|mut fh| fh.write_all(buf.as_bytes()))
+        .and_then(|_| std::fs::rename(&tmp, path));
+    match ok {
+        Ok(_) => {
+            if cnum::verbose() {
+                eprintln!(
+                    "kouz cut-base walk: checkpoint saved at ε={:.6e} ({} nodes) → {}",
+                    eps_cur,
+                    state.samples.len(),
+                    path
+                );
+            }
+        }
+        Err(e) => {
+            if cnum::verbose() {
+                eprintln!("kouz cut-base walk: checkpoint save FAILED ({}) — walk continues", e);
+            }
+        }
+    }
+}
+
+/// Load a walk checkpoint written by [`save_cut_ckpt`]. Returns `None` (and
+/// falls back to the cold anchor) unless the file parses cleanly AND matches
+/// the requested base and digits. The restored state slots in as the warm
+/// Cauchy-resample source exactly like a just-solved step.
+fn load_cut_ckpt(
+    path: &str,
+    b_re: &Float,
+    digits: u64,
+    prec: u32,
+) -> Option<(f64, f64, f64, KouznetsovState)> {
+    let txt = std::fs::read_to_string(path).ok()?;
+    let mut lines = txt.lines();
+    if lines.next()? != "TETCKPT1" {
+        return None;
+    }
+    let pf = |s: &str| -> Option<Float> {
+        Float::parse(s.trim()).ok().map(|v| Float::with_val(prec, v))
+    };
+    let b_stored = pf(lines.next()?)?;
+    let b_diff = Float::with_val(prec, &b_stored - b_re).abs().to_f64();
+    if b_diff > 1e-12 * b_re.to_f64().abs().max(1e-30) {
+        if cnum::verbose() {
+            eprintln!("kouz cut-base walk: checkpoint base mismatch — ignoring {}", path);
+        }
+        return None;
+    }
+    let d_stored: u64 = lines.next()?.trim().parse().ok()?;
+    if d_stored != digits {
+        if cnum::verbose() {
+            eprintln!(
+                "kouz cut-base walk: checkpoint digits {} ≠ requested {} — ignoring {}",
+                d_stored, digits, path
+            );
+        }
+        return None;
+    }
+    let scalars: Vec<f64> = lines
+        .next()?
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    let (&eps_cur, &arg_up, &arg_low, &residual) =
+        match (scalars.first(), scalars.get(1), scalars.get(2), scalars.get(3)) {
+            (Some(a), Some(b2), Some(c), Some(d)) => (a, b2, c, d),
+            _ => return None,
+        };
+    if !(eps_cur > 0.0 && eps_cur.is_finite()) {
+        return None;
+    }
+    let t_max = pf(lines.next()?)?;
+    let mut pc = || -> Option<Complex> {
+        let ln = lines.next()?;
+        let mut it = ln.split_whitespace();
+        let re = pf(it.next()?)?;
+        let im = pf(it.next()?)?;
+        Some(Complex::with_val(prec, (re, im)))
+    };
+    let l_upper = pc()?;
+    let l_lower = pc()?;
+    let ln_b = pc()?;
+    let n: usize = lines.next()?.trim().parse().ok()?;
+    if !(4..=1 << 20).contains(&n) {
+        return None;
+    }
+    let mut nodes = Vec::with_capacity(n);
+    let mut weights = Vec::with_capacity(n);
+    let mut samples = Vec::with_capacity(n);
+    for _ in 0..n {
+        let ln = lines.next()?;
+        let mut it = ln.split('\t');
+        nodes.push(pf(it.next()?)?);
+        weights.push(pf(it.next()?)?);
+        let re = pf(it.next()?)?;
+        let im = pf(it.next()?)?;
+        samples.push(Complex::with_val(prec, (re, im)));
+    }
+    let state = KouznetsovState {
+        samples,
+        nodes,
+        weights,
+        t_max,
+        l_upper,
+        l_lower,
+        ln_b,
+        shift: Complex::with_val(prec, (Float::new(prec), Float::new(prec))),
+        prec,
+        residual,
+        two_sided: true,
+    };
+    Some((eps_cur, arg_up, arg_low, state))
+}
+
 /// Direct Kouznetsov solver for **cut bases** (real `0 < b < e^{-e}`).
 ///
 /// ## Which tetration is "the" tetration here?
@@ -3715,55 +3879,89 @@ pub fn setup_kouznetsov_cut_base(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.72);
-    let b_anchor = base_at(eps_anchor);
-    let ln_b_anchor = Complex::with_val(prec, b_anchor.ln_ref());
-    let neg_ln_b_anchor = Complex::with_val(prec, -&ln_b_anchor);
-    let w0_val = lambertw::w0(&neg_ln_b_anchor, prec)?;
-    let neg_w0 = Complex::with_val(prec, -&w0_val);
-    let mut l_up = Complex::with_val(prec, &neg_w0 / &ln_b_anchor);
-    let w1_val = lambertw::wk(&neg_ln_b_anchor, 1, prec)?;
-    let neg_w1 = Complex::with_val(prec, -&w1_val);
-    let mut l_low = Complex::with_val(prec, &neg_w1 / &ln_b_anchor);
+    // ---- Checkpoint/resume (TET_KOUZ_CUT_CKPT=path) ----
+    // Walks run for hours and used to lose everything to an external
+    // timeout/power cut (observed twice: walk13 lost ~7 h at ε≈1.006, an
+    // earlier session lost a record run to a host power failure). With the
+    // env set, every accepted step persists (ε, pair, args, full samples) via
+    // atomic tmp+rename; a restart with the same env warm-resumes from the
+    // saved frontier exactly like a just-solved step, skipping the anchor.
+    let ckpt_path = std::env::var("TET_KOUZ_CUT_CKPT").ok();
+    let resumed = ckpt_path
+        .as_deref()
+        .and_then(|p| load_cut_ckpt(p, b_re, digits, prec));
+    let mut state;
+    let mut eps_cur;
+    let mut l_up;
+    let mut l_low;
+    let mut arg_up;
+    let mut arg_low;
+    if let Some((r_eps, r_up, r_low, r_state)) = resumed {
+        if verbose {
+            eprintln!(
+                "kouz cut-base walk: RESUMED from checkpoint at ε={:.6e} ({} nodes, residual {:.3e})",
+                r_eps,
+                r_state.samples.len(),
+                r_state.residual,
+            );
+        }
+        l_up = r_state.l_upper.clone();
+        l_low = r_state.l_lower.clone();
+        arg_up = r_up;
+        arg_low = r_low;
+        eps_cur = r_eps;
+        state = r_state;
+    } else {
+        let b_anchor = base_at(eps_anchor);
+        let ln_b_anchor = Complex::with_val(prec, b_anchor.ln_ref());
+        let neg_ln_b_anchor = Complex::with_val(prec, -&ln_b_anchor);
+        let w0_val = lambertw::w0(&neg_ln_b_anchor, prec)?;
+        let neg_w0 = Complex::with_val(prec, -&w0_val);
+        l_up = Complex::with_val(prec, &neg_w0 / &ln_b_anchor);
+        let w1_val = lambertw::wk(&neg_ln_b_anchor, 1, prec)?;
+        let neg_w1 = Complex::with_val(prec, -&w1_val);
+        l_low = Complex::with_val(prec, &neg_w1 / &ln_b_anchor);
 
-    let mut arg_up = arg_of(&Complex::with_val(prec, &ln_b_anchor * &l_up));
-    let mut arg_low = arg_of(&Complex::with_val(prec, &ln_b_anchor * &l_low));
-    if !(arg_up > 1e-3 && arg_low < -1e-3) {
-        return Err(format!(
-            "cut-base walk: anchor pair at b+{}i is not decay-compatible (arg λ_up={:.4}, arg λ_low={:.4})",
-            eps_anchor, arg_up, arg_low
-        ));
+        arg_up = arg_of(&Complex::with_val(prec, &ln_b_anchor * &l_up));
+        arg_low = arg_of(&Complex::with_val(prec, &ln_b_anchor * &l_low));
+        if !(arg_up > 1e-3 && arg_low < -1e-3) {
+            return Err(format!(
+                "cut-base walk: anchor pair at b+{}i is not decay-compatible (arg λ_up={:.4}, arg λ_low={:.4})",
+                eps_anchor, arg_up, arg_low
+            ));
+        }
+        if verbose {
+            eprintln!(
+                "kouz cut-base walk: anchor ε={}  L_up={:.4}+{:.4}i (argλ={:+.4})  L_low(W₊₁)={:.4}+{:.4}i (argλ={:+.4})",
+                eps_anchor,
+                Float::with_val(prec, l_up.real()).to_f64(),
+                Float::with_val(prec, l_up.imag()).to_f64(),
+                arg_up,
+                Float::with_val(prec, l_low.real()).to_f64(),
+                Float::with_val(prec, l_low.imag()).to_f64(),
+                arg_low,
+            );
+        }
+        state = setup_kouznetsov_core(
+            &b_anchor,
+            l_up.clone(),
+            l_low.clone(),
+            prec,
+            digits,
+            false,
+            None,
+            false,
+            true,
+            true, // two-sided anchored unwrap: load-bearing for the cut walk
+            1,
+        )
+        .map_err(|e| format!("cut-base walk: anchor solve at b+{}i failed: {}", eps_anchor, e))?;
+        eps_cur = eps_anchor;
     }
-    if verbose {
-        eprintln!(
-            "kouz cut-base walk: anchor ε={}  L_up={:.4}+{:.4}i (argλ={:+.4})  L_low(W₊₁)={:.4}+{:.4}i (argλ={:+.4})",
-            eps_anchor,
-            Float::with_val(prec, l_up.real()).to_f64(),
-            Float::with_val(prec, l_up.imag()).to_f64(),
-            arg_up,
-            Float::with_val(prec, l_low.real()).to_f64(),
-            Float::with_val(prec, l_low.imag()).to_f64(),
-            arg_low,
-        );
-    }
-    let mut state = setup_kouznetsov_core(
-        &b_anchor,
-        l_up.clone(),
-        l_low.clone(),
-        prec,
-        digits,
-        false,
-        None,
-        false,
-        true,
-        true, // two-sided anchored unwrap: load-bearing for the cut walk
-        1,
-    )
-    .map_err(|e| format!("cut-base walk: anchor solve at b+{}i failed: {}", eps_anchor, e))?;
-    let mut eps_cur = eps_anchor;
 
     // ---- Geometric descent schedule, then the final hop to ε = 0 ----
     let mut queue: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
-    let mut e = eps_anchor * sched_ratio;
+    let mut e = eps_cur * sched_ratio;
     while e > 1e-3 {
         queue.push_back(e);
         e *= sched_ratio;
@@ -4200,6 +4398,11 @@ pub fn setup_kouznetsov_cut_base(
                     }
                 } else if steps_since_rescue == 6 {
                     rescue_pattern = None;
+                }
+                if eps_cur > 0.0 {
+                    if let Some(p) = ckpt_path.as_deref() {
+                        save_cut_ckpt(p, b_re, digits, eps_cur, arg_up, arg_low, &state);
+                    }
                 }
             }
             None => {

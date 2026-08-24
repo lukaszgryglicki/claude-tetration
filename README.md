@@ -480,6 +480,43 @@ bases solved by Schröder).
 
 ![all three bases overlaid](docs/charts/tet3d_triptych_eps005.svg)
 
+#### The dense multi-view gallery
+
+The five charts above were first drafts at ~1000 points: enough to
+find the phenomena, far too coarse to *see* them — the period-2 weave
+winds once per `Δx = 2`, so a `0.25` step draws 8-segment polygons
+where the mathematics makes circles. The gallery below re-sweeps all
+three bases at **5× density (~5070 points per base)** and renders
+them with a real turntable camera ([`scripts/plot3d.py`](scripts/plot3d.py)
+v2: orthographic 3D rotation, painter-sorted depth shading, and an
+**isotropic complex plane** — `Re F` and `Im F` share one scale, so
+the spirals project as true circles, not ellipses).
+
+![hero: the swirl](docs/charts/tet3d_hero.jpg)
+
+| view | file |
+|---|---|
+| **hero raster (JPG, share-ready)** — near-axial vortex view, `b = 0.99·e^{−e}`, `x ∈ [−4.5, 120]` | [`docs/charts/tet3d_hero.jpg`](docs/charts/tet3d_hero.jpg) |
+| oblique full sweep, `b = 0.99·e^{−e}` | [`docs/charts/tet3d_b099eme_dense.svg`](docs/charts/tet3d_b099eme_dense.svg) |
+| oblique full sweep, `b = e^{−e}` | [`docs/charts/tet3d_b100eme_dense.svg`](docs/charts/tet3d_b100eme_dense.svg) |
+| oblique full sweep, `b = 1.01·e^{−e}` | [`docs/charts/tet3d_b101eme_dense.svg`](docs/charts/tet3d_b101eme_dense.svg) |
+| oblique overlay, all three | [`docs/charts/tet3d_triptych_dense.svg`](docs/charts/tet3d_triptych_dense.svg) |
+| turntable `az = 12°/55°/75°/90°` | [`…az12`](docs/charts/tet3d_b099eme_az12.svg) · [`…az55`](docs/charts/tet3d_b099eme_az55.svg) · [`…az75`](docs/charts/tet3d_b099eme_az75.svg) · [`…az90`](docs/charts/tet3d_b099eme_az90.svg) |
+| high camera (`el = 62°`) | [`docs/charts/tet3d_b099eme_top.svg`](docs/charts/tet3d_b099eme_top.svg) |
+| **the weave end-on** (down the `x` axis: the swirl as true circles) | [`docs/charts/tet3d_b099eme_endon_weave.svg`](docs/charts/tet3d_b099eme_endon_weave.svg) |
+| the weave end-on, three bases overlaid | [`docs/charts/tet3d_triptych_endon_weave.svg`](docs/charts/tet3d_triptych_endon_weave.svg) |
+| the pole forest end-on (nested loop rosette) | [`docs/charts/tet3d_b099eme_endon_forest.svg`](docs/charts/tet3d_b099eme_endon_forest.svg) |
+| weave close-up `x ∈ [2, 40]` | [`docs/charts/tet3d_b099eme_weave_closeup.svg`](docs/charts/tet3d_b099eme_weave_closeup.svg) |
+| pole-forest close-up `x ∈ [−9, 0]` | [`docs/charts/tet3d_b099eme_forest_closeup.svg`](docs/charts/tet3d_b099eme_forest_closeup.svg) |
+| the seam `x ∈ [−3, 12]` | [`docs/charts/tet3d_b099eme_seam.svg`](docs/charts/tet3d_b099eme_seam.svg) |
+
+The end-on views (`az = 0`) look straight down the height axis, so
+the curve collapses onto the complex plane and you see exactly what
+the orbit does there: the **weave is a logarithmic-style spiral**
+hugging the period-2 alternation as it drains into the fixed point,
+and the **pole forest is a nest of widening loops**, one per pole.
+These are the "swirling circles" hiding inside the oblique views.
+
 Findings, all reproducible from the CSVs in
 [`docs/charts/data/`](docs/charts/data/) (3 × 1015 + 256 points,
 **zero solver errors**):
@@ -510,10 +547,13 @@ Findings, all reproducible from the CSVs in
   bug described there.
 
 Reproduce with [`scripts/chartgen.sh`](scripts/chartgen.sh) (sweep →
-CSV, 14-way parallel) and [`scripts/plot3d.py`](scripts/plot3d.py)
-(CSV → SVG, dependency-free cabinet projection with floor/wall
-shadow projections; non-finite or `|f| > 50` points break the curve
-rather than skew the scale).
+CSV, 14-way parallel; 4th arg = step multiplier, `0.2` for the dense
+gallery sweeps), [`scripts/plot3d.py`](scripts/plot3d.py) (CSV → SVG;
+stdlib-only orthographic turntable renderer — `--az/--el/--xrange/
+--size`; non-finite or `|f| > 50` points break the curve rather than
+skew the scale) and [`scripts/chartgallery.sh`](scripts/chartgallery.sh)
+(renders every view above plus the raster hero JPG via
+`rsvg-convert` + ImageMagick).
 
 ---
 

@@ -216,6 +216,15 @@ as `walk12` under the multi-pinch binary; its previous frontier was 0.889.
   node tier, up to 8× = 32768 nodes. cut006e was killed and relaunched
   as **cut006f** under the new binary (16 h budget); walk13 (b=0.04)
   continues under the older static-tier binary for comparison.
+* **2026-08-24 — cut006f outcome: timeout at ε ≈ 0.171 (16 h), no new
+  record.** The from-scratch re-walk paid the whole wall band again in
+  fine ~1 % steps and ran out of clock mid-solve (last accepted
+  ε = 0.1740; the in-flight 0.1713 solve was at 6.9e-10 and converging
+  when killed). Restart-from-zero economics are what killed both this
+  and walk13 → checkpoint/resume implemented (§ 2.4). Relaunched as
+  **cut007** (b=0.06, 20 digits, `TET_MT=6`, checkpointed, no external
+  timeout); walk14 (b=0.04, 20 digits, `TET_MT=8`, checkpointed)
+  running in parallel.
 
 ### 2.3 Honest assessment of the remaining gap
 

@@ -25,11 +25,16 @@ set -u
 
 TET="$(dirname "$0")/../target/release/tet"
 B_RE=$1; B_IM=$2; OUT=$3; COARSE=${4:-}
+# 4th arg: step multiplier. "coarse" = 4 (convergence checks); any numeric
+# factor works — e.g. 0.2 for the view-gallery sweeps (the 2-cycle weave
+# winds once per Δx = 2, so the default 0.25 tail step draws only 8
+# segments per turn: visibly polygonal; 0.05 gives 40/turn: smooth).
+case "$COARSE" in coarse) MULT=4 ;; "") MULT=1 ;; *) MULT=$COARSE ;; esac
 
 TMP=$(mktemp)
-python3 - "${COARSE:+4}" <<'PY' > "$TMP"
+python3 - "$MULT" <<'PY' > "$TMP"
 import sys
-m = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else 1
+m = float(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else 1.0
 xs = []
 def rng(a, b, s):
     x = a

@@ -311,8 +311,37 @@ fn t852_unit_circle_bases_functional_eq() {
         for (zr, zi) in &[("0.4", "0"), ("0.5", "0.3"), ("-0.2", "0.1")] {
             let z = parse(zr, zi, prec);
             let z1 = Complex::with_val(prec, &z + &one);
-            let fz = dispatch::tetrate(&b, &z, prec, digits).unwrap();
-            let fz1 = dispatch::tetrate(&b, &z1, prec, digits).unwrap();
+            // Honesty semantics (post stalled-solve-rejection gate): a
+            // unit-circle base may either produce a verified solve (then the
+            // functional equation must hold to ≥15 digits) or refuse cleanly
+            // with the parabolic-band-stall / unsupported error. What it must
+            // NEVER do is return garbage from an O(1)-residual stalled solve
+            // (pre-gate behavior; see FAILURE_CASES.md §A.1/§A.2). A base that
+            // refuses once is skipped for the remaining heights: each refusal
+            // costs a full solve chain (principal + two-sided retry +
+            // Richardson probes), and the refusal is per-base, not per-height.
+            let fz = match dispatch::tetrate(&b, &z, prec, digits) {
+                Ok(v) => v,
+                Err(e) => {
+                    assert!(
+                        e.contains("stall") || e.contains("unsupported") || e.contains("Richardson"),
+                        "b={}+{}i z={}+{}i: unexpected error kind: {}",
+                        br, bi, zr, zi, e
+                    );
+                    break;
+                }
+            };
+            let fz1 = match dispatch::tetrate(&b, &z1, prec, digits) {
+                Ok(v) => v,
+                Err(e) => {
+                    assert!(
+                        e.contains("stall") || e.contains("unsupported") || e.contains("Richardson"),
+                        "b={}+{}i z+1={}+{}i: unexpected error kind: {}",
+                        br, bi, zr, zi, e
+                    );
+                    break;
+                }
+            };
             let lhs = cnum::pow_complex(&b, &fz, prec);
             let m = matching_digits(&fz1, &lhs, prec);
             assert!(
@@ -354,6 +383,17 @@ fn t860_schwarz_reflection_conjugate_base() {
     let prec = cnum::digits_to_bits(digits);
     // Each entry: (b_re, b_im_pos, h_re, h_im) — dispatcher computes both
     // b=b_re+b_im_pos·i and b=b_re-b_im_pos·i and checks conj symmetry.
+    //
+    // The -0.8±0.4i case (outside ST, |λ|≈1.15) is HONESTY-GATED: its LM
+    // solve never truly converges. The pre-gate code accepted a residual-1.577
+    // stall whose value (0.70282898…+0.82145795…i) was "verified" only against
+    // baseline ac19851 — the same solver family with the same stall, i.e.
+    // circular. Cross-discretization probes (principal vs two-sided unwrap,
+    // 12/20/25 digits) produce wildly different values, so no value at this
+    // base is currently verifiable. The honest outcomes are: Ok (if a future
+    // solver genuinely converges — then Schwarz symmetry must hold) or a clean
+    // parabolic-band-stall / unsupported error. Garbage output is the only
+    // failure. See FAILURE_CASES.md §A.2.
     let cases = [
         ("1.2", "0.4", "0.5", "0"),        // Shell-Thron interior, quick
         ("1.2", "0.4", "0.5", "0.3"),       // complex height
@@ -365,8 +405,24 @@ fn t860_schwarz_reflection_conjugate_base() {
         let h = parse(hr, hi, prec);
         let h_conj = parse(hr, &format!("-{}", hi), prec);
 
-        let f_pos = dispatch::tetrate(&b_pos, &h, prec, digits)
-            .unwrap_or_else(|e| panic!("b={}+{}i h={}+{}i failed: {}", br, bi_pos, hr, hi, e));
+        let honest_err = |e: &str| {
+            e.contains("stall") || e.contains("unsupported") || e.contains("Richardson")
+        };
+        let f_pos = match dispatch::tetrate(&b_pos, &h, prec, digits) {
+            Ok(v) => v,
+            Err(e) => {
+                assert!(honest_err(&e), "b={}+{}i h={}+{}i: unexpected error kind: {}", br, bi_pos, hr, hi, e);
+                // Conjugate base must refuse identically (Schwarz symmetry of
+                // the failure itself).
+                let neg = dispatch::tetrate(&b_neg, &h_conj, prec, digits);
+                assert!(
+                    neg.is_err(),
+                    "b={}-{}i succeeded while b={}+{}i honestly refused — asymmetric gate",
+                    br, bi_pos, br, bi_pos
+                );
+                continue;
+            }
+        };
         let f_neg = dispatch::tetrate(&b_neg, &h_conj, prec, digits)
             .unwrap_or_else(|e| panic!("b={}-{}i h={}-{}i failed: {}", br, bi_pos, hr, hi, e));
 
@@ -530,4 +586,42 @@ fn t880_parabolic_boundary_continuation_full_precision() {
         "expected Im ≈ 0 for real base+height, got {}",
         im_f64
     );
+}
+
+/// t890: deep-parabolic-band complex base must NOT return garbage with Ok.
+///
+/// Regression for the 2026-08-23 stalled-solve acceptance bug
+/// (FAILURE_CASES § A.1): at b = 0.0653281554868594 + 0.025i
+/// (|λ| = 0.995, deep in the Shell–Thron parabolic band on the
+/// oscillating side) Schröder refuses, the Kouznetsov LM stalls at an
+/// O(1) boundary residual, and the old relaxed acceptance (residual ≤ 5)
+/// returned stalled samples as a final answer: RC=0 with values that
+/// diverged to 10^6913 under upward iteration while the true orbit is
+/// bounded (integer-height F(48) = 0.1353 − 0.0070i).
+///
+/// With the honesty gate in `setup_kouznetsov`, the acceptable outcomes
+/// are: a clean Err (expected today: the iε-Richardson probes land back
+/// in the band), or — should a future method genuinely crack this base —
+/// an Ok that stays consistent with the bounded integer-height tower.
+#[test]
+fn t890_deep_band_complex_base_no_garbage() {
+    let digits = 10u64;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("0.0653281554868594", "0.025", prec);
+    let h = parse("48.013", "0", prec);
+    match dispatch::tetrate(&b, &h, prec, digits) {
+        Err(_) => {} // honest refusal — the currently expected outcome
+        Ok(v) => {
+            // If some day this succeeds, it must be near the bounded orbit:
+            // |F| along the true orbit stays ≤ ~1.1 for this base. The old
+            // garbage was |F| ≈ 8.7 at this height (then → ∞ at h ≈ 51).
+            let mag = abs(&v, prec);
+            assert!(
+                mag < 2.0,
+                "deep-band solve returned suspicious magnitude {} (garbage \
+                 regression: stalled LM samples accepted as final answer?)",
+                mag
+            );
+        }
+    }
 }

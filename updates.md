@@ -74,6 +74,51 @@ digits. Now exact to 20 digits: `7.6097169725553975773`.
 * Debug probes `examples/probe_kouz.rs`, `examples/probe_warm.rs` deleted.
 * clippy warnings at baseline (13). Full test suite GREEN.
 
+### 1.6 Complex-base stalled-solve acceptance — garbage with RC=0 — FIXED
+
+Found 2026-08-23 by the chart campaign (details: FAILURE_CASES § A.1).
+`iterate_newton`'s non-Schwarz acceptance gate was `residual ≤ 5` — meant
+to let walker/continuation internals inspect near-miss solves, but it also
+let the *direct* complex-base path return stalled O(1)-residual samples as
+final answers. Witness: `tet 10 0.0653281554868594 0.025 48.013 0`
+(|λ|=0.995, deep parabolic band) returned −4.31+7.57i at RC=0 (10- and
+15-digit runs disagreed completely; true value 0.1353−0.0070i by integer
+-height iteration). Fix: `setup_kouznetsov` re-gates the final residual at
+`10^(−digits/3)` clamped [1e-6, 1e-2] for non-Schwarz bases; walker and
+continuation paths (which self-gate) are untouched. Such bases now fall
+through to iε-Richardson and, if that also fails (deep-band probes land
+back in the band), ERR cleanly with the full chain.
+
+### 1.7 t860 "canonical value" exposed as discretization artifact — tests rewritten
+
+Follow-up to § 1.6 (2026-08-24, full anatomy: FAILURE_CASES § A.2). The
+honesty gate "broke" t860/t852 — investigation showed the tests were
+asserting garbage. The t860 witness `F(0.5) = 0.7028…+0.8215…i` at
+`b=−0.8+0.4i` came from an LM solve stalled at residual 1.577; the value
+was "verified" against baseline ac19851, which used the same node count at
+the same digits — pseudo-verification by shared ancestry. Cross-
+discretization probes give completely different values (20d: 0.70+0.82i,
+22d: −0.03+0.08i, 25d: 0.72+0.76i, two-sided 12d: −0.17−0.22i). No
+independently verified value exists at this base today.
+
+Two code changes:
+1. The stall at this base is partly a **phantom residual**: the pointwise
+   principal log mis-branches the left-edge integrand; the anchored
+   two-sided unwrap drops the reported residual 1.577 → 9.5e-4 on the
+   same-quality samples. `setup_kouznetsov` now retries a gate-rejected
+   solve with the two-sided unwrap before refusing (the retry must
+   independently pass the gate — zero regression risk for passing bases).
+2. The residual 9.5e-4 is genuine and node-count-invariant (n=4096 and
+   n=8192 agree to 3 digits): the rectangle-Cauchy equation has no
+   solution on this strip (|F| dips to 0.44 near the sample line —
+   in-strip zero ⇒ left-edge log crosses a cut). Both attempts stall ⇒
+   honest ERR.
+
+t860/t852 rewritten to honesty semantics: Ok ⇒ Schwarz symmetry / FE must
+hold to ≥15 digits; Err ⇒ must be the parabolic-band-stall/unsupported
+error and the conjugate base must refuse symmetrically. Producing the old
+"canonical" number is now itself a failure. README § 5.3/§ 7/§ 8 updated.
+
 ### Verified coverage battery (all exact to 20 digits unless noted)
 
 | base | height | result | status |
@@ -160,6 +205,18 @@ than any previous campaign — before failing in a qualitatively new way:
 `walk11` (b=0.04, single-pinch binary) was stopped at ε≈1.24 and relaunched
 as `walk12` under the multi-pinch binary; its previous frontier was 0.889.
 
+* **2026-08-23 evening — FOURTH wall at ε ≈ 0.068 (cut006e) + fix.** Past
+  the second ST crossing the walk hit a new pure-resolution wall: clean
+  quadratic LM descents flooring at 1.999–2.056e-8 vs the 1e-8 gate,
+  with |F|min sitting just *above* the 0.05 static 4×-tier threshold —
+  so only the 2× tier fired, and 59 solves were rejected as near-misses
+  over the run's lifetime. Fix: **reactive escalation** — a rejected
+  solve whose residual is finite and ≤ 10³× the clean gate (resolution
+  -floor signature; ghosts stall at O(0.1–1)) is retried once at doubled
+  node tier, up to 8× = 32768 nodes. cut006e was killed and relaunched
+  as **cut006f** under the new binary (16 h budget); walk13 (b=0.04)
+  continues under the older static-tier binary for comparison.
+
 ### 2.3 Honest assessment of the remaining gap
 
 * **What is covered**: everything except real bases in (0, e^{−e}) at the ε→0
@@ -186,14 +243,41 @@ as `walk12` under the multi-pinch binary; its previous frontier was 0.889.
   t_max, validate threshold); uniform residual gate + final 1e-8 tuning with
   full floor-history comment; multi-pinch homotopy rescue (up to 3 pinch
   points, sign combos, pattern memory); adaptive node boost near deep
-  pinches; anchor-snap removal.
+  pinches (2-tier: 2× below |F|min<0.12, 4× below 0.05); anchor-snap removal;
+  MT-mode parallel branches (element-wise maps in `precompute_dt_factors`,
+  `apply_dt_v_fft` pre-scale, `apply_t_fft` edge build + boundary rows);
+  reactive near-miss node-tier escalation in the walker attempt loop
+  (§ 2.2 fourth wall); complex-base stalled-solve honesty gate in
+  `setup_kouznetsov` (§ 1.6).
+* `src/mt.rs` — NEW: opt-in MT mode (`TET_MT` env; unset/0 = serial default,
+  1 = all cores, n≥2 = fixed pool). Parsed once via OnceLock.
+* `src/fft.rs` — `fft()` dispatches serial (default, original code moved
+  verbatim to `fft_serial`) vs `fft_mt` (parallel butterflies over disjoint
+  pairs + process-global twiddle cache built by the identical sequential
+  recurrence → bit-identical outputs); pointwise products in `convolve` /
+  `cross_correlate_with_kernel` gated the same way.
+* `src/main.rs` — `mt::init_pool()` at startup (no-op unless TET_MT ≥ 2).
+* `src/lib.rs` — `pub mod mt`.
+* `scripts/plot3d.py` — NEW: dependency-free SVG 3D-projection plotter for
+  chart sweeps (docs/charts/); breaks curves at non-finite / |f|>50 points.
+* `scripts/chartgen.sh` — NEW: adaptive-grid sweep driver (x ∈ [−30, 120],
+  ~1015 points, 14-way parallel) emitting the CSVs under docs/charts/data/.
+* `docs/charts/` — NEW: 5 SVG charts + 4 sweep CSVs (README § 5.4 gallery).
 * `src/dispatch.rs` — `tetrate_cut_base()` helper; both region arms route cut
   bases to the walker.
 * `FAILURE_CASES.md` — section J (cut segment: math status, construction,
   honest limits, gate documentation); expanded working-baseline table.
 * Deleted: `examples/probe_kouz.rs`, `examples/probe_warm.rs`.
-* Test status: `cargo test --release` fully GREEN (incl. t860); lib tests 5/5;
-  clippy = 13 = baseline.
+* Test status: `cargo test --release` GREEN with t860/t852 rewritten to
+  honesty semantics (§ 1.7) and t890 added; lib tests 5/5; clippy = 13 =
+  baseline.
+* MT A/B verification (2026-08-23): `TET_MT=16` vs serial on
+  `tet 20 2 0 0.5 0` (Kouznetsov), `tet 20 0 1 0.5 0` (complex base),
+  `tet 15 0.5 0 0.75 0` (Schröder) — stdout **bit-identical** in all three;
+  lib tests 5/5 with and without the twiddle cache. Benchmark (2026-08-24,
+  16-core box, moderate background load, `tet 30 2 0 0.5 0`): serial 732 s,
+  `TET_MT=4` 362 s (2.0×), `TET_MT=16` 167 s (**4.4×**); 25-digit outputs
+  `diff`-identical serial vs MT=16.
 
 ## 4. Next steps
 

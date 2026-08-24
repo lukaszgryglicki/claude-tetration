@@ -251,9 +251,79 @@ pub fn setup_kouznetsov(
             (l_plus, l_minus)
         }
     };
-    setup_kouznetsov_core(
+    let state = setup_kouznetsov_core(
         b, l_upper, l_lower, prec, digits, use_schwarz, None, false, false, false, 1,
-    )
+    )?;
+    if !use_schwarz {
+        // Honesty gate for the complex-base direct path. `iterate_newton`'s
+        // relaxed non-Schwarz acceptance (residual ≤ 5) exists so that the
+        // ε-walker and continuation internals can inspect near-miss solves
+        // themselves, but a *final* answer must never be built from an LM
+        // solve that stalled at an O(1) residual: near the Shell-Thron
+        // parabolic band the stalled samples are pure garbage (observed
+        // b = 0.0653+0.025i, |λ| ≈ 0.995: residual 1.5 accepted → F(48)
+        // off by 10^4 and diverging under upward iteration, while the true
+        // orbit is bounded). Cap acceptance at ~digits/3 verified digits,
+        // never worse than 2. Rejection routes dispatch to the honest
+        // iε-Richardson fallback or a clean unsupported error.
+        let band_gate = 10f64.powf(-(digits as f64) / 3.0).clamp(1e-6, 1e-2);
+        let accept_stall = std::env::var("TET_KOUZ_ACCEPT_STALL").is_ok();
+        if !accept_stall && !(state.residual.is_finite() && state.residual <= band_gate) {
+            // Retry with the anchored two-sided left-edge unwrap before giving
+            // up: the pointwise principal log can mis-branch the left-edge
+            // integrand for complex-base geometries and produce a *phantom*
+            // O(1) residual (observed b=-0.8+0.4i: 1.58 principal vs 9.5e-4
+            // two-sided at identical samples-quality). If the retry passes the
+            // gate its solve is genuinely verified; if both stall, refuse.
+            if cnum::verbose() {
+                eprintln!(
+                    "kouz gate: principal-log residual {:.3e} > gate {:.1e}; retrying with two-sided unwrap",
+                    state.residual, band_gate
+                );
+            }
+            let retry = setup_kouznetsov_core(
+                b,
+                state.l_upper.clone(),
+                state.l_lower.clone(),
+                prec,
+                digits,
+                use_schwarz,
+                None,
+                false,
+                false,
+                true,
+                1,
+            );
+            match retry {
+                Ok(r) if r.residual.is_finite() && r.residual <= band_gate => return Ok(r),
+                Ok(r) => {
+                    return Err(format!(
+                        "Kouznetsov complex-base solve stalled: boundary residual {:.3e} \
+                         (principal log) / {:.3e} (two-sided unwrap retry) both exceed \
+                         the honesty gate {:.1e} (≈{} verified digits required); \
+                         samples at this level are unreliable (parabolic-band stall)",
+                        state.residual,
+                        r.residual,
+                        band_gate,
+                        (digits / 3).max(2),
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Kouznetsov complex-base solve stalled: boundary residual {:.3e} \
+                         exceeds the honesty gate {:.1e} (≈{} verified digits required) \
+                         and the two-sided unwrap retry failed ({}); \
+                         samples at this level are unreliable (parabolic-band stall)",
+                        state.residual,
+                        band_gate,
+                        (digits / 3).max(2),
+                        e,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(state)
 }
 
 /// Core Kouznetsov solver: given the asymptotic fixed-point pair
@@ -2649,6 +2719,23 @@ fn precompute_dt_factors(
     prec: u32,
 ) -> (Vec<Complex>, Vec<Complex>) {
     let n = samples.len();
+    if crate::mt::mt_enabled() {
+        use rayon::prelude::*;
+        let one_c = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+        let pairs: Vec<(Complex, Complex)> = samples
+            .par_iter()
+            .with_min_len(8)
+            .map(|s| {
+                let exp_arg = Complex::with_val(prec, ln_b * s);
+                let bf = Complex::with_val(prec, exp_arg.exp_ref());
+                let b_f_ln_j = Complex::with_val(prec, &bf * ln_b);
+                let f_ln = Complex::with_val(prec, s * ln_b);
+                let inv_f_ln_j = Complex::with_val(prec, &one_c / &f_ln);
+                (b_f_ln_j, inv_f_ln_j)
+            })
+            .collect();
+        return pairs.into_iter().unzip();
+    }
     let mut b_f_ln = Vec::with_capacity(n);
     let mut inv_f_ln = Vec::with_capacity(n);
     let one_c = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
@@ -2819,15 +2906,32 @@ pub(crate) fn apply_dt_v_fft(
     let inv_two_pi = Float::with_val(prec, &one_re / &two_pi);
 
     // Pre-scale: a_r[j] = b_f_ln[j]·v[j]·w_j/(2π), a_l[j] similar.
-    let mut a_r: Vec<Complex> = Vec::with_capacity(n);
-    let mut a_l: Vec<Complex> = Vec::with_capacity(n);
-    for j in 0..n {
-        let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
-        let bv = Complex::with_val(prec, &b_f_ln[j] * &v[j]);
-        a_r.push(Complex::with_val(prec, &bv * &w_over_2pi));
-        let iv = Complex::with_val(prec, &inv_f_ln[j] * &v[j]);
-        a_l.push(Complex::with_val(prec, &iv * &w_over_2pi));
-    }
+    let (a_r, a_l): (Vec<Complex>, Vec<Complex>) = if crate::mt::mt_enabled() {
+        use rayon::prelude::*;
+        (0..n)
+            .into_par_iter()
+            .with_min_len(8)
+            .map(|j| {
+                let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
+                let bv = Complex::with_val(prec, &b_f_ln[j] * &v[j]);
+                let ar = Complex::with_val(prec, &bv * &w_over_2pi);
+                let iv = Complex::with_val(prec, &inv_f_ln[j] * &v[j]);
+                let al = Complex::with_val(prec, &iv * &w_over_2pi);
+                (ar, al)
+            })
+            .unzip()
+    } else {
+        let mut a_r: Vec<Complex> = Vec::with_capacity(n);
+        let mut a_l: Vec<Complex> = Vec::with_capacity(n);
+        for j in 0..n {
+            let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
+            let bv = Complex::with_val(prec, &b_f_ln[j] * &v[j]);
+            a_r.push(Complex::with_val(prec, &bv * &w_over_2pi));
+            let iv = Complex::with_val(prec, &inv_f_ln[j] * &v[j]);
+            a_l.push(Complex::with_val(prec, &iv * &w_over_2pi));
+        }
+        (a_r, a_l)
+    };
 
     let r_part = cross_correlate_with_kernel(&a_r, &kernels.right, prec);
     let l_part = cross_correlate_with_kernel(&a_l, &kernels.left, prec);
@@ -2865,18 +2969,36 @@ pub(crate) fn apply_t_fft(
 
     // Build right- and left-edge values, pre-scaled by w_j / (2π) so the
     // cross-correlation result is the in-strip part of T(F).
-    let mut a_r: Vec<Complex> = Vec::with_capacity(n);
-    let mut a_l: Vec<Complex> = Vec::with_capacity(n);
     let ln_unwrapped = unwrapped_ln_samples(samples, l_upper, l_lower, ln_b, prec, two_sided);
-    for j in 0..n {
-        let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
-        let exp_arg = Complex::with_val(prec, ln_b * &samples[j]);
-        let bf = Complex::with_val(prec, exp_arg.exp_ref());
-        a_r.push(Complex::with_val(prec, &bf * &w_over_2pi));
-        // Branch-unwrapped ln along the curve (see unwrapped_ln_samples).
-        let log_b_s = Complex::with_val(prec, &ln_unwrapped[j] / ln_b);
-        a_l.push(Complex::with_val(prec, &log_b_s * &w_over_2pi));
-    }
+    let (a_r, a_l): (Vec<Complex>, Vec<Complex>) = if crate::mt::mt_enabled() {
+        use rayon::prelude::*;
+        (0..n)
+            .into_par_iter()
+            .with_min_len(8)
+            .map(|j| {
+                let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
+                let exp_arg = Complex::with_val(prec, ln_b * &samples[j]);
+                let bf = Complex::with_val(prec, exp_arg.exp_ref());
+                let ar = Complex::with_val(prec, &bf * &w_over_2pi);
+                let log_b_s = Complex::with_val(prec, &ln_unwrapped[j] / ln_b);
+                let al = Complex::with_val(prec, &log_b_s * &w_over_2pi);
+                (ar, al)
+            })
+            .unzip()
+    } else {
+        let mut a_r: Vec<Complex> = Vec::with_capacity(n);
+        let mut a_l: Vec<Complex> = Vec::with_capacity(n);
+        for j in 0..n {
+            let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
+            let exp_arg = Complex::with_val(prec, ln_b * &samples[j]);
+            let bf = Complex::with_val(prec, exp_arg.exp_ref());
+            a_r.push(Complex::with_val(prec, &bf * &w_over_2pi));
+            // Branch-unwrapped ln along the curve (see unwrapped_ln_samples).
+            let log_b_s = Complex::with_val(prec, &ln_unwrapped[j] / ln_b);
+            a_l.push(Complex::with_val(prec, &log_b_s * &w_over_2pi));
+        }
+        (a_r, a_l)
+    };
 
     let r_part = cross_correlate_with_kernel(&a_r, &kernels.right, prec);
     let l_part = cross_correlate_with_kernel(&a_l, &kernels.left, prec);
@@ -2891,8 +3013,10 @@ pub(crate) fn apply_t_fft(
     let cp1_minus_itmax = Complex::with_val(prec, &cp1 + &neg_it_max);
     let cm1_minus_itmax = Complex::with_val(prec, &cm1 + &neg_it_max);
 
-    let mut out = Vec::with_capacity(n);
-    for k in 0..n {
+    // Per-row boundary correction: each row k is an independent computation
+    // (2 complex ln + a handful of mults) reading shared precomputed values,
+    // so the MT branch is a pure element-wise map — bit-identical.
+    let row = |k: usize| -> Complex {
         let z0 = Complex::with_val(prec, (Float::with_val(prec, 0.5f64), nodes[k].clone()));
 
         // Euler-Maclaurin boundary correction: subtract the closed-form O(h²)
@@ -2918,9 +3042,19 @@ pub(crate) fn apply_t_fft(
         let upper_lower_sum = Complex::with_val(prec, &up_term + &dn_term);
         let part2 = Complex::with_val(prec, &upper_lower_sum / &two_pi_i);
 
-        out.push(Complex::with_val(prec, &part1 + &part2));
+        Complex::with_val(prec, &part1 + &part2)
+    };
+
+    if crate::mt::mt_enabled() {
+        use rayon::prelude::*;
+        (0..n).into_par_iter().with_min_len(8).map(row).collect()
+    } else {
+        let mut out = Vec::with_capacity(n);
+        for k in 0..n {
+            out.push(row(k));
+        }
+        out
     }
-    out
 }
 
 /// Apply (DT)·v in O(N²) without ever forming DT. Uses precomputed per-sample
@@ -3950,19 +4084,55 @@ pub fn setup_kouznetsov_cut_base(
                 );
             }
             let warm = make_warm(combo);
-            match setup_kouznetsov_core(
-                &b_next,
-                l_up_next.clone(),
-                l_low_next.clone(),
-                prec,
-                digits,
-                false,
-                Some(&warm),
-                true,
-                eps_next != 0.0,
-                true,
-                node_boost,
-            ) {
+            // Reactive resolution escalation: when a solve is rejected as a
+            // *near-miss* (clean quadratic descent flooring within 3 decades
+            // of the gate — a trapezoidal-resolution kill, not a wrong-class
+            // ghost, which stalls at O(0.1–1)), retry the same combo once at
+            // the next node tier (2× more nodes, up to 8× = 32768 = N_MAX).
+            // Observed need: b=0.06, ε≈0.066–0.068, |F|min just above the
+            // static 4×-tier threshold — n=8192 floors at 2.05e-8 vs gate
+            // 1e-8; paying the 4× solve only after evidence beats raising
+            // the static tier for every step. One escalation per combo
+            // bounds cost; if the escalated solve still skates, bisection
+            // proceeds as before.
+            let mut boost_try = node_boost;
+            let mut escalations = 0usize;
+            let outcome = loop {
+                let r = setup_kouznetsov_core(
+                    &b_next,
+                    l_up_next.clone(),
+                    l_low_next.clone(),
+                    prec,
+                    digits,
+                    false,
+                    Some(&warm),
+                    true,
+                    eps_next != 0.0,
+                    true,
+                    boost_try,
+                );
+                match r {
+                    Ok(s)
+                        if (s.residual.is_nan() || s.residual > clean_target)
+                            && s.residual.is_finite()
+                            && s.residual <= clean_target * 1e3
+                            && escalations == 0
+                            && boost_try < 8 =>
+                    {
+                        if verbose {
+                            eprintln!(
+                                "kouz cut-base walk: near-miss at ε={:.6e} (residual {:.3e}, gate {:.1e}, boost {}×); escalating node tier to {}×",
+                                eps_next, s.residual, clean_target, boost_try, boost_try * 2
+                            );
+                        }
+                        boost_try *= 2;
+                        escalations += 1;
+                        continue;
+                    }
+                    other => break other,
+                }
+            };
+            match outcome {
                 Ok(s) => {
                     if s.residual.is_nan() || s.residual > clean_target {
                         if verbose {

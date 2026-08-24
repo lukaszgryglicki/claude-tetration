@@ -34,7 +34,20 @@ use rug::{float::Constant, Complex, Float};
 /// `a.len()` must be a power of two. `inverse = true` performs the inverse
 /// transform with the customary `1/N` scaling; otherwise the forward transform
 /// (un-normalized).
+///
+/// Dispatch: with `TET_MT` unset/0 (the default) this runs the original
+/// serial implementation, untouched. With MT mode on it runs the parallel
+/// variant, which is bit-identical (see `fft_mt`).
 pub fn fft(a: &mut [Complex], prec: u32, inverse: bool) {
+    if crate::mt::mt_enabled() {
+        fft_mt(a, prec, inverse);
+    } else {
+        fft_serial(a, prec, inverse);
+    }
+}
+
+/// Original serial FFT (the default path — code unchanged).
+fn fft_serial(a: &mut [Complex], prec: u32, inverse: bool) {
     let n = a.len();
     if n <= 1 {
         return;
@@ -95,6 +108,118 @@ pub fn fft(a: &mut [Complex], prec: u32, inverse: bool) {
     }
 }
 
+/// Parallel FFT for MT mode (`TET_MT` ≥ 1). Bit-identical to `fft_serial`:
+///
+/// * Each stage's twiddle factors are precomputed into a table by the **same
+///   sequential recurrence** the serial code uses (`ω ← ω·ω_step` starting
+///   from 1), so every butterfly sees the exact same correctly-rounded ω
+///   value it would have seen serially. In the serial code every block within
+///   a stage independently regenerates this identical sequence, so one table
+///   per stage serves all blocks.
+/// * Butterflies write disjoint pairs `(a[start+k], a[start+k+half])`:
+///   blocks are disjoint `size`-sized chunks and, within a block, the k-th
+///   butterfly touches only offsets `k` and `k+half`. Parallelizing over
+///   blocks (`par_chunks_mut`) and over k (zip of the two half-slices)
+///   reorders no floating-point accumulation — each output element is
+///   produced by the same two operations on the same operands as in the
+///   serial code, and MPC arithmetic is deterministic and correctly rounded.
+fn fft_mt(a: &mut [Complex], prec: u32, inverse: bool) {
+    use rayon::prelude::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    type TwiddleCache = Mutex<HashMap<(usize, u32, bool), Arc<Vec<Complex>>>>;
+
+    // Twiddle-table cache. Keyed by (stage size, precision, direction);
+    // tables are immutable once built and shared via Arc. FFT sizes and
+    // precision repeat thousands of times within one solve (every matvec of
+    // every Krylov step reuses the same padded length), so each table is
+    // built exactly once per process — its sequential-recurrence cost
+    // amortizes to zero and the butterflies get the full parallel speedup.
+    static TWIDDLES: OnceLock<TwiddleCache> = OnceLock::new();
+
+    let n = a.len();
+    if n <= 1 {
+        return;
+    }
+    assert!(n.is_power_of_two(), "fft length must be power of 2 (got {})", n);
+
+    // Bit-reverse permutation (pure swaps; cheap, kept serial).
+    let mut j = 0usize;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j ^= bit;
+        if i < j {
+            a.swap(i, j);
+        }
+    }
+
+    let pi = Float::with_val(prec, Constant::Pi);
+    let two_pi = Float::with_val(prec, &pi * 2u32);
+    let sign: i32 = if inverse { 1 } else { -1 };
+
+    let mut size = 2usize;
+    while size <= n {
+        let half = size / 2;
+
+        // Fetch (or build once) this stage's twiddle table. The values are
+        // produced by the same sequential recurrence (ω ← ω·ω_step from 1)
+        // the serial code runs per block, so they are bit-identical to the
+        // serial code's ω sequence.
+        let cache = TWIDDLES.get_or_init(|| Mutex::new(HashMap::new()));
+        let twiddles: Arc<Vec<Complex>> = {
+            let key = (size, prec, inverse);
+            let hit = cache.lock().unwrap().get(&key).cloned();
+            match hit {
+                Some(t) => t,
+                None => {
+                    let theta_unsigned = Float::with_val(prec, &two_pi / (size as u32));
+                    let theta = Float::with_val(prec, &theta_unsigned * sign);
+                    let cos_t = Float::with_val(prec, theta.cos_ref());
+                    let sin_t = Float::with_val(prec, theta.sin_ref());
+                    let omega_step = Complex::with_val(prec, (cos_t, sin_t));
+                    let mut table: Vec<Complex> = Vec::with_capacity(half);
+                    let mut omega =
+                        Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+                    for _ in 0..half {
+                        table.push(omega.clone());
+                        omega = Complex::with_val(prec, &omega * &omega_step);
+                    }
+                    let arc = Arc::new(table);
+                    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+                    arc
+                }
+            }
+        };
+
+        a.par_chunks_mut(size).for_each(|chunk| {
+            let (lo, hi) = chunk.split_at_mut(half);
+            lo.par_iter_mut()
+                .zip(hi.par_iter_mut())
+                .zip(twiddles.par_iter())
+                .with_min_len(16)
+                .for_each(|((u_ref, t_ref), w)| {
+                    let t = Complex::with_val(prec, w * &*t_ref);
+                    let u = u_ref.clone();
+                    *u_ref = Complex::with_val(prec, &u + &t);
+                    *t_ref = Complex::with_val(prec, &u - &t);
+                });
+        });
+        size <<= 1;
+    }
+
+    if inverse {
+        let inv_n = Float::with_val(prec, 1u32) / Float::with_val(prec, n as u32);
+        a.par_iter_mut().with_min_len(16).for_each(|c| {
+            *c = Complex::with_val(prec, &*c * &inv_n);
+        });
+    }
+}
+
 /// Linear convolution `c[n] = Σ_m a[m] · b[n − m]`. Output length is
 /// `a.len() + b.len() − 1`. Uses a single forward+forward+inverse FFT at
 /// padded length `next_power_of_two(a.len() + b.len() − 1)`.
@@ -120,8 +245,19 @@ pub fn convolve(a: &[Complex], b: &[Complex], prec: u32) -> Vec<Complex> {
     fft(&mut a_pad, prec, false);
     fft(&mut b_pad, prec, false);
 
-    for i in 0..m {
-        a_pad[i] = Complex::with_val(prec, &a_pad[i] * &b_pad[i]);
+    if crate::mt::mt_enabled() {
+        use rayon::prelude::*;
+        a_pad
+            .par_iter_mut()
+            .zip(b_pad.par_iter())
+            .with_min_len(16)
+            .for_each(|(x, y)| {
+                *x = Complex::with_val(prec, &*x * y);
+            });
+    } else {
+        for i in 0..m {
+            a_pad[i] = Complex::with_val(prec, &a_pad[i] * &b_pad[i]);
+        }
     }
 
     fft(&mut a_pad, prec, true);
@@ -189,8 +325,19 @@ pub fn cross_correlate_with_kernel(
     }
     fft(&mut a_pad, prec, false);
 
-    for i in 0..m {
-        a_pad[i] = Complex::with_val(prec, &a_pad[i] * &kernel.coeffs[i]);
+    if crate::mt::mt_enabled() {
+        use rayon::prelude::*;
+        a_pad
+            .par_iter_mut()
+            .zip(kernel.coeffs.par_iter())
+            .with_min_len(16)
+            .for_each(|(x, k)| {
+                *x = Complex::with_val(prec, &*x * k);
+            });
+    } else {
+        for i in 0..m {
+            a_pad[i] = Complex::with_val(prec, &a_pad[i] * &kernel.coeffs[i]);
+        }
     }
 
     fft(&mut a_pad, prec, true);

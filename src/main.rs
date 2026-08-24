@@ -29,6 +29,10 @@ Examples:
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
 
+    // Opt-in MT mode: builds a fixed-size rayon pool when TET_MT >= 2.
+    // With TET_MT unset/0/1 this is a no-op.
+    tetration::mt::init_pool();
+
     if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
         print!("{}", USAGE);
         return ExitCode::SUCCESS;

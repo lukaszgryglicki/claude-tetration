@@ -109,6 +109,7 @@ is an **honest error**, never a plausible-looking wrong number.
    1. [✅ Verified](#51--verified)
    2. [⏳ Pending / in progress](#52--pending--in-progress)
    3. [❌ Known-bad / missing](#53--known-bad--missing-by-design-or-documented-ceiling)
+   4. [Gallery: the cut segment in 3D](#54-gallery-fx--bx-near-the-cut-in-3d)
 6. [The algorithms, in detail](#6-the-algorithms-in-detail)
    1. [Classification](#61-classification-fixed-points-and-)
    2. [Exact cases](#62-exact-cases)
@@ -292,6 +293,27 @@ Diagnostics go to stderr and can be tuned with environment variables:
 | `TET_KOUZ_CUT_ANCHOR=<ε₀>`, `TET_KOUZ_CUT_RATIO=<r>` | cut-walker anchor height (default 2.0) and schedule ratio (default 0.72) |
 | `TET_KOUZ_UNWRAP_DEBUG=1` | branch-unwrap winding diagnostics |
 | `TET_KOUZ_RESID_DUMP=<file>` | dump residual profiles for offline analysis |
+| `TET_MT=<n>` | **opt-in multithreading.** Unset/`0` (default): fully serial, the original code paths, untouched. `1`: parallel across all logical cores. `n ≥ 2`: parallel with exactly `n` threads. Outputs are **bit-identical** to serial mode (see below). |
+
+**MT mode.** Big-number tetration is dominated by one hot loop: the FFT-based
+Newton–Krylov matvecs inside the Kouznetsov solver (measured ≈ 90 % of a
+20-digit cut-adjacent solve). With `TET_MT` set, the radix-2 FFT runs its
+butterflies in parallel over disjoint index pairs, and the per-node
+transcendental maps (`b^F`, branch logs, boundary corrections) run as parallel
+element-wise maps. **No floating-point accumulation is ever reordered** —
+GMRES inner products, norms and Euler–Maclaurin sums stay serial, and each
+parallel output element is produced by the same correctly-rounded MPC
+operations on the same operands in the same order as the serial code. MT-mode
+results are therefore bit-identical to the default, verified by A/B `diff` on
+Kouznetsov, Schröder and complex-base cases. Speedup is workload-dependent:
+grids of `n = 4096–32768` nodes at modest precision parallelize well; tiny
+grids and pure-Schröder evaluations gain little. Measured on a 16-core box
+(`tet 30 2 0 0.5 0`, a 30-digit Kouznetsov solve, machine under background
+load, values `diff`-identical): serial 732 s → `TET_MT=4` 362 s (2.0×) →
+`TET_MT=16` 167 s (**4.4×**). The iε-Richardson ladder
+(§ 6.4) additionally evaluates its rung solves concurrently even in default
+mode (that parallelism is across independent solves, which does not affect
+any individual solve's arithmetic).
 
 Examples:
 
@@ -345,9 +367,9 @@ accuracy at the standard 20-digit request:
 | any `b` | integer `h` | direct iteration | exact |
 | Shell–Thron interior (e.g. `√2`, `0.5`, `i`-ish interior) | all complex | Schröder | full requested digits |
 | real `b > η` (2, e, 10, 3000, 1e5, …) | all complex | Kouznetsov (Schwarz-symmetric) | full requested digits |
-| general complex outside ST (`−2`, `i`, `−0.8+0.4i`, …) | all complex | Kouznetsov (bi-asymptotic) or Schröder-at-repelling | full digits for most; hard fringe bases certify fewer digits and **say so** (e.g. `b=−2` currently certifies ~8 digits with an explicit warning) |
+| general complex outside ST (`−2`, `i`, `−0.8+0.4i`, …) | all complex | Kouznetsov (bi-asymptotic) or Schröder-at-repelling | full digits for most; hard fringe bases certify fewer digits and **say so** (e.g. `b=−2` currently certifies ~8 digits with an explicit warning); bases whose strip geometry admits no rectangle-Cauchy solution (e.g. `−0.8+0.4i`) **ERR honestly** — see § 5.3 |
 | `Im(b) < 0` | all complex | Schwarz reflection to `Im(b) > 0` | as the reflected class |
-| Shell–Thron **boundary band** (`0.95 ≤ \|λ\| ≤ 1.05`, e.g. `b = η`, `1.4448`) | all complex | continuation → iε Richardson R₄ | **≈ 15–17 digits** (documented ceiling; warns) |
+| Shell–Thron **boundary band** (`0.95 ≤ \|λ\| ≤ 1.05`, e.g. `b = η`, `1.4448`) | all complex | continuation → iε Richardson R₄ | **≈ 15–17 digits** (documented ceiling; warns). Complex bases **deep** in the band (`\|λ\| ≳ 0.99`) may honestly ERR — see § 5.3 |
 | real cut segment `0 < b < e^{−e}` | all complex | ε-continuation walker | **research frontier in this repo** — construction complete, walks at record depth; see § 6.7 and `updates.md` |
 | `b = 0` non-integer `h`, negative integer heights `h ≤ −2` | — | honest ERR (mathematically singular) | n/a |
 
@@ -376,10 +398,12 @@ above (spot-checked against mpmath and the FE post-check).
 ### 5.2 ⏳ Pending / in progress
 
 * **Cut segment `0 < b < e^{−e}` at exactly `Im b = 0`** — the
-  ε-walker (§ 6.7) is actively descending; three successive walls have
-  been diagnosed and fixed this campaign (record depth `ε ≈ 0.102` at
-  `b = 0.06`, from `ε ≈ 0.92` at the start). The `ε = 0` endpoint is
-  not yet certified. Live status: [`updates.md`](updates.md),
+  ε-walker (§ 6.7) is actively descending; four successive walls have
+  been diagnosed and fixed this campaign (record frontier `ε ≈ 0.068`
+  at `b = 0.06`, from `ε ≈ 0.92` at the start; the newest defense —
+  reactive node-tier escalation on near-miss solves — is live in the
+  current walk). The `ε = 0` endpoint is not yet certified. Live
+  status: [`updates.md`](updates.md),
   [`FAILURE_CASES.md`](FAILURE_CASES.md) § J. Note complex bases
   arbitrarily close to the cut (`b + iε`, any fixed `ε > 0`) already
   work as ordinary complex bases.
@@ -395,6 +419,36 @@ above (spot-checked against mpmath and the FE post-check).
   precision; full precision would require Abel/Écalle parabolic
   iteration (not implemented). The program warns rather than
   overclaims.
+* **Complex bases deep in the parabolic band** (`|λ| ≳ 0.99`, e.g.
+  `b = 0.0653 + 0.025i` with `|λ| = 0.995`): Schröder correctly
+  refuses (parabolic), the Kouznetsov LM iteration stalls at an O(1)
+  residual, and the iε-Richardson probes land back inside the band.
+  Since the honesty gate (§ 7) rejects stalled solves, these bases
+  **ERR cleanly** instead of returning plausible-looking garbage.
+  (Before the gate, one such stalled solve produced values that
+  diverged to `∞` under upward iteration while the true orbit is
+  bounded — caught during the § 5.4 chart campaign and now a
+  regression case.)
+* **Outside-ST bases whose sampling strip contains a zero of `F`**
+  (discovered on `b = −0.8 + 0.4i`, `|λ| ≈ 1.15`): the LM solve stalls
+  at an O(1) residual that is partly a *phantom* (principal-log
+  branch break on the left edge — the two-sided unwrap drops it
+  1.577 → 9.5e-4) and partly *genuine* (the remaining 9.5e-4 floor is
+  node-count-invariant and spatially broad: the rectangle Cauchy
+  equation has no solution on this strip, likely because `|F|` dips
+  to ≈ 0.44 near the sample line and `log_b F` crosses a branch cut).
+  **There is no independently verified tetration value at such bases
+  yet**: an earlier test-blessed 20-digit value turned out to be a
+  discretization artifact — 20/22/25-digit runs each give a
+  *completely different* `F(0.5)` while all passing the (recurrence-
+  enforced, hence tautological) FE post-check. The honesty gate now
+  rejects all of them and the CLI ERRs cleanly; the regression tests
+  assert the refusal. (The refusal is *expensive* — principal solve +
+  two-sided retry + the full iε-Richardson ladder, each probe itself
+  retried — tens of minutes at 20+ digits; honesty over speed.)
+  Full anatomy: `FAILURE_CASES.md` § A.2.
+  Closing this class needs a non-rectangular (Paulsen-style) contour
+  that avoids the in-strip zero of `F` — a research item (§ 8.1).
 * **`b = 0` at non-integer heights** — no principal-branch value
   exists: honest ERR.
 * **Negative integer heights `h ≤ −2`** — genuine singularities
@@ -402,6 +456,63 @@ above (spot-checked against mpmath and the FE post-check).
 * **Paulsen–Cowgill conformal-map machinery** — not implemented;
   pathological bases that would need it error out cleanly instead of
   guessing.
+
+### 5.4 Gallery: `f(x) = b^^x` near the cut, in 3D
+
+What does tetration *look like* for a base just below `e^{−e}`? Since
+`f(x)` is complex even for real `x` there, the natural picture is a
+**3D curve** `x ↦ (x, Re f, Im f)`. The charts below sweep real
+heights `x ∈ [−30, 120]` (~1000 adaptive points per base, denser in
+the interesting bands) for `b` at 99%, 100% and 101% of `e^{−e}`,
+each evaluated at `b + 0.05i` — the uniform-`iε` preview of the cut
+limit (the exact `Im b = 0` value is what the § 6.7 walker computes;
+at `ε = 0.05` all three bases are ordinary, fully-verified complex
+bases solved by Schröder).
+
+| chart | file |
+|---|---|
+| `b = 0.99·e^{−e}` | [`docs/charts/tet3d_b099eme_eps005.svg`](docs/charts/tet3d_b099eme_eps005.svg) |
+| `b = e^{−e}` exactly | [`docs/charts/tet3d_b100eme_eps005.svg`](docs/charts/tet3d_b100eme_eps005.svg) |
+| `b = 1.01·e^{−e}` | [`docs/charts/tet3d_b101eme_eps005.svg`](docs/charts/tet3d_b101eme_eps005.svg) |
+| all three overlaid | [`docs/charts/tet3d_triptych_eps005.svg`](docs/charts/tet3d_triptych_eps005.svg) |
+| `ε`-convergence (`0.1` vs `0.05`) | [`docs/charts/tet3d_b099eme_eps_convergence.svg`](docs/charts/tet3d_b099eme_eps_convergence.svg) |
+
+![all three bases overlaid](docs/charts/tet3d_triptych_eps005.svg)
+
+Findings, all reproducible from the CSVs in
+[`docs/charts/data/`](docs/charts/data/) (3 × 1015 + 256 points,
+**zero solver errors**):
+
+* **Pole forest** (`x ≲ −2`): every integer `x ≤ −2` is a genuine
+  pole (the recurrence hits `log_b 0`), and the CLI honestly ERRs
+  exactly there; the sweep dodges integers by `+0.013` and the curve
+  executes a widening loop around each pole (red markers in the
+  charts). Largest excursion `|f| ≈ 1.80` at `x ≈ −1.99`.
+* **2-cycle weave** (`x ≳ 2`): the fixed-point multiplier is
+  `λ ≈ −0.98` (nearly parabolic, *negative*), so the orbit converges
+  by slowly-damped **period-2 alternation** — a helix that tightens
+  around `L ≈ 0.376 + 0.048i` and is still visibly braided at
+  `x = 120`.
+* **The three bases are nearly indistinguishable at `ε = 0.05`** on
+  `x > 0` (pointwise gap `< 0.02` there); they differ materially only
+  inside the pole loops (max gap 2.37 at `x = −4.08`). The famous
+  qualitative divide at `b = e^{−e}` (convergence vs 2-cycle on the
+  real line) emerges **only in the `ε → 0` limit** — which is
+  precisely why the § 6.7 walker exists.
+* **The `ε`-convergence overlay uses `0.1` vs `0.05`** (both
+  Schröder-verified): halving ε moves the curve by up to 1.80 in the
+  pole forest, 0.64 near the seam (`x = 2.2`) and 0.13 out at
+  `x > 50` — a strong, *non-uniform* ε-dependence. The
+  originally-planned `ε = 0.025` level sits deep in the parabolic
+  band (`|λ| = 0.995`) where the solver now honestly ERRs (§ 5.3) —
+  the first attempt at that sweep is what exposed the acceptance-gate
+  bug described there.
+
+Reproduce with [`scripts/chartgen.sh`](scripts/chartgen.sh) (sweep →
+CSV, 14-way parallel) and [`scripts/plot3d.py`](scripts/plot3d.py)
+(CSV → SVG, dependency-free cabinet projection with floor/wall
+shadow projections; non-finite or `|f| > 50` points break the curve
+rather than skew the scale).
 
 ---
 
@@ -552,7 +663,13 @@ injects it directly). The construction:
    near-singular and the trapezoidal error floor rises to the
    acceptance gate; the walker doubles the node count for those steps
    (observed and fixed at `ε ≈ 0.102`, `b = 0.06`: clean convergence
-   flooring at 1.02e-8 on n=4096, cured by n=8192).
+   flooring at 1.02e-8 on n=4096, cured by n=8192). Static tiers are
+   not always enough: at `ε ≈ 0.068` a clean quadratic descent floored
+   at 2.0e-8 with `|F|_min` just *above* the deep-pinch threshold, so
+   the walker now also **escalates reactively** — a rejected solve
+   whose residual is a *near-miss* (within 3 decades of the gate,
+   i.e. a resolution floor, not an O(0.1–1) ghost stall) is retried
+   once at doubled node tier before bisection.
 6. **Ghost filtering and gates.** The discrete system admits spurious
    1-periodic-dressed near-solutions ("ghosts"). Defenses, all
    load-bearing and all documented from walk evidence: winding jumps
@@ -568,9 +685,12 @@ injects it directly). The construction:
    Kouznetsov state, and the usual FE post-check applies.
 
 Status: the machinery above carries walks monotonically deeper with
-each fix (current record `ε ≈ 0.102` at `b = 0.06`, from `0.92` at the
-start of this campaign); live progress, walk logs, and the full
-failure-mode history are in [`updates.md`](updates.md) and
+each fix (record frontier `ε ≈ 0.068` at `b = 0.06`, from `0.92` at
+the start of this campaign; walls diagnosed and fixed so far: winding
+jumps at `ε ≈ 0.196`, static deep-pinch boost at `ε ≈ 0.102`,
+reactive near-miss escalation at `ε ≈ 0.068`); live progress, walk
+logs, and the full failure-mode history are in
+[`updates.md`](updates.md) and
 [`FAILURE_CASES.md`](FAILURE_CASES.md) § J. Values on the cut for
 `Im b = ε` down to the current frontier are computed cleanly today
 (they are ordinary complex bases); the remaining work is the last
@@ -601,6 +721,29 @@ quotable in a research context:
   and documented in-source with the empirical evidence behind each
   constant; any accepted result short of the full target prints a
   warning quantifying the certified digits.
+* **Stalled-solve rejection (complex bases).** A final answer is
+  never built from a Kouznetsov LM solve that stalled: the complex
+  -base direct path re-gates the achieved residual at
+  `10^{−digits/3}` (clamped to `[10⁻⁶, 10⁻²]`) *after* the internal
+  relaxed acceptance that walker/continuation internals need for
+  near-miss inspection. A gate-rejected solve is retried once with
+  the anchored two-sided left-edge unwrap (kills *phantom* stalls
+  caused by principal-log branch breaks — observed 1.577 → 9.5e-4 on
+  the same samples); only if both discretizations stall does the path
+  refuse. Found the hard way, twice: a `|λ| = 0.995` base accepted at
+  residual 1.5 produced values that looked plausible for 40 heights
+  and then blew up to `10^{6913}` under upward iteration (§ 5.3); and
+  a test-blessed 20-digit witness value at `b = −0.8+0.4i` turned out
+  to be a discretization artifact — cross-discretization probes each
+  give a different value (`FAILURE_CASES.md` § A.2).
+* **Cross-discretization verification.** Agreement of two runs of the
+  *same* discretization at the same node count is **not**
+  verification (pseudo-verification by shared ancestry); witness
+  values are only trusted when independent probes (different digits →
+  different node counts, or different left-edge unwrap) agree. The FE
+  post-check alone is *tautological* for Cauchy-reconstructed values
+  (the evaluation recurrence enforces it), so it can never bless a
+  value by itself.
 * **Precision above machine, no gratuitous towers.** Everything runs
   in MPFR/MPC big floats sized from the request (with guard bits), so
   results are provably beyond f64 — the standard validation level in
@@ -616,14 +759,20 @@ quotable in a research context:
 * **Parabolic boundary band** (`0.95 ≤ |λ| ≤ 1.05`): ≈ 15–17 digits
   via iε-Richardson, independent of requested precision. Full
   precision there needs Abel/Écalle parabolic-iteration theory
-  (Kouznetsov 2009 § 6) — not implemented.
+  (Kouznetsov 2009 § 6) — not implemented. Complex bases *deep* in
+  the band (`|λ| ≳ 0.99`) can defeat the Richardson fallback too and
+  then ERR cleanly (§ 5.3).
 * **Cut segment** `0 < b < e^{−e}`: ε-walker research frontier as
   described in § 6.7; the `ε = 0` endpoint is not yet certified at
   production precision. Complex bases arbitrarily near the cut work.
 * **Truly pathological complex bases** whose fixed-point pairs fall in
   the same half-plane *and* defeat the germ-tracked injection would
   need Paulsen–Cowgill conformal-map machinery (not implemented);
-  such bases error out cleanly.
+  such bases error out cleanly. Related: outside-ST bases whose
+  sampling strip contains a zero of `F` (e.g. `b = −0.8+0.4i`) have
+  **no verified value at all yet** — every discretization stalls or
+  disagrees, and the program refuses rather than guess (§ 5.3,
+  `FAILURE_CASES.md` § A.2).
 * **Negative integer heights `h ≤ −2`** are genuine singularities
   (`F(−2) = log_b 0`); **`b = 0` at non-integer heights** has no
   principal-branch value. Both are honest errors by design.

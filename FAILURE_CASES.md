@@ -71,6 +71,86 @@ Abel-function construction, Math. Comp. §6) is still needed.
 | 1.43 | 0 | 0.5 | 0 | OK | Schröder works at this distance |
 | 1.44 | 0 | 0.5 | 0 | OK | Schröder converged (|λ|=0.873, post-validation rel=6.4e-29) |
 
+### A.1 Complex bases deep in the band — silent garbage, now gated (RESOLVED as honest ERR)
+
+Discovered 2026-08-23 during the § 5.4 chart campaign. For
+`b = 0.0653281554868594 + 0.025i` (99% of `e^{−e}` lifted by `iε = 0.025`,
+`|λ| = 0.9950`, `arg λ ≈ π − 0.07` — deep in the band on the *oscillating*
+side), the chain went: Schröder refuses (parabolic) → Kouznetsov LM stalls
+at `‖r‖∞ ≈ 1.5` after one step ("no descent") → the old relaxed non-Schwarz
+acceptance (`residual ≤ 5`!) **accepted the stalled samples** → RC=0 with a
+5-digit-looking answer. The garbage passed the FE post-check (the FE is
+enforced by the evaluation recurrence itself, so a *wrong base segment*
+still satisfies it) and was exposed only by physics: iterating the value
+up in height blew up to `10^{6913}` by `h = 50` and `inf` at 51, while the
+true orbit is bounded (integer-height cross-check `F(48) = 0.1353 − 0.0070i`;
+independent 10- vs 15-digit runs disagreed *completely*, the smoking gun).
+
+Fix: `setup_kouznetsov` now re-gates the final residual for non-Schwarz
+bases at `10^{−digits/3}` clamped to `[1e-6, 1e-2]` (the internal relaxed
+gate remains for walker/continuation near-miss inspection, which judge
+residuals themselves). Rejection falls through to iε-Richardson; for bases
+this deep even the Richardson probes land back in the band, and the CLI
+then ERRs with the full failure chain — the honest outcome. Richardson
+still succeeds for the *real-base* band (probes escape perpendicular to
+the boundary; see table above), so coverage there is unchanged.
+
+| b_re | b_im | h_re | h_im | mode | result |
+|---|---|---|---|---|---|
+| 0.0653281554868594 | 0.025 | 48.013 | 0 | was: RC=0 garbage (−4.31+7.57i @10dig, −20.10+11.87i @15dig) | now: honest ERR (residual 1.455 vs gate 4.6e-4) |
+| 0.0653281554868594 | 0.05 | any swept | 0 | OK (Schröder, |λ|=0.978) | 1015-point sweep, zero errors |
+
+### A.2 The t860 "canonical value" was a discretization artifact (pseudo-verification uncovered)
+
+Follow-up discovery (2026-08-24) while tuning the § A.1 gate. The regression
+test t860 asserted `F(0.5) = 0.70282898263600754292 + 0.82145795139882997129i`
+for `b = −0.8 + 0.4i` (outside Shell-Thron, `|λ| ≈ 1.15`) — a value
+"verified" against baseline ac19851 during an earlier campaign. The gate
+rejected the solve behind it (LM stalls at `‖r‖∞ = 1.577`), which looked
+like a gate false-positive… until cross-discretization probes:
+
+| probe (all principal-log Kouznetsov, same binary family) | F(0.5) |
+|---|---|
+| 20 digits (n=2048) — the "canonical" | `0.7028 + 0.8215i` |
+| 22 digits (n≈2048–4096) | `−0.0276 + 0.0767i` |
+| 25 digits (n=4096) | `0.7152 + 0.7635i` |
+| 12 digits, two-sided unwrap | `−0.1729 − 0.2208i` |
+| 20 digits, two-sided unwrap | `−0.8 + 0.4i` (echo of b — downstream fallback junk) |
+
+Every discretization gives a **different** value; the FE post-check passes
+for all of them (recurrence-enforced, see § A.1). The "canonical" value was
+blessed only because ac19851 used the *same* node count at the same digits —
+the agreement was a discretization fingerprint, not verification
+(pseudo-verification by shared ancestry). There is currently **no**
+independently verified value of tetration at this base.
+
+Two structural facts uncovered en route:
+
+1. **Phantom residual component.** The left-edge integrand `log_b F` built
+   with the pointwise *principal* log mis-branches for this base and pins the
+   reported residual at O(1) even where samples are smooth. The anchored
+   two-sided unwrap drops the same solve's residual 1.577 → 9.5e-4. The
+   remaining 9.5e-4 is scale-invariant in node count (9.496e-4 @ n=4096,
+   9.503e-4 @ n=8192) and spatially broad (median 5.1e-4 across all 4094
+   interior nodes, peak at t ≈ −3.1) — a genuine continuous-level
+   obstruction, not discretization noise. The strip geometry chosen by the
+   W_k search (`k = −1`, `L_upper = 0.30+0.30i`, `L_lower = 2.26−0.41i`)
+   admits no solution of the rectangle Cauchy equation at this tolerance:
+   likely F has a zero/branch-point inside the strip (`|F|` dips to 0.44 at
+   t ≈ +44 on the sample line) so the left edge `log_b F` crosses a cut.
+2. **Solver response.** `setup_kouznetsov` now retries a gate-rejected solve
+   with the two-sided unwrap before refusing (kills phantom-only stalls at
+   zero risk: the retry must independently pass the gate). For b = −0.8+0.4i
+   both attempts stall → honest ERR listing both residuals.
+
+t860/t852 were rewritten to honesty semantics: `Ok ⇒` symmetry/FE verified
+to ≥15 digits, `Err ⇒` must be the parabolic-band-stall/unsupported error
+(and the conjugate base must refuse symmetrically). Producing the old
+"canonical" number would now be a *bug*. Genuine coverage of such bases
+needs either a Paulsen-style non-rectangular contour that avoids the
+in-strip zero of F, or a two-fixed-point merged expansion — both research
+items (see README § 8).
+
 ---
 
 ## B. Negative real bases  (b ∈ ℝ, b < 0)   — **RESOLVED**
@@ -319,6 +399,15 @@ ten walk campaigns at b = 0.04:
   skating at 1.04–1.07e-8 on the doubled grid at ε≈0.089–0.092).
   Boosting squares the floor away; healthy pinches (|F| ≈ 0.2–0.5)
   never trigger.
+* **Reactive near-miss escalation** (added at the ε ≈ 0.068 wall,
+  b = 0.06): the static |F|min tiers can miss — at ε ≈ 0.068 clean
+  quadratic descents floored at 2.0–2.1e-8 (vs gate 1e-8) with |F|min
+  just *above* the 4× threshold, so only the 2× tier fired and every
+  combo was rejected as it skated the gate. Now a rejected solve whose
+  residual is a *near-miss* (finite, ≤ 10³ × the clean gate — the
+  signature of a resolution floor; ghost stalls sit at O(0.1–1)) is
+  retried once at doubled node tier (up to 8× = 32768 nodes) before
+  the walker moves on to bisection.
 * **Wall-band pacing**: after any rescue, the next ≤ 5 targets are fine
   (1.5 %) steps — immediately jump-eligible, ~1 solve per band step instead
   of fail → bisect cascades.

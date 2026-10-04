@@ -261,6 +261,52 @@ $ cargo install --path .         # installs `tet` into ~/.cargo/bin
 No configuration files, no runtime dependencies beyond the shared
 system libc: the bignum stack is statically linked into the binary.
 
+The repository also provides a Makefile compatible with GNU make and BSD make.
+Plain `make`, `make build` and `make release` build the release executable;
+`make help` lists all targets:
+
+| Targets | Purpose |
+| --- | --- |
+| `debug`, `static`, `examples` | Debug, fully static native, or all example builds |
+| `test`, `test-lib`, `test-rust`, `test-python`, `test-doc` | Default Rust/Python/doc battery or individual layers |
+| `test-st`, `test-ignored`, `test-all` | Serial Rust tests, ignored cases only, or the entire battery including ignored cases |
+| `fmt`, `fmt-check`, `vet`/`lint`, `check`, `verify`, `doc` | Formatting, Clippy, compile checks, combined checks, and API documentation |
+| `demo`, `run`, `grid`, `edge`, `test-w0` | One bounded 50-digit demo, custom CLI calls, TSV sweeps, or Lambert W diagnostics |
+| `chartgen`, `plot`, `gallery` | Existing CSV sampler, SVG renderer, and gallery script |
+| `install`, `install-static`, `clean` | Install `tet` into `/data/scripts`, or remove Cargo outputs without deleting charts/data |
+
+```console
+$ make demo
+$ TET_MT=4 make test
+$ make test-lib TEST_ARGS='--test-threads=1'
+$ make run ARGS='--quiet 50 1.2 0 0.4 0.2'
+$ make grid ARGS='50 1 1.3 1.3 0.1 0.1 0.5 0.5 0 0'
+$ make chartgen ARGS='1 0 /tmp/tet.csv coarse'
+$ make plot ARGS='--help'
+$ make install                      # /data/scripts/tet
+$ sudo make install                 # or sudo gmake install, if write access requires sudo
+$ make install BINDIR="$HOME/.local/bin"
+$ make install DESTDIR=/tmp/stage    # staged /tmp/stage/data/scripts/tet
+```
+
+`JOBS=2` and one Rust test thread are the defaults; `TET_*` runtime settings
+are inherited unchanged. Use `ARGS` for CLI/example/script arguments,
+`TEST_ARGS` for Rust test-harness arguments, and `CARGO_TARGET_DIR` for another
+build directory (also honored by `chartgen`). Full grids, edge sweeps and
+ignored tests can be expensive; `gallery` deliberately rewrites its existing
+gallery outputs and is never run by the default build or demo.
+
+`make static` produces `target/<native-Rust-target>/release/tet`, including
+the C runtime (for example `target/x86_64-unknown-linux-gnu/release/tet`).
+It requires a toolchain supporting static CRT linking, its static system
+libraries and `file`; it fails if the output is not actually static.
+The native target comes from `rustc -vV` (`RUSTC` is configurable).
+Cross-compilation, including GNU-to-musl, is not configured: the current
+GMP dependency rejects it without additional feature changes.
+`install-static` installs the static executable instead of the normal release
+binary. Both install targets support `BINDIR` and `DESTDIR`; they install into
+the filesystem of the machine running Make.
+
 ### 2.3 First-run sanity checks
 
 ```console

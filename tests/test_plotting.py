@@ -70,11 +70,15 @@ class ChartgenTests(unittest.TestCase):
         binary.chmod(0o700)
         return scripts / "chartgen.sh", directory / "result.csv"
 
-    def run_sweep(self, script, output, multiplier):
+    def run_sweep(self, script, output, multiplier, target_dir=None):
+        environment = dict(os.environ, SILENT="1", TET_MT="0")
+        environment.pop("CARGO_TARGET_DIR", None)
+        if target_dir is not None:
+            environment["CARGO_TARGET_DIR"] = str(target_dir)
         return subprocess.run(
             ["timeout", "15", "bash", str(script), "1", "0", str(output), multiplier],
             capture_output=True, text=True, timeout=20,
-            env=dict(os.environ, SILENT="1", TET_MT="0"),
+            env=environment,
         )
 
     def test_invalid_multipliers_fail_without_running_tetration(self):
@@ -98,6 +102,18 @@ class ChartgenTests(unittest.TestCase):
             self.assertEqual(heights[0], -30)
             self.assertEqual(heights[-1], 120)
             self.assertIn(-2, heights)
+
+    def test_custom_cargo_target_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            script, output = self.fixture(directory, "print('1\\n0')\n")
+            custom = directory / "custom target"
+            (directory / "target").rename(custom)
+            result = self.run_sweep(script, output, "1000", target_dir=custom)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = list(csv.reader(output.read_text().splitlines()))
+            self.assertTrue(rows)
+            self.assertTrue(all(row[1:] == ["1", "0"] for row in rows))
 
     def test_failures_and_invalid_numeric_output_are_not_success(self):
         for body in [

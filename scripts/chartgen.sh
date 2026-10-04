@@ -23,7 +23,7 @@
 # overall exit status is nonzero. SILENT=1 suppresses progress, not errors.
 set -eu
 
-TET="$(dirname "$0")/../target/release/tet"
+TET="${CARGO_TARGET_DIR:-$(dirname "$0")/../target}/release/tet"
 if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
   echo "usage: chartgen.sh <b_re> <b_im> <out.csv> [coarse|step_multiplier]" >&2
   exit 2

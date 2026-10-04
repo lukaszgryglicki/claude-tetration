@@ -5,16 +5,19 @@ use tetration::{
     cnum, dispatch, integer_height, kouznetsov, lambertw, regions, schroder, tetrate_str,
 };
 
-fn parse(re: &str, im: &str, prec: u32) -> Complex {
+fn parse(re: &str, im: &str, prec: u64) -> Complex {
     cnum::parse_complex(re, im, prec).unwrap()
 }
 
-fn assert_close(actual: &Complex, expected: &Complex, digits: u64, prec: u32) {
+fn assert_close(actual: &Complex, expected: &Complex, digits: u64, prec: u64) {
     assert!(actual.real().is_finite() && actual.imag().is_finite());
     assert!(expected.real().is_finite() && expected.imag().is_finite());
-    let error = Float::with_val(prec, Complex::with_val(prec, actual - expected).abs_ref());
-    let scale = Float::with_val(prec, expected.abs_ref()).max(&Float::with_val(prec, 1));
-    let tolerance = Float::with_val(prec, Float::parse(format!("1e-{digits}")).unwrap()) * scale;
+    let error = Float::with_val_64(
+        prec,
+        Complex::with_val_64(prec, actual - expected).abs_ref(),
+    );
+    let scale = Float::with_val_64(prec, expected.abs_ref()).max(&Float::with_val_64(prec, 1));
+    let tolerance = Float::with_val_64(prec, Float::parse(format!("1e-{digits}")).unwrap()) * scale;
     assert!(
         error < tolerance,
         "error {error} exceeds {tolerance}: {actual} vs {expected}"
@@ -46,7 +49,7 @@ fn direct_apis_reject_nonfinite_values() {
     let zero = cnum::zero(prec);
     let one = cnum::one(prec);
     for special in [Special::Nan, Special::Infinity, Special::NegInfinity] {
-        let bad = Complex::with_val(prec, (Float::with_val(prec, special), 0));
+        let bad = Complex::with_val_64(prec, (Float::with_val_64(prec, special), 0));
         assert!(dispatch::tetrate(&bad, &zero, prec, 50).is_err());
         assert!(dispatch::tetrate(&one, &bad, prec, 50).is_err());
         assert!(integer_height::tetrate_integer(&bad, 0, prec).is_err());
@@ -84,23 +87,24 @@ fn finite_numbers_outside_f64_range_are_preserved() {
 }
 
 #[test]
-fn mpfr_limits_reject_unrepresentable_tolerances_before_allocation() {
-    let error = cnum::checked_digits_to_bits(1_000_000_000).unwrap_err();
-    assert!(error.contains("exponent range"), "{error}");
-    let error = cnum::require_precision(u32::MAX, 1).unwrap_err();
-    assert!(error.contains("exponent range"), "{error}");
+fn mpfr_limits_reject_unrepresentable_precision_before_allocation() {
+    let error = cnum::checked_digits_to_bits(u64::MAX).unwrap_err();
+    assert!(error.contains("MPFR"), "{error}");
+    let error = cnum::require_precision(rug::float::prec_max_64() + 1, 1).unwrap_err();
+    assert!(error.contains("native precision range"), "{error}");
 }
 
 #[test]
 fn mpfr_limits_reject_single_component_exponential_underflow() {
     let prec = cnum::digits_to_bits(70);
-    let real = Float::with_val(prec, rug::float::exp_min()) * Float::with_val(prec, 2).ln();
-    let real_argument = Complex::with_val(prec, (real.clone(), 0));
+    let real =
+        Float::with_val_64(prec, cnum::exponent_range().0) * Float::with_val_64(prec, 2).ln();
+    let real_argument = Complex::with_val_64(prec, (real.clone(), 0));
     let real_value = cnum::checked_exp(&real_argument, prec).unwrap();
     assert!(real_value.real().is_finite() && !real_value.real().is_zero());
     assert!(real_value.imag().is_zero());
     for imaginary in ["0.1", "-0.1"] {
-        let argument = Complex::with_val(prec, (real.clone(), cnum::decimal(imaginary, prec)));
+        let argument = Complex::with_val_64(prec, (real.clone(), cnum::decimal(imaginary, prec)));
         let error = cnum::checked_exp(&argument, prec).unwrap_err();
         assert!(error.contains("underflow"), "{error}");
     }
@@ -112,7 +116,7 @@ fn integer_path_agrees_with_independent_root_at_all_precisions() {
         let prec = cnum::digits_to_bits(digits);
         let b = parse("0.5", "0", prec);
         let got = integer_height::tetrate_integer(&b, 2, prec).unwrap();
-        let expected = Complex::with_val(prec, (Float::with_val(prec, 2).sqrt().recip(), 0));
+        let expected = Complex::with_val_64(prec, (Float::with_val_64(prec, 2).sqrt().recip(), 0));
         assert_close(&got, &expected, digits, prec);
     }
 }
@@ -122,7 +126,7 @@ fn negative_one_integer_towers_do_not_amplify_roundoff() {
     for digits in [50, 70, 1000, 1, 10] {
         let prec = cnum::digits_to_bits(digits);
         let base = parse("-1", "0", prec);
-        for n in [100, 1, 2, integer_height::MAX_INTEGER_HEIGHT] {
+        for n in [100, 1, 2, 100_000, 100_001, i64::MAX] {
             let value = integer_height::tetrate_integer(&base, n, prec).unwrap();
             assert_eq!(
                 value, base,
@@ -140,13 +144,6 @@ fn negative_one_integer_towers_do_not_amplify_roundoff() {
         assert!(integer_height::tetrate_integer(&base, -2, prec)
             .unwrap_err()
             .contains("undefined"));
-        assert!(integer_height::tetrate_integer(
-            &base,
-            integer_height::MAX_INTEGER_HEIGHT + 1,
-            prec,
-        )
-        .unwrap_err()
-        .contains("MAX_INTEGER_HEIGHT"));
     }
 }
 
@@ -287,12 +284,12 @@ fn lambert_near_branch_point_retains_requested_digits() {
             "-0.3678794411714423215955237701614608674458111310317678345078368016974614957450",
         ] {
             let z = parse(re, "0", prec);
-            let exact_same_input = Complex::with_val(reference_prec, &z);
+            let exact_same_input = Complex::with_val_64(reference_prec, &z);
             for branch in [0, -1] {
                 let actual = lambertw::wk(&z, branch, prec).unwrap();
                 let reference = lambertw::wk(&exact_same_input, branch, reference_prec).unwrap();
                 assert_close(
-                    &Complex::with_val(reference_prec, actual),
+                    &Complex::with_val_64(reference_prec, actual),
                     &reference,
                     digits,
                     reference_prec,
@@ -400,7 +397,7 @@ fn region_boundary_distinguishes_beyond_machine_precision() {
     let delta = cnum::epsilon(60, prec);
     for sign in [-1i32, 1] {
         let lambda = threshold.clone() + delta.clone() * sign;
-        let b = Complex::with_val(prec, (lambda.clone() * (-lambda).exp()).exp());
+        let b = Complex::with_val_64(prec, (lambda.clone() * (-lambda).exp()).exp());
         let region = regions::classify(&b, prec).unwrap();
         assert_eq!(
             matches!(region, regions::Region::ShellThronInterior(_)),
@@ -429,7 +426,7 @@ fn degenerate_base_parity_supports_arbitrary_integer_heights() {
         let h = parse(height, "0", prec);
         assert_eq!(
             dispatch::tetrate(&cnum::zero(prec), &h, prec, 70).unwrap(),
-            Complex::with_val(prec, expected)
+            Complex::with_val_64(prec, expected)
         );
         assert_eq!(
             dispatch::tetrate(&cnum::one(prec), &h, prec, 70).unwrap(),
@@ -507,7 +504,7 @@ fn surrogate_and_inconsistent_precision_requests_are_errors() {
     for digits in [0, 1000, u64::MAX] {
         assert!(dispatch::tetrate(&one, &height, prec, digits).is_err());
     }
-    for digits in [0, 1_000_000_001, u64::MAX] {
+    for digits in [0, u64::MAX] {
         assert!(cnum::checked_digits_to_bits(digits).is_err());
     }
 }
@@ -518,7 +515,7 @@ fn invalid_numerical_environment_overrides_are_errors() {
         ("TET_MT", "not-a-count", false),
         ("TET_MT", "18446744073709551615", false),
         ("TET_KOUZ_EM_K", "not-a-count", false),
-        ("TET_KOUZ_EM_K", "21", false),
+        ("TET_KOUZ_EM_K", "18446744073709551615", false),
         ("TET_KOUZ_ANDERSON_DEPTH", "not-a-count", true),
         ("TET_KOUZ_RESID_DUMP", "", false),
     ] {

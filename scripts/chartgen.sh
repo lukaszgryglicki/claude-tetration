@@ -49,16 +49,14 @@ if not all(x.is_finite() for x in base):
     raise SystemExit("base components must be finite")
 if not multiplier.is_finite() or multiplier <= 0:
     raise SystemExit("step multiplier must be finite and positive")
-if abs(multiplier.adjusted()) > 10000:
-    raise SystemExit("step multiplier exceeds the sweep resource range")
 multiplier = Fraction(multiplier)
 pieces = [(-30, -8, "0.1"), (-8, -3, "0.04"), (-3, 8, "0.05"), (8, 120, "0.25")]
 counts = []
 for lo, hi, step in pieces:
     count = Fraction(hi - lo) / (Fraction(step) * multiplier)
     counts.append(-(-count.numerator // count.denominator))
-if sum(counts) + 30 > 1_000_000:
-    raise SystemExit("sweep exceeds the 1000000-point resource budget")
+if sum(counts) + 30 > sys.maxsize:
+    raise SystemExit("sweep point count exceeds addressable memory")
 points = {Fraction(x) for x in range(-30, -1)}
 points.add(Fraction(120))
 for (lo, hi, step), count in zip(pieces, counts):
@@ -76,10 +74,8 @@ def evaluate(height):
     try:
         result = subprocess.run(
             [tet, "10", base_re, base_im, text, "0"],
-            capture_output=True, text=True, timeout=400,
+            capture_output=True, text=True,
         )
-    except subprocess.TimeoutExpired:
-        return text, None, "tetration timed out after 400 seconds", ""
     except OSError as error:
         return text, None, str(error), ""
     lines = result.stdout.splitlines()

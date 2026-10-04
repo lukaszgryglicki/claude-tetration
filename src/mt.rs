@@ -68,12 +68,14 @@ pub fn mt_enabled() -> bool {
 /// An existing Rayon pool is an explicit conflict, not a silent thread-count
 /// override. Serial mode never initializes a pool.
 pub fn init_pool() -> Result<(), String> {
+    crate::cnum::init_mpfr();
     static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
     INITIALIZED
         .get_or_init(|| {
             if let Some(n) = mt_setting().as_ref().map_err(Clone::clone)? {
                 rayon::ThreadPoolBuilder::new()
                     .num_threads(*n)
+                    .start_handler(|_| crate::cnum::init_mpfr())
                     .build_global()
                     .map_err(|e| {
                         format!("cannot initialize the requested tetration Rayon pool: {e}")

@@ -17,7 +17,7 @@ fn assert_number(actual: &str, expected: &str, digits: u64) {
     let prec = cnum::digits_to_bits(digits);
     let actual = cnum::parse_float(actual, prec).unwrap();
     let expected = cnum::parse_float(expected, prec).unwrap();
-    let error = Float::with_val(prec, &actual - &expected).abs();
+    let error = Float::with_val_64(prec, &actual - &expected).abs();
     assert!(
         error < cnum::epsilon(digits, prec),
         "{actual} differs from {expected} by {error}"
@@ -166,19 +166,20 @@ fn t060_complex_base_integer_height() {
     let prec = cnum::digits_to_bits(digits);
     let (re, im) = tet("50", "1", "1", "2", "0");
     let actual = cnum::parse_complex(&re, &im, prec).unwrap();
-    let half_ln2 = Float::with_val(prec, 2).ln() / 2;
-    let quarter_pi = Float::with_val(prec, Constant::Pi) / 4;
-    let radius = Float::with_val(prec, &half_ln2 - &quarter_pi).exp();
-    let angle = Float::with_val(prec, &half_ln2 + &quarter_pi);
-    let expected = Complex::with_val(
+    let half_ln2 = Float::with_val_64(prec, 2).ln() / 2;
+    let quarter_pi = Float::with_val_64(prec, Constant::Pi) / 4;
+    let radius = Float::with_val_64(prec, &half_ln2 - &quarter_pi).exp();
+    let angle = Float::with_val_64(prec, &half_ln2 + &quarter_pi);
+    let expected = Complex::with_val_64(
         prec,
         (
-            Float::with_val(prec, angle.cos_ref()) * &radius,
-            Float::with_val(prec, angle.sin_ref()) * &radius,
+            Float::with_val_64(prec, angle.cos_ref()) * &radius,
+            Float::with_val_64(prec, angle.sin_ref()) * &radius,
         ),
     );
     assert!(
-        cnum::abs(&Complex::with_val(prec, actual - expected), prec) < cnum::epsilon(digits, prec)
+        cnum::abs(&Complex::with_val_64(prec, actual - expected), prec)
+            < cnum::epsilon(digits, prec)
     );
 }
 

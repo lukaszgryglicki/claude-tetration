@@ -29,7 +29,8 @@
 //! into Re ∈ [0, 1] and applying the Cauchy formula one more time, then
 //! iterating `b^·` (`shift > 0`) or `log_b` (`shift < 0`) back.
 
-use rug::{float::Constant, Complex, Float};
+use rug::{float::Constant, Complex, Float, Integer, Rational};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{
     cnum,
@@ -37,6 +38,7 @@ use crate::{
     lambertw,
     regions::FixedPointData,
 };
+use cnum::{DisplayComplex, DisplayFloat};
 
 /// Compute `F_b(h)` via Newton-Kantorovich Cauchy iteration on the
 /// Kouznetsov-style rectangle. Works for general complex bases `b` outside
@@ -69,7 +71,7 @@ pub struct KouznetsovState {
     pub l_lower: Complex,
     pub ln_b: Complex,
     pub shift: Complex,
-    pub prec: u32,
+    pub prec: u64,
     pub digits: u64,
     pub normalized: bool,
     /// Achieved boundary residual, not a forward-error or branch certificate.
@@ -82,13 +84,11 @@ pub struct KouznetsovState {
     pub two_sided: bool,
 }
 
-const CAUCHY_MAX_SHIFTS: u64 = 10_000;
-
 pub fn tetrate_kouznetsov(
     b: &Complex,
     h: &Complex,
     fp: &FixedPointData,
-    prec: u32,
+    prec: u64,
     digits: u64,
 ) -> Result<Complex, String> {
     let state = setup_kouznetsov(b, fp, prec, digits)?;
@@ -102,7 +102,7 @@ pub fn tetrate_kouznetsov(
 pub fn setup_kouznetsov(
     b: &Complex,
     fp: &FixedPointData,
-    prec: u32,
+    prec: u64,
     digits: u64,
 ) -> Result<KouznetsovState, String> {
     crate::mt::init_pool()?;
@@ -133,12 +133,12 @@ pub fn setup_kouznetsov(
     // are conjugate in the real case, regardless of which branch was sampled).
     // For complex bases the two fixed points come from distinct W branches
     // (W₀ and W₋₁), so we recompute both explicitly.
-    let ln_b = Complex::with_val(prec, b.ln_ref());
-    let neg_ln_b = Complex::with_val(prec, -&ln_b);
+    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let neg_ln_b = Complex::with_val_64(prec, -&ln_b);
 
     let raw = fp.fixed_point.clone();
     let (l_lower, l_upper) = if use_schwarz {
-        let raw_conj = Complex::with_val(prec, raw.conj_ref());
+        let raw_conj = Complex::with_val_64(prec, raw.conj_ref());
         let raw_imag_neg = raw.imag().is_sign_negative();
         if raw_imag_neg {
             (raw, raw_conj)
@@ -158,9 +158,9 @@ pub fn setup_kouznetsov(
         // iterations); for slightly-complex b it converges to the natural
         // near-conjugate fixed point in 5–20 iterations.
         let w0_val = lambertw::w0(&neg_ln_b, prec)?;
-        let neg_w0 = Complex::with_val(prec, -&w0_val);
-        let l_plus = Complex::with_val(prec, &neg_w0 / &ln_b);
-        let seed = Complex::with_val(prec, l_plus.conj_ref());
+        let neg_w0 = Complex::with_val_64(prec, -&w0_val);
+        let l_plus = Complex::with_val_64(prec, &neg_w0 / &ln_b);
+        let seed = Complex::with_val_64(prec, l_plus.conj_ref());
         let mut l_minus = newton_fixed_point(&ln_b, &seed, prec).map_err(|e| {
             format!(
                 "Kouznetsov: could not find partner fixed point near conj(L_+): {}",
@@ -208,27 +208,30 @@ pub fn setup_kouznetsov(
                         continue;
                     }
                 };
-                let neg_wk = Complex::with_val(prec, -&wk_val);
-                let l_k = Complex::with_val(prec, &neg_wk / &ln_b);
+                let neg_wk = Complex::with_val_64(prec, -&wk_val);
+                let l_k = Complex::with_val_64(prec, &neg_wk / &ln_b);
                 let im_k = l_k.imag().clone();
                 let re_k = l_k.real().clone();
                 // Verify L_k is genuinely a fixed point of b^z = z (Halley
                 // can converge to a nearby branch for poor seeds).
-                let bz = Complex::with_val(prec, Complex::with_val(prec, &l_k * &ln_b).exp_ref());
-                let resid = Float::with_val(prec, Complex::with_val(prec, &bz - &l_k).abs_ref());
+                let bz =
+                    Complex::with_val_64(prec, Complex::with_val_64(prec, &l_k * &ln_b).exp_ref());
+                let resid =
+                    Float::with_val_64(prec, Complex::with_val_64(prec, &bz - &l_k).abs_ref());
                 let opposite = im_k.is_sign_negative() != im_plus.is_sign_negative()
                     && im_k.clone().abs() > min_im_strip;
                 if debug_wk {
                     eprintln!(
                         "kouz wk search: k={:>+}  L={:.4}+{:.4}i  resid={:.2e}  opposite={}  |im|>{}={}",
-                        k, re_k, im_k, resid, opposite, min_im_strip, im_k.clone().abs() > min_im_strip
+                        k, DisplayFloat(&re_k), DisplayFloat(&im_k), DisplayFloat(&resid),
+                        opposite, DisplayFloat(&min_im_strip), im_k.clone().abs() > min_im_strip
                     );
                 }
                 if opposite
                     && resid.is_finite()
                     && resid
                         < cnum::epsilon(digits.saturating_add(3), prec)
-                            * cnum::abs(&l_k, prec).max(&Float::with_val(prec, 1))
+                            * cnum::abs(&l_k, prec).max(&Float::with_val_64(prec, 1))
                 {
                     candidates.push((k, l_k, im_k));
                 }
@@ -249,11 +252,11 @@ pub fn setup_kouznetsov(
             } else {
                 return Err(format!(
                     "Kouznetsov: fixed-point pair (L_+ = {:.4}+{:.4}i, L_- = {:.4}+{:.4}i) lies in the same half-plane; W_k search across k∈±[1..5] found no opposite-half-plane partner with |Im|>{}. The implemented contour is unavailable; this does not establish nonexistence.",
-                    l_plus.real(),
-                    im_plus,
-                    l_minus.real(),
-                    im_minus_init,
-                    min_im_strip,
+                    DisplayFloat(l_plus.real()),
+                    DisplayFloat(&im_plus),
+                    DisplayFloat(l_minus.real()),
+                    DisplayFloat(&im_minus_init),
+                    DisplayFloat(&min_im_strip),
                 ));
             }
         }
@@ -292,7 +295,7 @@ pub fn setup_kouznetsov(
             if cnum::verbose() {
                 eprintln!(
                     "kouz gate: principal-log residual {:.3e} > gate {:.1e}; retrying with two-sided unwrap",
-                    state.residual, band_gate
+                    DisplayFloat(&state.residual), DisplayFloat(&band_gate)
                 );
             }
             let retry = setup_kouznetsov_core(
@@ -316,7 +319,9 @@ pub fn setup_kouznetsov(
                          (principal log) / {:.3e} (two-sided unwrap retry) both exceed \
                          the requested boundary target {:.1e}; \
                          samples at this level are unreliable (parabolic-band stall)",
-                        state.residual, r.residual, band_gate,
+                        DisplayFloat(&state.residual),
+                        DisplayFloat(&r.residual),
+                        DisplayFloat(&band_gate),
                     ));
                 }
                 Err(e) => {
@@ -325,7 +330,9 @@ pub fn setup_kouznetsov(
                          exceeds the requested boundary target {:.1e} \
                          and the two-sided unwrap retry failed ({}); \
                          samples at this level are unreliable (parabolic-band stall)",
-                        state.residual, band_gate, e,
+                        DisplayFloat(&state.residual),
+                        DisplayFloat(&band_gate),
+                        e,
                     ));
                 }
             }
@@ -360,7 +367,7 @@ fn setup_kouznetsov_core(
     b: &Complex,
     l_upper: Complex,
     l_lower: Complex,
-    prec: u32,
+    prec: u64,
     digits: u64,
     use_schwarz: bool,
     warm_guess: Option<&WarmGuess<'_>>,
@@ -378,13 +385,13 @@ fn setup_kouznetsov_core(
     {
         return Err("Kouznetsov core requires finite nondegenerate inputs".into());
     }
-    let ln_b = Complex::with_val(prec, b.ln_ref());
+    let ln_b = Complex::with_val_64(prec, b.ln_ref());
     // λ = (ln b)·L drives each side's decay rate. F → L_upper as t → +∞ like
     // λ_up^{it} (rate |arg λ_up|) and F → L_lower as t → −∞ (rate |arg λ_low|).
     // For Schwarz-conjugate pairs the two rates coincide; for asymmetric pairs
     // (cut bases) the smaller one is binding.
-    let lambda_upper = Complex::with_val(prec, &ln_b * &l_upper);
-    let lambda_lower = Complex::with_val(prec, &ln_b * &l_lower);
+    let lambda_upper = Complex::with_val_64(prec, &ln_b * &l_upper);
+    let lambda_lower = Complex::with_val_64(prec, &ln_b * &l_lower);
 
     // Decay rate of F → fixed point: ~ exp(-T·|arg(λ̄)|). Pick T so the tail
     // beyond ±T is below 10^{-(digits+8)}. Historically sized from λ_upper
@@ -405,15 +412,9 @@ fn setup_kouznetsov_core(
         .checked_mul(node_boost.max(1))
         .ok_or("Kouznetsov node count overflow")?;
 
-    // Both near-parabolic geometry and high requested precision can exceed
-    // this resource budget; neither establishes mathematical nonexistence.
-    const N_MAX_PRACTICAL: usize = 32_768;
-    if n_nodes > N_MAX_PRACTICAL {
-        return Err(format!(
-            "Kouznetsov: direct node budget exceeded (|arg(λ)|={:.4}); \
-             requires n_nodes={} > {}; no direct answer at this precision",
-            arg_lambda, n_nodes, N_MAX_PRACTICAL
-        ));
+    let fft_len = crate::fft::kernel_fft_len(n_nodes, prec)?;
+    if cnum::verbose() {
+        eprintln!("kouz resources: {n_nodes} nodes, FFT length {fft_len}, {prec} bits; allocating geometry");
     }
 
     let nodes = build_uniform_nodes(&t_max, n_nodes, prec);
@@ -422,13 +423,13 @@ fn setup_kouznetsov_core(
     if cnum::verbose() {
         eprintln!(
             "kouz setup: |arg(λ)|={:.4}  t_max={:.2}  n_nodes={}  L_upper={:.4}+{:.4}i  L_lower={:.4}+{:.4}i",
-            arg_lambda,
-            t_max,
+            DisplayFloat(&arg_lambda),
+            DisplayFloat(&t_max),
             n_nodes,
-            l_upper.real(),
-            l_upper.imag(),
-            l_lower.real(),
-            l_lower.imag(),
+            DisplayFloat(l_upper.real()),
+            DisplayFloat(l_upper.imag()),
+            DisplayFloat(l_lower.real()),
+            DisplayFloat(l_lower.imag()),
         );
     }
 
@@ -460,8 +461,9 @@ fn setup_kouznetsov_core(
     // by the cut-base path, where the cold guess sits outside the Newton
     // basin but a Schröder solve at a nearby ST-interior base is available.
     let warm_result: Option<Result<(Vec<Complex>, Float), String>> = warm_guess.map(|wg| {
-        let evaluate =
-            |t: &Float| wg(t).map_err(|e| format!("warm guess eval failed at t={t}: {e}"));
+        let evaluate = |t: &Float| {
+            wg(t).map_err(|e| format!("warm guess eval failed at t={}: {e}", DisplayFloat(t)))
+        };
         let winit_res: Result<Vec<Complex>, String> = if crate::mt::mt_enabled() {
             use rayon::prelude::*;
             nodes.par_iter().map(evaluate).collect()
@@ -591,7 +593,7 @@ fn setup_kouznetsov_core(
             for target in retry_targets {
                 let target = cnum::decimal(target, prec);
                 if debug_phase {
-                    eprintln!("kouz: retry with target_mid={}", target);
+                    eprintln!("kouz: retry with target_mid={}", DisplayFloat(&target));
                 }
                 let retry_init = make_initial(Some(&target));
                 match iterate_newton(
@@ -639,7 +641,7 @@ fn setup_kouznetsov_core(
     // such that F(δ) = 1, then for user height h evaluate F(h + δ). That maps
     // our (arbitrary-phase) F onto the natural F̃ via F̃(h) = F(h + δ).
     let shift = if skip_norm {
-        Complex::new(prec)
+        Complex::new_64(prec)
     } else {
         find_normalization_shift(
             &samples,
@@ -662,8 +664,8 @@ fn setup_kouznetsov_core(
         );
         eprintln!(
             "kouz normalization shift δ = {:.6e} + {:.6e}i (such that F(δ)=1)",
-            shift.real(),
-            shift.imag(),
+            DisplayFloat(shift.real()),
+            DisplayFloat(shift.imag()),
         );
     }
     Ok(KouznetsovState {
@@ -694,18 +696,19 @@ pub fn eval_kouznetsov(
     b: &Complex,
     h: &Complex,
 ) -> Result<Complex, String> {
+    cnum::init_mpfr();
     let prec = state.prec;
     if !cnum::is_finite(b) || !cnum::is_finite(h) || !state.normalized {
         return Err("Kouznetsov evaluation requires finite inputs and a normalized state".into());
     }
-    if state.ln_b != Complex::with_val(prec, b.ln_ref()) {
+    if state.ln_b != Complex::with_val_64(prec, b.ln_ref()) {
         return Err("Kouznetsov base does not match the cached state".into());
     }
     let required_residual = cnum::epsilon(state.digits.saturating_add(3), prec);
     if !state.residual.is_finite() || state.residual > required_residual {
         return Err(format!(
             "Kouznetsov boundary residual {} exceeds requested target {}; candidate state is not an answer",
-            state.residual, required_residual
+            DisplayFloat(&state.residual), DisplayFloat(&required_residual)
         ));
     }
     if state.samples.len() < 3
@@ -727,10 +730,10 @@ pub fn eval_kouznetsov(
     if h.imag().is_zero() && h.real().is_integer() && *h.real() <= -2 {
         return Err(format!(
             "integer height {} is undefined for tetration (would require log_b(0) and beyond)",
-            h.real()
+            DisplayFloat(h.real())
         ));
     }
-    let h_shifted = Complex::with_val(prec, h + &state.shift);
+    let h_shifted = Complex::with_val_64(prec, h + &state.shift);
     let f_h = eval_at_height(
         &h_shifted,
         &state.samples,
@@ -744,10 +747,9 @@ pub fn eval_kouznetsov(
         state.two_sided,
     )?;
 
-    // A finite value can have an overflowing successor. Check the predecessor
-    // instead, except at zero or the lower supported height-shift limit.
-    let forward = cnum::is_zero(&f_h) || *h_shifted.real() < 1 - CAUCHY_MAX_SHIFTS as i64;
-    let h_adjacent = Complex::with_val(prec, &h_shifted + if forward { 1 } else { -1 });
+    // A finite value can have an overflowing successor; prefer its predecessor.
+    let forward = cnum::is_zero(&f_h);
+    let h_adjacent = Complex::with_val_64(prec, &h_shifted + if forward { 1 } else { -1 });
     let f_adjacent = eval_at_height(
         &h_adjacent,
         &state.samples,
@@ -765,22 +767,23 @@ pub fn eval_kouznetsov(
     } else {
         (&f_adjacent, &f_h)
     };
-    let exp_arg = Complex::with_val(prec, before * &state.ln_b);
+    let exp_arg = Complex::with_val_64(prec, before * &state.ln_b);
     let b_pow_f = cnum::checked_exp(&exp_arg, prec)?;
-    let diff = Complex::with_val(prec, after - &b_pow_f);
-    let scale = cnum::abs(after, prec).max(&Float::with_val(prec, 1));
+    let diff = Complex::with_val_64(prec, after - &b_pow_f);
+    let scale = cnum::abs(after, prec).max(&Float::with_val_64(prec, 1));
     let rel = cnum::abs(&diff, prec) / scale;
     let tolerance = cnum::epsilon(state.digits, prec);
     if !cnum::is_finite(&f_h) || !rel.is_finite() || rel > tolerance {
         return Err(format!(
             "Kouznetsov functional-equation residual {} exceeds requested tolerance {}",
-            rel, tolerance
+            DisplayFloat(&rel),
+            DisplayFloat(&tolerance)
         ));
     }
     if cnum::verbose() {
         eprintln!(
             "kouz eval: functional-equation relative residual {} ({} step)",
-            rel,
+            DisplayFloat(&rel),
             if forward { "forward" } else { "backward" }
         );
     }
@@ -797,18 +800,18 @@ fn find_normalization_shift(
     l_upper: &Complex,
     l_lower: &Complex,
     ln_b: &Complex,
-    prec: u32,
+    prec: u64,
     digits: u64,
     real_axis: bool,
     two_sided: bool,
 ) -> Result<Complex, String> {
-    let one = Complex::with_val(prec, (1u32, 0));
-    let two = Float::with_val(prec, 2u32);
+    let one = Complex::with_val_64(prec, (1u32, 0));
+    let two = Float::with_val_64(prec, 2u32);
     // Cube-root rule for central FD: ε ≈ δ_f^(1/3) where δ_f is the working
     // precision. With δ_f ≈ 10^(-digits), ε ≈ 10^(-digits/3 - 3).
     let eps_f = cnum::epsilon(digits.saturating_add(8) / 3, prec);
-    let eps = Complex::with_val(prec, (eps_f.clone(), 0));
-    let two_eps = Complex::with_val(prec, (Float::with_val(prec, &eps_f * &two), 0));
+    let eps = Complex::with_val_64(prec, (eps_f.clone(), 0));
+    let two_eps = Complex::with_val_64(prec, (Float::with_val_64(prec, &eps_f * &two), 0));
 
     let debug_norm = cnum::verbose();
     let evaluate = |h: &Complex| {
@@ -829,16 +832,19 @@ fn find_normalization_shift(
     let target = cnum::epsilon(digits.saturating_add(3), prec);
     let finalize = |c: Complex| -> Result<Complex, String> {
         let result = if real_axis {
-            Complex::with_val(prec, (Float::with_val(prec, c.real()), Float::new(prec)))
+            Complex::with_val_64(
+                prec,
+                (Float::with_val_64(prec, c.real()), Float::new_64(prec)),
+            )
         } else {
             c
         };
         let value = evaluate(&result)?;
-        let residual = cnum::abs(&Complex::with_val(prec, value - &one), prec);
+        let residual = cnum::abs(&Complex::with_val_64(prec, value - &one), prec);
         if !cnum::is_finite(&result) || !residual.is_finite() || residual > target {
             return Err(format!(
                 "normalization of returned shift failed: residual {}",
-                residual
+                DisplayFloat(&residual)
             ));
         }
         Ok(result)
@@ -846,10 +852,12 @@ fn find_normalization_shift(
 
     let try_newton = |seed: &Complex| -> Result<(Complex, Float), String> {
         let mut c = seed.clone();
-        let mut best_resid = Float::with_val(prec, rug::float::Special::Infinity);
-        for _ in 0..40usize {
+        let mut best_resid = Float::with_val_64(prec, rug::float::Special::Infinity);
+        let mut checkpoint = c.clone();
+        let mut iter = Integer::new();
+        loop {
             let f_c = evaluate(&c)?;
-            let resid = Complex::with_val(prec, &f_c - &one);
+            let resid = Complex::with_val_64(prec, &f_c - &one);
             let resid_abs = cnum::abs(&resid, prec);
             if !resid_abs.is_finite() {
                 return Err("non-finite".into());
@@ -860,21 +868,34 @@ fn find_normalization_shift(
             if resid_abs < target {
                 return Ok((finalize(c)?, resid_abs));
             }
-            let c_plus = Complex::with_val(prec, &c + &eps);
-            let c_minus = Complex::with_val(prec, &c - &eps);
+            let c_plus = Complex::with_val_64(prec, &c + &eps);
+            let c_minus = Complex::with_val_64(prec, &c - &eps);
             let f_plus = evaluate(&c_plus)?;
             let f_minus = evaluate(&c_minus)?;
-            let diff = Complex::with_val(prec, &f_plus - &f_minus);
-            let derivative = Complex::with_val(prec, &diff / &two_eps);
+            let diff = Complex::with_val_64(prec, &f_plus - &f_minus);
+            let derivative = Complex::with_val_64(prec, &diff / &two_eps);
             if !cnum::is_finite(&derivative) || cnum::is_zero(&derivative) {
                 return Err("normalization derivative is zero or non-finite".into());
             }
-            let step = Complex::with_val(prec, &resid / &derivative);
-            c = Complex::with_val(prec, &c - &step);
+            let step = Complex::with_val_64(prec, &resid / &derivative);
+            c = Complex::with_val_64(prec, &c - &step);
+            if c == checkpoint {
+                break;
+            }
+            if iter.is_power_of_two() {
+                checkpoint = c.clone();
+            }
+            if debug_norm {
+                eprintln!(
+                    "kouz normalization iter {iter}: residual {:.3e}",
+                    DisplayFloat(&resid_abs)
+                );
+            }
+            iter += 1;
         }
         Err(format!(
             "normalization did not converge: best residual {}",
-            best_resid
+            DisplayFloat(&best_resid)
         ))
     };
 
@@ -884,8 +905,8 @@ fn find_normalization_shift(
         if debug_norm {
             eprintln!(
                 "kouz norm: Newton from c=0 converged to ({:.6},{:.6}i)",
-                c0.real(),
-                c0.imag(),
+                DisplayFloat(c0.real()),
+                DisplayFloat(c0.imag()),
             );
         }
         return Ok(c0);
@@ -918,9 +939,12 @@ fn find_normalization_shift(
     let mut roots: Vec<Root> = Vec::new();
     for &cr in &re_steps {
         for &ci in im_steps {
-            let seed = Complex::with_val(
+            let seed = Complex::with_val_64(
                 prec,
-                (Float::with_val(prec, cr) / 4, Float::with_val(prec, ci) / 4),
+                (
+                    Float::with_val_64(prec, cr) / 4,
+                    Float::with_val_64(prec, ci) / 4,
+                ),
             );
             match try_newton(&seed) {
                 Ok((c_root, _r)) => {
@@ -936,7 +960,7 @@ fn find_normalization_shift(
                 }
                 Err(why) => {
                     if debug_norm {
-                        eprintln!("kouz norm: seed {} failed: {}", seed, why);
+                        eprintln!("kouz norm: seed {} failed: {}", DisplayComplex(&seed), why);
                     }
                 }
             }
@@ -954,7 +978,9 @@ fn find_normalization_shift(
         if debug_norm {
             eprintln!(
                 "kouz norm: chose smallest-|c| Newton root ({:.6},{:.6}i) |c|={:.3e}",
-                chosen.re, chosen.im, chosen.abs,
+                DisplayFloat(&chosen.re),
+                DisplayFloat(&chosen.im),
+                DisplayFloat(&chosen.abs),
             );
         }
         return Ok(chosen.c);
@@ -966,11 +992,21 @@ fn find_normalization_shift(
         eprintln!("kouz norm: FAILURE landscape F̃(c):");
         for ci in [-2i32, -1, 0, 1, 2] {
             for cr in [-6i32, -3, 0, 3, 6] {
-                let c = Complex::with_val(
+                let c = Complex::with_val_64(
                     prec,
-                    (Float::with_val(prec, cr) / 4, Float::with_val(prec, ci)),
+                    (
+                        Float::with_val_64(prec, cr) / 4,
+                        Float::with_val_64(prec, ci),
+                    ),
                 );
-                eprintln!("  F({}) = {:?}", c, evaluate(&c));
+                match evaluate(&c) {
+                    Ok(value) => eprintln!(
+                        "  F({}) = Ok({})",
+                        DisplayComplex(&c),
+                        DisplayComplex(&value)
+                    ),
+                    Err(error) => eprintln!("  F({}) = Err({error:?})", DisplayComplex(&c)),
+                }
             }
         }
     }
@@ -978,7 +1014,7 @@ fn find_normalization_shift(
         "Kouznetsov normalization: no grid seed produced Newton-converged \
          root of F̃(c)=1 with target {:.3e}; no normalized value can be returned \
          by this solve. This is not proof that a mathematical solution is absent.",
-        target
+        DisplayFloat(&target)
     ))
 }
 
@@ -1000,49 +1036,59 @@ fn is_real_positive(b: &Complex) -> bool {
 ///
 /// f(z)  = b^z - z
 /// f'(z) = b^z · ln_b - 1
-fn newton_fixed_point(ln_b: &Complex, seed: &Complex, prec: u32) -> Result<Complex, String> {
-    let one = Complex::with_val(prec, (1, 0));
+fn newton_fixed_point(ln_b: &Complex, seed: &Complex, prec: u64) -> Result<Complex, String> {
+    let one = Complex::with_val_64(prec, (1, 0));
     // Target |f| < 2^-(prec - 16); leave a small guard so the loop terminates.
-    let target_tol = Float::with_val(prec, 1) >> prec.saturating_sub(16);
+    let target_tol = Float::with_val_64(prec, 1)
+        >> usize::try_from(prec.saturating_sub(16)).expect("precision exceeds addressable bits");
     if !cnum::is_finite(ln_b) || !cnum::is_finite(seed) {
         return Err("Newton fixed-point requires finite inputs".into());
     }
     let mut z = seed.clone();
-    for _ in 0..200 {
-        let arg = Complex::with_val(prec, &z * ln_b);
+    let mut checkpoint = z.clone();
+    let mut iter = Integer::new();
+    loop {
+        let arg = Complex::with_val_64(prec, &z * ln_b);
         let bz = cnum::checked_exp(&arg, prec)?;
-        let f = Complex::with_val(prec, &bz - &z);
-        let fabs = Float::with_val(prec, f.abs_ref());
+        let f = Complex::with_val_64(prec, &bz - &z);
+        let fabs = Float::with_val_64(prec, f.abs_ref());
         if fabs.is_finite() && fabs < target_tol {
             return Ok(z);
         }
         let fp = {
-            let t = Complex::with_val(prec, &bz * ln_b);
-            Complex::with_val(prec, &t - &one)
+            let t = Complex::with_val_64(prec, &bz * ln_b);
+            Complex::with_val_64(prec, &t - &one)
         };
         if !cnum::is_finite(&fp) || cnum::is_zero(&fp) {
             return Err("Newton fixed-point: derivative is zero or non-finite".into());
         }
-        let delta = Complex::with_val(prec, &f / &fp);
+        let delta = Complex::with_val_64(prec, &f / &fp);
         z -= &delta;
+        if z == checkpoint {
+            return Err("Newton fixed-point stagnation: repeated iterate".into());
+        }
+        if iter.is_power_of_two() {
+            checkpoint = z.clone();
+        }
+        iter += 1;
     }
-    Err("Newton fixed-point: did not converge in 200 iterations".into())
 }
 
-fn arg_abs(z: &Complex, prec: u32) -> Float {
-    Float::with_val(prec, z.arg_ref()).abs()
+fn arg_abs(z: &Complex, prec: u64) -> Float {
+    Float::with_val_64(prec, z.arg_ref()).abs()
 }
 
-fn contour_height(digits: u64, arg_lambda: &Float, prec: u32) -> Result<Float, String> {
-    if !arg_lambda.is_finite() || *arg_lambda <= cnum::decimal("1e-3", prec) {
+fn contour_height(digits: u64, arg_lambda: &Float, prec: u64) -> Result<Float, String> {
+    if !arg_lambda.is_finite() || *arg_lambda <= 0 {
         return Err(format!(
             "Kouznetsov: |arg(lambda)|={} gives a degenerate contour",
-            arg_lambda
+            DisplayFloat(arg_lambda)
         ));
     }
-    let height = (Float::with_val(prec, digits.saturating_add(8)) * Float::with_val(prec, 10).ln()
+    let height = (Float::with_val_64(prec, digits.saturating_add(8))
+        * Float::with_val_64(prec, 10).ln()
         / arg_lambda)
-        .max(&Float::with_val(prec, 8));
+        .max(&Float::with_val_64(prec, 8));
     if !height.is_finite() {
         return Err("Kouznetsov contour size exceeded the exponent range".into());
     }
@@ -1067,19 +1113,15 @@ fn contour_height(digits: u64, arg_lambda: &Float, prec: u32) -> Result<Float, S
 /// the previous formula did — the analyticity-strip geometry doesn't depend
 /// on it, and the t_max selection already absorbs `arg(λ)`'s effect on
 /// contour height.
-fn pick_node_count(digits: u64, t_max: &Float, prec: u32) -> Result<usize, String> {
-    let required = (Float::with_val(prec, digits.saturating_add(5))
-        * Float::with_val(prec, 10).ln()
+fn pick_node_count(digits: u64, t_max: &Float, prec: u64) -> Result<usize, String> {
+    let required = (Float::with_val_64(prec, digits.saturating_add(5))
+        * Float::with_val_64(prec, 10).ln()
         * t_max
         * 4u32
-        / Float::with_val(prec, Constant::Pi))
+        / Float::with_val_64(prec, Constant::Pi))
     .ceil();
-    let n_bulk = required
-        .to_integer()
-        .and_then(|v| v.to_usize())
-        .ok_or("Kouznetsov required node count exceeds the supported range")?;
-    // Hard floor: 80 nodes for reasonable resolution. Hard cap: 60k — beyond
-    // that the FFT-domain matvec gets prohibitive even at moderate precision.
+    let n_bulk = cnum::checked_usize(&required)
+        .ok_or("Kouznetsov required node count exceeds addressable memory")?;
     let clamped = n_bulk.max(80);
     // FFT-friendly snap. The cross-correlation pads to next_power_of_two(2N−1).
     // For N in [2^(k−1)+1, 2^k], that padded length is constant at 2^(k+1).
@@ -1091,14 +1133,14 @@ fn pick_node_count(digits: u64, t_max: &Float, prec: u32) -> Result<usize, Strin
         .ok_or("Kouznetsov FFT node count overflow".into())
 }
 
-fn build_uniform_nodes(t_max: &Float, n: usize, prec: u32) -> Vec<Float> {
-    let two_t = Float::with_val(prec, t_max * 2u32);
-    let delta = Float::with_val(prec, &two_t / ((n - 1) as u32));
+fn build_uniform_nodes(t_max: &Float, n: usize, prec: u64) -> Vec<Float> {
+    let two_t = Float::with_val_64(prec, t_max * 2u32);
+    let delta = Float::with_val_64(prec, &two_t / (n - 1));
     (0..n)
         .map(|k| {
-            Float::with_val(
+            Float::with_val_64(
                 prec,
-                -(t_max.clone()) + Float::with_val(prec, &delta * k as u32),
+                -(t_max.clone()) + Float::with_val_64(prec, &delta * k),
             )
         })
         .collect()
@@ -1113,35 +1155,35 @@ fn build_uniform_nodes(t_max: &Float, n: usize, prec: u32) -> Vec<Float> {
 /// this. But finite-precision LM steps can break it; symmetrizing each
 /// iterate keeps the iteration on the symmetric manifold (halves the effective
 /// problem dimension and prevents asymmetric drift modes from growing).
-fn symmetrize_schwarz(samples: &mut [Complex], prec: u32) {
+fn symmetrize_schwarz(samples: &mut [Complex], prec: u64) {
     let n = samples.len();
     let half = cnum::decimal("0.5", prec);
     for k in 0..n / 2 {
         let m = n - 1 - k;
-        let re_avg = Float::with_val(
+        let re_avg = Float::with_val_64(
             prec,
-            (Float::with_val(prec, samples[k].real() + samples[m].real())) * &half,
+            (Float::with_val_64(prec, samples[k].real() + samples[m].real())) * &half,
         );
-        let im_avg = Float::with_val(
+        let im_avg = Float::with_val_64(
             prec,
-            (Float::with_val(prec, samples[k].imag() - samples[m].imag())) * &half,
+            (Float::with_val_64(prec, samples[k].imag() - samples[m].imag())) * &half,
         );
-        let neg_im = Float::with_val(prec, -&im_avg);
-        samples[k] = Complex::with_val(prec, (re_avg.clone(), im_avg));
-        samples[m] = Complex::with_val(prec, (re_avg, neg_im));
+        let neg_im = Float::with_val_64(prec, -&im_avg);
+        samples[k] = Complex::with_val_64(prec, (re_avg.clone(), im_avg));
+        samples[m] = Complex::with_val_64(prec, (re_avg, neg_im));
     }
     // Middle node (if n is odd) must have purely real F.
     if n % 2 == 1 {
         let mid = n / 2;
-        let re = Float::with_val(prec, samples[mid].real());
-        samples[mid] = Complex::with_val(prec, (re, Float::new(prec)));
+        let re = Float::with_val_64(prec, samples[mid].real());
+        samples[mid] = Complex::with_val_64(prec, (re, Float::new_64(prec)));
     }
 }
 
-fn build_trapezoidal_weights(t_max: &Float, n: usize, prec: u32) -> Vec<Float> {
-    let two_t = Float::with_val(prec, t_max * 2u32);
-    let delta = Float::with_val(prec, &two_t / ((n - 1) as u32));
-    let half_delta = Float::with_val(prec, &delta / 2u32);
+fn build_trapezoidal_weights(t_max: &Float, n: usize, prec: u64) -> Vec<Float> {
+    let two_t = Float::with_val_64(prec, t_max * 2u32);
+    let delta = Float::with_val_64(prec, &two_t / (n - 1));
+    let half_delta = Float::with_val_64(prec, &delta / 2u32);
     let mut w = vec![delta.clone(); n];
     w[0] = half_delta.clone();
     w[n - 1] = half_delta;
@@ -1175,39 +1217,39 @@ fn build_trapezoidal_weights(t_max: &Float, n: usize, prec: u32) -> Vec<Float> {
 // regime, so K=10 is far inside the safe range.
 // =====================================================================
 
-/// `|B_{2k}| / (2k)` as an exact rational, expressed as `(numerator_str,
-/// denominator_str)` so we can fit Bernoulli numerators that overflow `u64`
-/// (k ≥ 18 do). Strings are parsed into `rug::Integer` at use time. Covers
-/// k=1..=20, which is enough margin to hit `10^-(digits+3)` floor up to
-/// digits ≈ 100 with `h ~ 10^-2`.
-fn em_coef_rational(k: usize) -> Option<(&'static str, &'static str)> {
-    match k {
-        1 => Some(("1", "12")),
-        2 => Some(("1", "120")),
-        3 => Some(("1", "252")),
-        4 => Some(("1", "240")),
-        5 => Some(("1", "132")),
-        6 => Some(("691", "32760")),
-        7 => Some(("1", "12")),
-        8 => Some(("3617", "8160")),
-        9 => Some(("43867", "14364")),
-        10 => Some(("174611", "6600")),
-        11 => Some(("854513", "3036")),
-        12 => Some(("236364091", "65520")),
-        13 => Some(("8553103", "156")),
-        14 => Some(("23749461029", "24360")),
-        15 => Some(("8615841276005", "429660")),
-        16 => Some(("7709321041217", "16320")),
-        17 => Some(("2577687858367", "204")),
-        18 => Some(("26315271553053477373", "69090840")),
-        19 => Some(("2929993913841559", "228")),
-        20 => Some(("261082718496449122051", "541200")),
-        _ => None,
+fn em_coefficients(n_terms: usize) -> Result<Arc<Vec<Rational>>, String> {
+    #[derive(Default)]
+    struct Cache {
+        row: Vec<Rational>,
+        coefficients: Arc<Vec<Rational>>,
     }
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    let size = n_terms
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(1))
+        .ok_or("Euler-Maclaurin coefficient count exceeds addressable memory")?;
+    std::alloc::Layout::array::<Rational>(size)
+        .map_err(|_| "Euler-Maclaurin coefficients exceed addressable memory")?;
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "Euler-Maclaurin coefficient cache is poisoned")?;
+    while cache.coefficients.len() < n_terms {
+        let m = cache.row.len();
+        cache.row.push(Rational::from((1, m + 1)));
+        // Akiyama-Tanigawa, with exact rationals throughout.
+        for j in (1..=m).rev() {
+            cache.row[j - 1] = Rational::from(&cache.row[j - 1] - &cache.row[j]) * j;
+        }
+        if m != 0 && m % 2 == 0 {
+            let coefficient = cache.row[0].clone().abs() / m;
+            Arc::make_mut(&mut cache.coefficients).push(coefficient);
+        }
+    }
+    Ok(Arc::clone(&cache.coefficients))
 }
 
-/// Pick how many EM terms to compute. We default to K=12 (the largest size
-/// our `em_coef_rational` table holds) because:
+/// Pick how many EM terms to compute, starting at K=12 because:
 ///
 /// * The closed-form derivative formula evaluates `1/(c±iT−z₀)^{2k}` —
 ///   when `z₀` sits near a boundary node `T_k ≈ ±T`, that denominator can
@@ -1225,48 +1267,44 @@ fn em_coef_rational(k: usize) -> Option<(&'static str, &'static str)> {
 /// Auto-pick: each additional EM term reduces the boundary-floor residual by
 /// ~2.5 decades (empirical at b=2, h ≈ 10^{-2}). K=12 reaches ~10^{-48} for
 /// digits=50; we need digits+3 of headroom, so scale K with digits beyond 30.
-fn em_n_terms(prec: u32) -> Result<usize, String> {
+fn em_n_terms(prec: u64) -> Result<usize, String> {
     if std::env::var_os("TET_KOUZ_NO_EM").is_some() {
         return Ok(0);
     }
-    let digits = u64::from(prec) * 30_103 / 100_000;
-    let extra = (digits.saturating_sub(30) / 5) as usize;
-    let requested = cnum::env_usize("TET_KOUZ_EM_K", (12 + extra).min(20))?;
-    if requested > 20 {
-        return Err("TET_KOUZ_EM_K exceeds the available 20 Euler-Maclaurin terms".into());
-    }
-    Ok(requested)
+    let digits = u128::from(prec) * 30_103 / 100_000;
+    let default = usize::try_from(12 + digits.saturating_sub(30) / 5)
+        .map_err(|_| "Euler-Maclaurin order exceeds addressable memory")?;
+    let n = cnum::env_usize("TET_KOUZ_EM_K", default)?;
+    cnum::check_complex_storage(n as u128, prec)
+        .map_err(|e| format!("Euler-Maclaurin order (TET_KOUZ_EM_K): {e}"))?;
+    Ok(n)
 }
 
 /// Pre-bake `[ -i · |B_{2k}|/(2k) · h^{2k} ]` for k=1..=K. The `-i` factor
 /// (from `(−i)^{2k−1} = (−1)^k · i` combined with the alternating sign of
 /// `B_{2k}`) simplifies to a uniform `-i` across all k.
-fn build_em_h_powers(h: &Float, n_terms: usize, prec: u32) -> Vec<Complex> {
+fn build_em_h_powers(h: &Float, n_terms: usize, prec: u64) -> Result<Vec<Complex>, String> {
     if n_terms == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let neg_i = Complex::with_val(prec, (Float::new(prec), Float::with_val(prec, -1i32)));
-    let h_sq = Float::with_val(prec, h * h);
+    cnum::check_complex_storage(n_terms as u128, prec)?;
+    let coefficients = em_coefficients(n_terms)?;
+    let neg_i = Complex::with_val_64(prec, (Float::new_64(prec), Float::with_val_64(prec, -1i32)));
+    let h_sq = Float::with_val_64(prec, h * h);
     let mut h_pow = h_sq.clone();
     let mut out = Vec::with_capacity(n_terms);
-    for k in 1..=n_terms {
-        let (num_str, den_str) =
-            em_coef_rational(k).expect("EM coefficient table exhausted (k > 20)");
-        let num_int =
-            rug::Integer::from_str_radix(num_str, 10).expect("valid Bernoulli numerator literal");
-        let den_int =
-            rug::Integer::from_str_radix(den_str, 10).expect("valid Bernoulli denominator literal");
-        let coef_real = Float::with_val(
-            prec,
-            Float::with_val(prec, &num_int) / Float::with_val(prec, &den_int),
-        );
-        let scaled = Float::with_val(prec, &coef_real * &h_pow);
-        out.push(Complex::with_val(prec, &neg_i * &scaled));
-        if k < n_terms {
-            h_pow = Float::with_val(prec, &h_pow * &h_sq);
+    for (k, coefficient) in coefficients.iter().take(n_terms).enumerate() {
+        let coef_real = Float::with_val_64(prec, coefficient);
+        let scaled = Float::with_val_64(prec, &coef_real * &h_pow);
+        if !scaled.is_finite() || scaled.is_zero() {
+            return Err("Euler-Maclaurin coefficient exceeded MPFR's exponent range".into());
+        }
+        out.push(Complex::with_val_64(prec, &neg_i * &scaled));
+        if k + 1 < n_terms {
+            h_pow = Float::with_val_64(prec, &h_pow * &h_sq);
         }
     }
-    out
+    Ok(out)
 }
 
 /// Closed-form Euler-Maclaurin correction for both edges at evaluation point
@@ -1280,32 +1318,32 @@ fn compute_em_correction_z0(
     l_upper: &Complex,
     l_lower: &Complex,
     em_h_powers: &[Complex],
-    prec: u32,
+    prec: u64,
 ) -> (Complex, Complex) {
     if em_h_powers.is_empty() {
         return (cnum::zero(prec), cnum::zero(prec));
     }
-    let cp1 = Complex::with_val(prec, (cnum::decimal("1.5", prec), 0));
-    let cm1 = Complex::with_val(prec, (cnum::decimal("-0.5", prec), 0));
-    let it_max = Complex::with_val(prec, (Float::new(prec), t_max.clone()));
-    let neg_it_max = Complex::with_val(prec, -&it_max);
+    let cp1 = Complex::with_val_64(prec, (cnum::decimal("1.5", prec), 0));
+    let cm1 = Complex::with_val_64(prec, (cnum::decimal("-0.5", prec), 0));
+    let it_max = Complex::with_val_64(prec, (Float::new_64(prec), t_max.clone()));
+    let neg_it_max = Complex::with_val_64(prec, -&it_max);
 
     // c±iT − z₀ for right edge (c=1.5) and left edge (c=−0.5).
-    let c_r = Complex::with_val(prec, &cp1 - z0);
-    let c_l = Complex::with_val(prec, &cm1 - z0);
-    let cr_pos = Complex::with_val(prec, &c_r + &it_max);
-    let cr_neg = Complex::with_val(prec, &c_r + &neg_it_max);
-    let cl_pos = Complex::with_val(prec, &c_l + &it_max);
-    let cl_neg = Complex::with_val(prec, &c_l + &neg_it_max);
+    let c_r = Complex::with_val_64(prec, &cp1 - z0);
+    let c_l = Complex::with_val_64(prec, &cm1 - z0);
+    let cr_pos = Complex::with_val_64(prec, &c_r + &it_max);
+    let cr_neg = Complex::with_val_64(prec, &c_r + &neg_it_max);
+    let cl_pos = Complex::with_val_64(prec, &c_l + &it_max);
+    let cl_neg = Complex::with_val_64(prec, &c_l + &neg_it_max);
 
     // (c±iT−z₀)² — incremental power update inside the loop multiplies by
     // these to advance from (c±iT−z₀)^{2k} to (c±iT−z₀)^{2(k+1)}.
-    let cr_pos_sq = Complex::with_val(prec, &cr_pos * &cr_pos);
-    let cr_neg_sq = Complex::with_val(prec, &cr_neg * &cr_neg);
-    let cl_pos_sq = Complex::with_val(prec, &cl_pos * &cl_pos);
-    let cl_neg_sq = Complex::with_val(prec, &cl_neg * &cl_neg);
+    let cr_pos_sq = Complex::with_val_64(prec, &cr_pos * &cr_pos);
+    let cr_neg_sq = Complex::with_val_64(prec, &cr_neg * &cr_neg);
+    let cl_pos_sq = Complex::with_val_64(prec, &cl_pos * &cl_pos);
+    let cl_neg_sq = Complex::with_val_64(prec, &cl_neg * &cl_neg);
 
-    let one_c = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+    let one_c = Complex::with_val_64(prec, (Float::with_val_64(prec, 1u32), 0));
     let mut pr_pos = one_c.clone();
     let mut pr_neg = one_c.clone();
     let mut pl_pos = one_c.clone();
@@ -1314,22 +1352,22 @@ fn compute_em_correction_z0(
     let mut corr_r = cnum::zero(prec);
     let mut corr_l = cnum::zero(prec);
     for coef in em_h_powers {
-        pr_pos = Complex::with_val(prec, &pr_pos * &cr_pos_sq);
-        pr_neg = Complex::with_val(prec, &pr_neg * &cr_neg_sq);
-        pl_pos = Complex::with_val(prec, &pl_pos * &cl_pos_sq);
-        pl_neg = Complex::with_val(prec, &pl_neg * &cl_neg_sq);
+        pr_pos = Complex::with_val_64(prec, &pr_pos * &cr_pos_sq);
+        pr_neg = Complex::with_val_64(prec, &pr_neg * &cr_neg_sq);
+        pl_pos = Complex::with_val_64(prec, &pl_pos * &cl_pos_sq);
+        pl_neg = Complex::with_val_64(prec, &pl_neg * &cl_neg_sq);
 
-        let r_pos = Complex::with_val(prec, l_upper / &pr_pos);
-        let r_neg = Complex::with_val(prec, l_lower / &pr_neg);
-        let r_diff = Complex::with_val(prec, &r_pos - &r_neg);
-        let r_term = Complex::with_val(prec, &r_diff * coef);
-        corr_r = Complex::with_val(prec, &corr_r + &r_term);
+        let r_pos = Complex::with_val_64(prec, l_upper / &pr_pos);
+        let r_neg = Complex::with_val_64(prec, l_lower / &pr_neg);
+        let r_diff = Complex::with_val_64(prec, &r_pos - &r_neg);
+        let r_term = Complex::with_val_64(prec, &r_diff * coef);
+        corr_r = Complex::with_val_64(prec, &corr_r + &r_term);
 
-        let l_pos = Complex::with_val(prec, l_upper / &pl_pos);
-        let l_neg = Complex::with_val(prec, l_lower / &pl_neg);
-        let l_diff = Complex::with_val(prec, &l_pos - &l_neg);
-        let l_term = Complex::with_val(prec, &l_diff * coef);
-        corr_l = Complex::with_val(prec, &corr_l + &l_term);
+        let l_pos = Complex::with_val_64(prec, l_upper / &pl_pos);
+        let l_neg = Complex::with_val_64(prec, l_lower / &pl_neg);
+        let l_diff = Complex::with_val_64(prec, &l_pos - &l_neg);
+        let l_term = Complex::with_val_64(prec, &l_diff * coef);
+        corr_l = Complex::with_val_64(prec, &corr_l + &l_term);
     }
     (corr_r, corr_l)
 }
@@ -1340,7 +1378,7 @@ fn initial_guess_with_target(
     l_upper: &Complex,
     l_lower: &Complex,
     arg_lambda: &Float,
-    prec: u32,
+    prec: u64,
     target_mid_override: Option<&Float>,
 ) -> Vec<Complex> {
     // Smooth shape combining three pieces:
@@ -1359,10 +1397,10 @@ fn initial_guess_with_target(
     //     to the initial guess overshoots by orders of magnitude due to b^F's
     //     exponential amplification at right-edge samples.
     let half = cnum::decimal("0.5", prec);
-    let one = Float::with_val(prec, 1u32);
-    let rate = Float::with_val(prec, arg_lambda);
+    let one = Float::with_val_64(prec, 1u32);
+    let rate = Float::with_val_64(prec, arg_lambda);
     let sqrt_b = {
-        let half_c = Complex::with_val(prec, (half.clone(), 0));
+        let half_c = Complex::with_val_64(prec, (half.clone(), 0));
         cnum::pow_complex(b, &half_c, prec)
     };
     // Cap on |target_mid|. Empirically, the converged F̃[mid] = F̃(0+0i) for
@@ -1385,40 +1423,41 @@ fn initial_guess_with_target(
     // generically off the real axis — get a non-zero target.
     let sqrt_b_abs = cnum::abs(&sqrt_b, prec);
     let b_abs = cnum::abs(b, prec);
-    let cap = (cnum::decimal("1.5", prec) - (b_abs.ln() - 2u32).max(&Float::new(prec)) / 10u32)
+    let cap = (cnum::decimal("1.5", prec) - (b_abs.ln() - 2u32).max(&Float::new_64(prec)) / 10u32)
         .max(&cnum::decimal("0.7", prec))
         .min(&cnum::decimal("1.5", prec));
     let target_mid = if let Some(override_val) = target_mid_override {
         // Explicit override for retry attempts (multi-start strategy).
-        let dir = Complex::with_val(prec, &sqrt_b / &sqrt_b_abs);
-        Complex::with_val(prec, &dir * Float::with_val(prec, override_val))
+        let dir = Complex::with_val_64(prec, &sqrt_b / &sqrt_b_abs);
+        Complex::with_val_64(prec, &dir * Float::with_val_64(prec, override_val))
     } else if sqrt_b_abs <= cap {
         sqrt_b.clone()
     } else {
-        let scale = Float::with_val(prec, cap / sqrt_b_abs);
-        Complex::with_val(prec, &sqrt_b * &scale)
+        let scale = Float::with_val_64(prec, cap / sqrt_b_abs);
+        Complex::with_val_64(prec, &sqrt_b * &scale)
     };
     let mid = {
-        let two = Float::with_val(prec, 2u32);
-        let sum = Complex::with_val(prec, l_upper + l_lower);
-        Complex::with_val(prec, &sum / &two)
+        let two = Float::with_val_64(prec, 2u32);
+        let sum = Complex::with_val_64(prec, l_upper + l_lower);
+        Complex::with_val_64(prec, &sum / &two)
     };
-    let bump_ampl = Complex::with_val(prec, &target_mid - &mid);
+    let bump_ampl = Complex::with_val_64(prec, &target_mid - &mid);
 
     nodes
         .iter()
         .map(|t| {
-            let scaled_t = Float::with_val(prec, &rate * t);
-            let tanh_t = Float::with_val(prec, scaled_t.tanh_ref());
-            let w_upper = Float::with_val(prec, (Float::with_val(prec, &one + &tanh_t)) * &half);
-            let w_lower = Float::with_val(prec, &one - &w_upper);
-            let scaled_upper = Complex::with_val(prec, l_upper * &w_upper);
-            let scaled_lower = Complex::with_val(prec, l_lower * &w_lower);
-            let asymp = Complex::with_val(prec, &scaled_upper + &scaled_lower);
-            let cosh_t = Float::with_val(prec, scaled_t.cosh_ref());
-            let sech_t = Float::with_val(prec, &one / &cosh_t);
-            let bump = Complex::with_val(prec, &bump_ampl * &sech_t);
-            Complex::with_val(prec, &asymp + &bump)
+            let scaled_t = Float::with_val_64(prec, &rate * t);
+            let tanh_t = Float::with_val_64(prec, scaled_t.tanh_ref());
+            let w_upper =
+                Float::with_val_64(prec, (Float::with_val_64(prec, &one + &tanh_t)) * &half);
+            let w_lower = Float::with_val_64(prec, &one - &w_upper);
+            let scaled_upper = Complex::with_val_64(prec, l_upper * &w_upper);
+            let scaled_lower = Complex::with_val_64(prec, l_lower * &w_lower);
+            let asymp = Complex::with_val_64(prec, &scaled_upper + &scaled_lower);
+            let cosh_t = Float::with_val_64(prec, scaled_t.cosh_ref());
+            let sech_t = Float::with_val_64(prec, &one / &cosh_t);
+            let bump = Complex::with_val_64(prec, &bump_ampl * &sech_t);
+            Complex::with_val_64(prec, &asymp + &bump)
         })
         .collect()
 }
@@ -1468,17 +1507,17 @@ fn unwrapped_ln_samples(
     l_upper: &Complex,
     l_lower: &Complex,
     ln_b: &Complex,
-    prec: u32,
+    prec: u64,
     two_sided: bool,
 ) -> Vec<Complex> {
     let n = samples.len();
     if !two_sided {
         return samples
             .iter()
-            .map(|s| Complex::with_val(prec, s.ln_ref()))
+            .map(|s| Complex::with_val_64(prec, s.ln_ref()))
             .collect();
     }
-    let two_pi = Float::with_val(prec, Constant::Pi) * 2u32;
+    let two_pi = Float::with_val_64(prec, Constant::Pi) * 2u32;
     let debug = cnum::verbose() && std::env::var_os("TET_KOUZ_UNWRAP_DEBUG").is_some();
     // Joint between the two anchored walks: fixed mid index (samples are
     // ordered bottom→top; nodes near n/2 sit mid-curve where |F| is
@@ -1486,40 +1525,40 @@ fn unwrapped_ln_samples(
     let joint = n / 2;
     let mut any_nonzero = false;
     // Top half [joint..n): walk down from the ln_b·L_up anchor.
-    let top_anchor = Complex::with_val(prec, ln_b * l_upper);
+    let top_anchor = Complex::with_val_64(prec, ln_b * l_upper);
     let mut ref_im = top_anchor.imag().clone();
     let mut top: Vec<Complex> = Vec::with_capacity(n - joint);
     for sample in samples[joint..n].iter().rev() {
-        let pl = Complex::with_val(prec, sample.ln_ref());
+        let pl = Complex::with_val_64(prec, sample.ln_ref());
         let pl_im = pl.imag();
         let k = ((ref_im - pl_im) / &two_pi).round();
         let adjusted = if k.is_zero() {
             pl
         } else {
             any_nonzero = true;
-            let delta = Float::with_val(prec, &two_pi * &Float::with_val(prec, k));
-            let delta_c = Complex::with_val(prec, (Float::new(prec), delta));
-            Complex::with_val(prec, &pl + &delta_c)
+            let delta = Float::with_val_64(prec, &two_pi * &Float::with_val_64(prec, k));
+            let delta_c = Complex::with_val_64(prec, (Float::new_64(prec), delta));
+            Complex::with_val_64(prec, &pl + &delta_c)
         };
         ref_im = adjusted.imag().clone();
         top.push(adjusted);
     }
     top.reverse();
     // Bottom half [0..joint): walk up from the ln_b·L_low anchor.
-    let bot_anchor = Complex::with_val(prec, ln_b * l_lower);
+    let bot_anchor = Complex::with_val_64(prec, ln_b * l_lower);
     let mut ref_im = bot_anchor.imag().clone();
     let mut out: Vec<Complex> = Vec::with_capacity(n);
     for sample in samples.iter().take(joint) {
-        let pl = Complex::with_val(prec, sample.ln_ref());
+        let pl = Complex::with_val_64(prec, sample.ln_ref());
         let pl_im = pl.imag();
         let k = ((ref_im - pl_im) / &two_pi).round();
         let adjusted = if k.is_zero() {
             pl
         } else {
             any_nonzero = true;
-            let delta = Float::with_val(prec, &two_pi * &Float::with_val(prec, k));
-            let delta_c = Complex::with_val(prec, (Float::new(prec), delta));
-            Complex::with_val(prec, &pl + &delta_c)
+            let delta = Float::with_val_64(prec, &two_pi * &Float::with_val_64(prec, k));
+            let delta_c = Complex::with_val_64(prec, (Float::new_64(prec), delta));
+            Complex::with_val_64(prec, &pl + &delta_c)
         };
         ref_im = adjusted.imag().clone();
         out.push(adjusted);
@@ -1530,18 +1569,20 @@ fn unwrapped_ln_samples(
         // iterate; the error stays localized at the joint node (see doc).
         let lo_im = out[joint.saturating_sub(1)].imag();
         let hi_im = out[joint.min(n - 1)].imag();
-        let m = (Float::with_val(prec, hi_im - lo_im) / &two_pi).round();
+        let m = (Float::with_val_64(prec, hi_im - lo_im) / &two_pi).round();
         let mut n_dev = 0usize;
         for (u, s) in out.iter().zip(samples.iter()) {
-            let pl = Complex::with_val(prec, s.ln_ref());
-            let d = cnum::abs(&Complex::with_val(prec, u - &pl), prec);
+            let pl = Complex::with_val_64(prec, s.ln_ref());
+            let d = cnum::abs(&Complex::with_val_64(prec, u - &pl), prec);
             if d > 1 {
                 n_dev += 1;
             }
         }
         eprintln!(
             "kouz unwrap: joint winding m = {}, {} nodes branch-corrected (of {})",
-            m, n_dev, n
+            DisplayFloat(&m),
+            n_dev,
+            n
         );
     }
     out
@@ -1582,34 +1623,34 @@ fn cauchy_eval(
     l_upper: &Complex,
     l_lower: &Complex,
     ln_b: &Complex,
-    prec: u32,
+    prec: u64,
     two_sided: bool,
 ) -> Result<Complex, String> {
     validate_cauchy_data(samples, nodes, weights, t_max, ln_b)?;
-    let cp1 = Complex::with_val(prec, (cnum::decimal("1.5", prec), 0));
-    let cm1 = Complex::with_val(prec, (cnum::decimal("-0.5", prec), 0));
+    let cp1 = Complex::with_val_64(prec, (cnum::decimal("1.5", prec), 0));
+    let cm1 = Complex::with_val_64(prec, (cnum::decimal("-0.5", prec), 0));
     let ln_unwrapped = unwrapped_ln_samples(samples, l_upper, l_lower, ln_b, prec, two_sided);
 
     let mut r_int = cnum::zero(prec);
     let mut l_int = cnum::zero(prec);
     for k in 0..nodes.len() {
-        let it = Complex::with_val(prec, (Float::new(prec), nodes[k].clone()));
+        let it = Complex::with_val_64(prec, (Float::new_64(prec), nodes[k].clone()));
 
         // F(c+1+it_k) = b^samples[k] = exp(ln_b · F)
-        let exp_arg = Complex::with_val(prec, ln_b * &samples[k]);
+        let exp_arg = Complex::with_val_64(prec, ln_b * &samples[k]);
         let b_f = cnum::checked_exp(&exp_arg, prec)?;
-        let cp1_plus_it = Complex::with_val(prec, &cp1 + &it);
-        let denom_r = Complex::with_val(prec, &cp1_plus_it - z0);
-        let term_r = Complex::with_val(prec, &b_f / &denom_r);
-        r_int += Complex::with_val(prec, &term_r * &weights[k]);
+        let cp1_plus_it = Complex::with_val_64(prec, &cp1 + &it);
+        let denom_r = Complex::with_val_64(prec, &cp1_plus_it - z0);
+        let term_r = Complex::with_val_64(prec, &b_f / &denom_r);
+        r_int += Complex::with_val_64(prec, &term_r * &weights[k]);
 
         // F(c-1+it_k) = log_b(samples[k]) = ln(F) / ln_b, with the branch of
         // ln(F) unwrapped along the sample curve (anchored at ln_b·L_up).
-        let log_b_s = Complex::with_val(prec, &ln_unwrapped[k] / ln_b);
-        let cm1_plus_it = Complex::with_val(prec, &cm1 + &it);
-        let denom_l = Complex::with_val(prec, &cm1_plus_it - z0);
-        let term_l = Complex::with_val(prec, &log_b_s / &denom_l);
-        l_int += Complex::with_val(prec, &term_l * &weights[k]);
+        let log_b_s = Complex::with_val_64(prec, &ln_unwrapped[k] / ln_b);
+        let cm1_plus_it = Complex::with_val_64(prec, &cm1 + &it);
+        let denom_l = Complex::with_val_64(prec, &cm1_plus_it - z0);
+        let term_l = Complex::with_val_64(prec, &log_b_s / &denom_l);
+        l_int += Complex::with_val_64(prec, &term_l * &weights[k]);
     }
 
     // Euler-Maclaurin boundary correction. The trapezoidal sums above have
@@ -1621,48 +1662,48 @@ fn cauchy_eval(
     // per-row precomputation that `apply_t_fft` does — but the cost (one
     // power-of-2 sequence times K terms) is O(K) MPC ops, negligible.
     let h = if nodes.len() >= 2 {
-        Float::with_val(prec, &nodes[1] - &nodes[0])
+        Float::with_val_64(prec, &nodes[1] - &nodes[0])
     } else {
-        Float::with_val(prec, 1u32)
+        Float::with_val_64(prec, 1u32)
     };
     let n_terms = em_n_terms(prec)?;
-    let em_h_powers = build_em_h_powers(&h, n_terms, prec);
+    let em_h_powers = build_em_h_powers(&h, n_terms, prec)?;
     let (corr_r, corr_l) =
         compute_em_correction_z0(z0, t_max, l_upper, l_lower, &em_h_powers, prec);
-    let r_int = Complex::with_val(prec, &r_int - &corr_r);
-    let l_int = Complex::with_val(prec, &l_int - &corr_l);
+    let r_int = Complex::with_val_64(prec, &r_int - &corr_r);
+    let l_int = Complex::with_val_64(prec, &l_int - &corr_l);
 
     // Top edge contributes L̄ · ln((c-1+iT-z0)/(c+1+iT-z0)).
-    let it_max = Complex::with_val(prec, (Float::new(prec), t_max.clone()));
-    let neg_it_max = Complex::with_val(prec, -&it_max);
-    let cm1_plus_itmax = Complex::with_val(prec, &cm1 + &it_max);
-    let cp1_plus_itmax = Complex::with_val(prec, &cp1 + &it_max);
-    let top_num = Complex::with_val(prec, &cm1_plus_itmax - z0);
-    let top_den = Complex::with_val(prec, &cp1_plus_itmax - z0);
-    let top_ratio = Complex::with_val(prec, &top_num / &top_den);
-    let ln_top = Complex::with_val(prec, top_ratio.ln_ref());
+    let it_max = Complex::with_val_64(prec, (Float::new_64(prec), t_max.clone()));
+    let neg_it_max = Complex::with_val_64(prec, -&it_max);
+    let cm1_plus_itmax = Complex::with_val_64(prec, &cm1 + &it_max);
+    let cp1_plus_itmax = Complex::with_val_64(prec, &cp1 + &it_max);
+    let top_num = Complex::with_val_64(prec, &cm1_plus_itmax - z0);
+    let top_den = Complex::with_val_64(prec, &cp1_plus_itmax - z0);
+    let top_ratio = Complex::with_val_64(prec, &top_num / &top_den);
+    let ln_top = Complex::with_val_64(prec, top_ratio.ln_ref());
 
     // Bottom edge contributes L · ln((c+1-iT-z0)/(c-1-iT-z0)).
-    let cp1_minus_itmax = Complex::with_val(prec, &cp1 + &neg_it_max);
-    let cm1_minus_itmax = Complex::with_val(prec, &cm1 + &neg_it_max);
-    let bot_num = Complex::with_val(prec, &cp1_minus_itmax - z0);
-    let bot_den = Complex::with_val(prec, &cm1_minus_itmax - z0);
-    let bot_ratio = Complex::with_val(prec, &bot_num / &bot_den);
-    let ln_bot = Complex::with_val(prec, bot_ratio.ln_ref());
+    let cp1_minus_itmax = Complex::with_val_64(prec, &cp1 + &neg_it_max);
+    let cm1_minus_itmax = Complex::with_val_64(prec, &cm1 + &neg_it_max);
+    let bot_num = Complex::with_val_64(prec, &cp1_minus_itmax - z0);
+    let bot_den = Complex::with_val_64(prec, &cm1_minus_itmax - z0);
+    let bot_ratio = Complex::with_val_64(prec, &bot_num / &bot_den);
+    let ln_bot = Complex::with_val_64(prec, bot_ratio.ln_ref());
 
-    let pi_f = Float::with_val(prec, rug::float::Constant::Pi);
-    let two_pi_f = Float::with_val(prec, &pi_f * 2u32);
-    let two_pi_i = Complex::with_val(prec, (Float::new(prec), two_pi_f.clone()));
+    let pi_f = Float::with_val_64(prec, rug::float::Constant::Pi);
+    let two_pi_f = Float::with_val_64(prec, &pi_f * 2u32);
+    let two_pi_i = Complex::with_val_64(prec, (Float::new_64(prec), two_pi_f.clone()));
 
-    let diff = Complex::with_val(prec, &r_int - &l_int);
-    let part1 = Complex::with_val(prec, &diff / &two_pi_f);
+    let diff = Complex::with_val_64(prec, &r_int - &l_int);
+    let part1 = Complex::with_val_64(prec, &diff / &two_pi_f);
 
-    let up_term = Complex::with_val(prec, l_upper * &ln_top);
-    let dn_term = Complex::with_val(prec, l_lower * &ln_bot);
-    let upper_lower_sum = Complex::with_val(prec, &up_term + &dn_term);
-    let part2 = Complex::with_val(prec, &upper_lower_sum / &two_pi_i);
+    let up_term = Complex::with_val_64(prec, l_upper * &ln_top);
+    let dn_term = Complex::with_val_64(prec, l_lower * &ln_bot);
+    let upper_lower_sum = Complex::with_val_64(prec, &up_term + &dn_term);
+    let part2 = Complex::with_val_64(prec, &upper_lower_sum / &two_pi_i);
 
-    let result = Complex::with_val(prec, &part1 + &part2);
+    let result = Complex::with_val_64(prec, &part1 + &part2);
     if !cnum::is_finite(&result) {
         return Err("Cauchy reconstruction produced a non-finite value".into());
     }
@@ -1679,12 +1720,12 @@ fn apply_t(
     l_upper: &Complex,
     l_lower: &Complex,
     ln_b: &Complex,
-    prec: u32,
+    prec: u64,
     two_sided: bool,
 ) -> Result<Vec<Complex>, String> {
     let mut out = Vec::with_capacity(nodes.len());
     for k in 0..nodes.len() {
-        let z0 = Complex::with_val(prec, (cnum::decimal("0.5", prec), nodes[k].clone()));
+        let z0 = Complex::with_val_64(prec, (cnum::decimal("0.5", prec), nodes[k].clone()));
         out.push(cauchy_eval(
             &z0, samples, nodes, weights, t_max, l_upper, l_lower, ln_b, prec, two_sided,
         )?);
@@ -1715,45 +1756,49 @@ fn iterate_anderson(
     l_upper: &Complex,
     l_lower: &Complex,
     ln_b: &Complex,
-    prec: u32,
+    prec: u64,
     digits: u64,
     use_schwarz: bool,
     two_sided: bool,
 ) -> Result<(Vec<Complex>, Float), String> {
     let n = initial.len();
     let n_int = n - 2; // number of interior samples that actually iterate
-    let max_iters = 400usize;
     let target = cnum::epsilon(digits.saturating_add(3), prec);
     let debug = cnum::verbose();
 
     let depth = cnum::env_usize("TET_KOUZ_ANDERSON_DEPTH", 8)?;
     let beta = cnum::env_float("TET_KOUZ_ANDERSON_BETA", "1", prec)?;
-    if beta <= 0 || beta > 1 || depth == 0 || depth > 100 {
-        return Err("Anderson requires 0 < beta <= 1 and 1 <= depth <= 100".into());
+    if beta <= 0 || beta > 1 || depth == 0 {
+        return Err("Anderson requires 0 < beta <= 1 and positive depth".into());
     }
 
     let mut x = initial;
-    let mut prev_residual = Float::with_val(prec, rug::float::Special::Infinity);
-    let mut stagnation = 0u32;
-    let mut iters_since_best = 0u32;
     let mut best_x = x.clone();
-    let mut best_residual = Float::with_val(prec, rug::float::Special::Infinity);
+    let mut best_residual = Float::with_val_64(prec, rug::float::Special::Infinity);
 
     // History of Δx[k] and Δr[k] (interior samples flattened as 1D vector).
     let mut hist_dx: Vec<Vec<Complex>> = Vec::new();
     let mut hist_dr: Vec<Vec<Complex>> = Vec::new();
     let mut prev_x_int: Option<Vec<Complex>> = None;
     let mut prev_r_int: Option<Vec<Complex>> = None;
+    let mut checkpoint = (
+        x.clone(),
+        hist_dx.clone(),
+        hist_dr.clone(),
+        prev_x_int.clone(),
+        prev_r_int.clone(),
+    );
+    let mut iter = Integer::new();
 
-    for iter in 0..max_iters {
+    loop {
         let f = apply_t(
             &x, nodes, weights, t_max, l_upper, l_lower, ln_b, prec, two_sided,
         )?;
         let mut r_int: Vec<Complex> = Vec::with_capacity(n_int);
         let mut x_int: Vec<Complex> = Vec::with_capacity(n_int);
-        let mut r_norm = Float::new(prec);
+        let mut r_norm = Float::new_64(prec);
         for i in 1..n - 1 {
-            let d = Complex::with_val(prec, &f[i] - &x[i]);
+            let d = Complex::with_val_64(prec, &f[i] - &x[i]);
             let m = cnum::abs(&d, prec);
             if !m.is_finite() {
                 return Err(format!("Anderson residual is non-finite at sample {}", i));
@@ -1765,21 +1810,19 @@ fn iterate_anderson(
             x_int.push(x[i].clone());
         }
 
-        if r_norm < Float::with_val(prec, &best_residual * cnum::decimal("0.999999999", prec)) {
+        if r_norm < best_residual {
             best_residual = r_norm.clone();
             best_x = x.clone();
-            iters_since_best = 0;
-        } else {
-            iters_since_best += 1;
         }
 
-        if debug && (iter < 10 || iter % 25 == 0) {
+        if debug && (iter < 10 || iter.is_divisible_u(25)) {
             let mid_idx = nodes.len() / 2;
             let xm_re = x[mid_idx].real();
             let xm_im = x[mid_idx].imag();
             eprintln!(
                 "kouz Anderson iter {:>4}: ‖r‖∞ = {:.3e}  depth={}  F(0.5)≈{:.4}+{:.4}i  best={:.3e}  (target {:.3e})",
-                iter, r_norm, hist_dx.len(), xm_re, xm_im, best_residual, target
+                iter, DisplayFloat(&r_norm), hist_dx.len(), DisplayFloat(xm_re),
+                DisplayFloat(xm_im), DisplayFloat(&best_residual), DisplayFloat(&target)
             );
         }
 
@@ -1792,7 +1835,8 @@ fn iterate_anderson(
                 if debug {
                     eprintln!(
                         "kouz Anderson: residual non-finite at iter {}; returning best ({:.3e})",
-                        iter, best_residual
+                        iter,
+                        DisplayFloat(&best_residual)
                     );
                 }
                 return Ok((best_x, best_residual));
@@ -1802,38 +1846,6 @@ fn iterate_anderson(
                 iter
             ));
         }
-        // Anderson typically descends fast then oscillates near the floor.
-        // Two stop signals:
-        //   * `stagnation` — consecutive monotonic-no-progress iterations
-        //     (only triggers when Anderson genuinely flatlines).
-        //   * `iters_since_best` — iterations since `best_residual` improved
-        //     (catches oscillating-but-not-improving cases, where Anderson
-        //     swings above and below the best without ever beating it).
-        if r_norm > Float::with_val(prec, &prev_residual * cnum::decimal("0.999", prec)) {
-            stagnation += 1;
-            if stagnation > 6 {
-                if debug {
-                    eprintln!(
-                        "kouz Anderson: monotonic stagnation at iter {}, returning best ({:.3e})",
-                        iter, best_residual
-                    );
-                }
-                return Ok((best_x, best_residual));
-            }
-        } else {
-            stagnation = 0;
-        }
-        if iters_since_best > 30 {
-            if debug {
-                eprintln!(
-                    "kouz Anderson: best-stagnation at iter {} (no improvement for 30 iters), returning best ({:.3e})",
-                    iter, best_residual
-                );
-            }
-            return Ok((best_x, best_residual));
-        }
-        prev_residual = r_norm.clone();
-
         // Adaptive mixing: when residual is large the operator is far from
         // its fixed point and a full step (β=1) easily overshoots into log/exp
         // overflow territory. Damp aggressively until r is back below O(0.1),
@@ -1864,8 +1876,8 @@ fn iterate_anderson(
             let mut dx: Vec<Complex> = Vec::with_capacity(n_int);
             let mut dr: Vec<Complex> = Vec::with_capacity(n_int);
             for i in 0..n_int {
-                dx.push(Complex::with_val(prec, &x_int[i] - &prev_x[i]));
-                dr.push(Complex::with_val(prec, &r_int[i] - &prev_r[i]));
+                dx.push(Complex::with_val_64(prec, &x_int[i] - &prev_x[i]));
+                dr.push(Complex::with_val_64(prec, &r_int[i] - &prev_r[i]));
             }
             hist_dx.push(dx);
             hist_dr.push(dr);
@@ -1880,6 +1892,7 @@ fn iterate_anderson(
         // Solve small LS: γ = argmin ‖Δr · γ − r_int‖² (least-squares).
         // Build normal equations (m×m): A_ij = <Δr_j, Δr_i>, b_i = <Δr_i, r_int>.
         let m = hist_dr.len();
+        cnum::check_complex_storage((m as u128 + 1) * m as u128, prec)?;
         let mut gamma: Vec<Complex> = vec![cnum::zero(prec); m];
         if m > 0 {
             let mut a: Vec<Vec<Complex>> = vec![vec![cnum::zero(prec); m]; m];
@@ -1888,24 +1901,24 @@ fn iterate_anderson(
                 for k in 0..m {
                     let mut s = cnum::zero(prec);
                     for (dr_j, dr_k) in hist_dr[j].iter().zip(&hist_dr[k]) {
-                        let conj_jk = Complex::with_val(prec, dr_j.conj_ref());
-                        let prod = Complex::with_val(prec, &conj_jk * dr_k);
-                        s = Complex::with_val(prec, &s + &prod);
+                        let conj_jk = Complex::with_val_64(prec, dr_j.conj_ref());
+                        let prod = Complex::with_val_64(prec, &conj_jk * dr_k);
+                        s = Complex::with_val_64(prec, &s + &prod);
                     }
                     a[j][k] = s;
                 }
                 let mut s = cnum::zero(prec);
                 for i in 0..n_int {
-                    let conj_j = Complex::with_val(prec, hist_dr[j][i].conj_ref());
-                    let prod = Complex::with_val(prec, &conj_j * &r_int[i]);
-                    s = Complex::with_val(prec, &s + &prod);
+                    let conj_j = Complex::with_val_64(prec, hist_dr[j][i].conj_ref());
+                    let prod = Complex::with_val_64(prec, &conj_j * &r_int[i]);
+                    s = Complex::with_val_64(prec, &s + &prod);
                 }
                 bvec[j] = s;
             }
             // Tikhonov regularization to handle near-singular A.
             let reg_f = cnum::epsilon(12, prec);
             for (j, row) in a.iter_mut().enumerate() {
-                row[j] = Complex::with_val(prec, &row[j] + &reg_f);
+                row[j] = Complex::with_val_64(prec, &row[j] + &reg_f);
             }
             gamma = match solve_complex_lin(&a, &bvec, prec) {
                 Ok(v) => v,
@@ -1936,29 +1949,29 @@ fn iterate_anderson(
         } else if r_norm > 1 {
             cnum::decimal("0.3", prec)
         } else {
-            Float::with_val(prec, rug::float::Special::Infinity)
+            Float::with_val_64(prec, rug::float::Special::Infinity)
         };
 
         let mut new_x_int: Vec<Complex> = Vec::with_capacity(n_int);
         for i in 0..n_int {
-            let beta_r = Complex::with_val(prec, &r_int[i] * &beta_f);
+            let beta_r = Complex::with_val_64(prec, &r_int[i] * &beta_f);
             let mut step_i = beta_r;
             for j in 0..m {
-                let beta_dr = Complex::with_val(prec, &hist_dr[j][i] * &beta_f);
-                let term = Complex::with_val(prec, &hist_dx[j][i] + &beta_dr);
-                let prod = Complex::with_val(prec, &term * &gamma[j]);
-                step_i = Complex::with_val(prec, &step_i - &prod);
+                let beta_dr = Complex::with_val_64(prec, &hist_dr[j][i] * &beta_f);
+                let term = Complex::with_val_64(prec, &hist_dx[j][i] + &beta_dr);
+                let prod = Complex::with_val_64(prec, &term * &gamma[j]);
+                step_i = Complex::with_val_64(prec, &step_i - &prod);
             }
             if base_cap.is_finite() {
                 let step_mag = cnum::abs(&step_i, prec);
                 let x_mag = cnum::abs(&x_int[i], prec);
-                let cap_i = Float::with_val(prec, &base_cap * (x_mag + 1u32));
+                let cap_i = Float::with_val_64(prec, &base_cap * (x_mag + 1u32));
                 if step_mag > cap_i && step_mag.is_finite() {
-                    let scale_f = Float::with_val(prec, cap_i / step_mag);
-                    step_i = Complex::with_val(prec, &step_i * &scale_f);
+                    let scale_f = Float::with_val_64(prec, cap_i / step_mag);
+                    step_i = Complex::with_val_64(prec, &step_i * &scale_f);
                 }
             }
-            let update = Complex::with_val(prec, &x_int[i] + &step_i);
+            let update = Complex::with_val_64(prec, &x_int[i] + &step_i);
             new_x_int.push(update);
         }
 
@@ -1973,11 +1986,31 @@ fn iterate_anderson(
             symmetrize_schwarz(&mut x_new, prec);
         }
         x = x_new;
+        if x == checkpoint.0
+            && hist_dx == checkpoint.1
+            && hist_dr == checkpoint.2
+            && prev_x_int == checkpoint.3
+            && prev_r_int == checkpoint.4
+        {
+            return validate_best_residual(
+                &best_residual,
+                digits,
+                use_schwarz,
+                "Anderson repeated state",
+            )
+            .map(|_| (best_x, best_residual));
+        }
+        if iter.is_power_of_two() {
+            checkpoint = (
+                x.clone(),
+                hist_dx.clone(),
+                hist_dr.clone(),
+                prev_x_int.clone(),
+                prev_r_int.clone(),
+            );
+        }
+        iter += 1;
     }
-    Err(format!(
-        "Kouznetsov Anderson: no convergence in {} iters (residual {:.3e})",
-        max_iters, prev_residual
-    ))
 }
 
 /// Damped Picard iteration: x ← (1-α)·x + α·T(x). Used as a debugging baseline
@@ -1993,13 +2026,12 @@ fn iterate_picard(
     l_upper: &Complex,
     l_lower: &Complex,
     ln_b: &Complex,
-    prec: u32,
+    prec: u64,
     digits: u64,
     use_schwarz: bool,
     two_sided: bool,
 ) -> Result<(Vec<Complex>, Float), String> {
     let n = initial.len();
-    let max_iters = 2000usize;
     let target = cnum::epsilon(digits.saturating_add(3), prec);
     let debug = cnum::verbose();
 
@@ -2010,21 +2042,21 @@ fn iterate_picard(
         return Err("Picard requires 0 < alpha <= 1".into());
     }
     let alpha_f = alpha.clone();
-    let one_minus_alpha = Float::with_val(prec, 1) - &alpha;
+    let one_minus_alpha = Float::with_val_64(prec, 1) - &alpha;
 
     let mut x = initial;
-    let mut prev_residual = Float::with_val(prec, rug::float::Special::Infinity);
-    let mut stagnation = 0u32;
+    let mut checkpoint = x.clone();
+    let mut iter = Integer::new();
 
-    for iter in 0..max_iters {
+    loop {
         let f = apply_t(
             &x, nodes, weights, t_max, l_upper, l_lower, ln_b, prec, two_sided,
         )?;
-        let mut r_norm = Float::new(prec);
+        let mut r_norm = Float::new_64(prec);
         // Skip boundary samples: their values are pinned (see tetrate_kouznetsov),
         // and Cauchy at those z₀'s is degenerate anyway.
         for i in 1..n - 1 {
-            let d = Complex::with_val(prec, &f[i] - &x[i]);
+            let d = Complex::with_val_64(prec, &f[i] - &x[i]);
             let m = cnum::abs(&d, prec);
             if !m.is_finite() {
                 return Err(format!("Picard residual is non-finite at sample {}", i));
@@ -2033,15 +2065,15 @@ fn iterate_picard(
                 r_norm = m;
             }
         }
-        if debug && (iter < 20 || iter % 50 == 0) {
+        if debug && (iter < 20 || iter.is_divisible_u(50)) {
             let mid_idx = nodes.len() / 2;
             let xm_re = x[mid_idx].real();
             let xm_im = x[mid_idx].imag();
             // Find the index where residual is max (interior only).
             let mut max_idx = 1usize;
-            let mut max_val = Float::new(prec);
+            let mut max_val = Float::new_64(prec);
             for i in 1..n - 1 {
-                let d = Complex::with_val(prec, &f[i] - &x[i]);
+                let d = Complex::with_val_64(prec, &f[i] - &x[i]);
                 let m = cnum::abs(&d, prec);
                 if m > max_val {
                     max_val = m;
@@ -2051,7 +2083,8 @@ fn iterate_picard(
             let max_t = &nodes[max_idx];
             eprintln!(
                 "kouz Picard iter {:>4}: ‖r‖∞ = {:.3e}  α={:.2}  F(0.5)≈{:.4}+{:.4}i  argmax_t={:.3} (idx {})",
-                iter, r_norm, alpha, xm_re, xm_im, max_t, max_idx
+                iter, DisplayFloat(&r_norm), DisplayFloat(&alpha), DisplayFloat(xm_re),
+                DisplayFloat(xm_im), DisplayFloat(max_t), max_idx
             );
         }
         if r_norm < target {
@@ -2060,40 +2093,34 @@ fn iterate_picard(
         if !r_norm.is_finite() {
             return Err(format!(
                 "Kouznetsov Picard: residual non-finite at iter {} (α={})",
-                iter, alpha
+                iter,
+                DisplayFloat(&alpha)
             ));
         }
-        if r_norm > Float::with_val(prec, &prev_residual * cnum::decimal("0.999", prec)) {
-            stagnation += 1;
-            if stagnation > 30 {
-                return Err(format!(
-                    "Kouznetsov Picard: stagnated at residual {:.3e} after {} iters (α={})",
-                    r_norm, iter, alpha
-                ));
-            }
-        } else {
-            stagnation = 0;
-        }
-        prev_residual = r_norm;
-
         // Mix interior samples; keep boundary pinned to L_lower / L_upper.
         let mut x_new = Vec::with_capacity(n);
         x_new.push(x[0].clone());
         for i in 1..n - 1 {
-            let lhs = Complex::with_val(prec, &x[i] * &one_minus_alpha);
-            let rhs = Complex::with_val(prec, &f[i] * &alpha_f);
-            x_new.push(Complex::with_val(prec, &lhs + &rhs));
+            let lhs = Complex::with_val_64(prec, &x[i] * &one_minus_alpha);
+            let rhs = Complex::with_val_64(prec, &f[i] * &alpha_f);
+            x_new.push(Complex::with_val_64(prec, &lhs + &rhs));
         }
         x_new.push(x[n - 1].clone());
         if use_schwarz {
             symmetrize_schwarz(&mut x_new, prec);
         }
         x = x_new;
+        if x == checkpoint {
+            return Err(format!(
+                "Kouznetsov Picard repeated an iterate at residual {}",
+                DisplayFloat(&r_norm)
+            ));
+        }
+        if iter.is_power_of_two() {
+            checkpoint = x.clone();
+        }
+        iter += 1;
     }
-    Err(format!(
-        "Kouznetsov Picard: no convergence in {} iters (residual {:.3e})",
-        max_iters, prev_residual
-    ))
 }
 
 fn dump_residual(
@@ -2102,7 +2129,7 @@ fn dump_residual(
     samples: &[Complex],
     residuals: &[Complex],
     evaluated: &[Complex],
-    prec: u32,
+    prec: u64,
 ) -> Result<(), String> {
     use std::io::Write;
     if nodes.len() != samples.len()
@@ -2122,12 +2149,12 @@ fn dump_residual(
             writeln!(
                 out,
                 "{}\t{}\t{}\t{}\t{}\t{}",
-                nodes[i].to_string_radix(10, None),
-                samples[i].real().to_string_radix(10, None),
-                samples[i].imag().to_string_radix(10, None),
-                cnum::abs(&residuals[i], prec).to_string_radix(10, None),
-                evaluated[i].real().to_string_radix(10, None),
-                evaluated[i].imag().to_string_radix(10, None)
+                cnum::format_float_roundtrip(&nodes[i]),
+                cnum::format_float_roundtrip(samples[i].real()),
+                cnum::format_float_roundtrip(samples[i].imag()),
+                cnum::format_float_roundtrip(&cnum::abs(&residuals[i], prec)),
+                cnum::format_float_roundtrip(evaluated[i].real()),
+                cnum::format_float_roundtrip(evaluated[i].imag())
             )?;
         }
         out.flush()?;
@@ -2183,20 +2210,12 @@ fn iterate_newton(
     l_upper: &Complex,
     l_lower: &Complex,
     ln_b: &Complex,
-    prec: u32,
+    prec: u64,
     digits: u64,
     use_schwarz: bool,
     two_sided: bool,
 ) -> Result<(Vec<Complex>, Float), String> {
     let n = initial.len();
-    // 80-iter cap: small/medium bases converge quadratically in ~10-15 iters
-    // and never approach the cap. Larger bases (b≥50) sit in linear-descent
-    // for ~30-50 iters before Newton kicks in and finishes in 2-3 quadratic
-    // iters. The slow-progress check (every 15 iters from iter 10) catches
-    // non-canonical W_k cases earlier with the best-so-far residual, so the
-    // cap only matters for the slow-but-eventually-converging large-base
-    // regime.
-    let max_iters = 80usize;
     let target = cnum::epsilon(digits.saturating_add(3), prec);
     let debug = cnum::verbose();
     static DUMP_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2211,21 +2230,11 @@ fn iterate_newton(
     }
 
     let mut x = initial;
-    let mut prev_residual = Float::with_val(prec, rug::float::Special::Infinity);
-    let mut stagnation = 0u32;
     let mut best_x = x.clone();
-    let mut best_residual = Float::with_val(prec, rug::float::Special::Infinity);
-    // Snapshot of best_residual every 30 iters; if we haven't dropped by 10x
-    // since the snapshot, abandon (slow-progress stagnation, distinct from
-    // the per-iter stagnation check below). For real positive bases the
-    // iteration converges quadratically once close, so 10x in 30 iters is a
-    // very loose bound. For W_k-search bases (negative real) the iteration
-    // typically hits a discretization floor and never converges to target.
-    let mut slow_progress_anchor = Float::with_val(prec, rug::float::Special::Infinity);
-    let mut slow_progress_anchor_iter: usize = 0;
+    let mut best_residual = Float::with_val_64(prec, rug::float::Special::Infinity);
     // Large μ approaches a damped Picard direction, not a gradient direction;
     // increasing it does not guarantee descent.
-    let mut mu = Float::with_val(prec, 1);
+    let mut mu = Float::with_val_64(prec, 1);
 
     // FFT-domain kernels. The right/left edge denominator inverses depend
     // only on the uniform grid spacing — building them once per call collapses
@@ -2248,13 +2257,14 @@ fn iterate_newton(
             "kouz LM start: n={} mid_idx={} mid_t={} F[mid]={}+{}i",
             nodes.len(),
             mid_idx,
-            nodes[mid_idx],
-            x[mid_idx].real(),
-            x[mid_idx].imag(),
+            DisplayFloat(&nodes[mid_idx]),
+            DisplayFloat(x[mid_idx].real()),
+            DisplayFloat(x[mid_idx].imag()),
         );
     }
 
-    for iter in 0..max_iters {
+    let mut iter = Integer::new();
+    loop {
         let iter_start = std::time::Instant::now();
         let matvec_start = std::time::Instant::now();
         let f = apply_t_fft(
@@ -2262,9 +2272,9 @@ fn iterate_newton(
         )?;
         let matvec_secs = matvec_start.elapsed().as_secs_f64();
         let mut r = Vec::with_capacity(n);
-        let mut r_norm = Float::new(prec);
+        let mut r_norm = Float::new_64(prec);
         for i in 0..n {
-            let d = Complex::with_val(prec, &f[i] - &x[i]);
+            let d = Complex::with_val_64(prec, &f[i] - &x[i]);
             // Boundary samples are pinned (corner Cauchy singularity); zero
             // out their residual so the linear solve does not try to update
             // them. We track r_norm only over interior samples for the same
@@ -2292,7 +2302,8 @@ fn iterate_newton(
             let xm_im = x[mid_idx].imag();
             eprintln!(
                 "kouz LM iter {:>3}: ‖r‖∞ = {:.3e}  μ={:.2e}  F(0.5)≈{:.4}+{:.4}i  (target {:.3e})  matvec={:.2}s",
-                iter, r_norm, mu, xm_re, xm_im, target, matvec_secs
+                iter, DisplayFloat(&r_norm), DisplayFloat(&mu), DisplayFloat(xm_re),
+                DisplayFloat(xm_im), DisplayFloat(&target), matvec_secs
             );
         }
         if let Some((prefix, run)) = &dump {
@@ -2305,7 +2316,8 @@ fn iterate_newton(
             if debug {
                 eprintln!(
                     "kouz LM: residual non-finite at iter {}; best so far {:.3e}",
-                    iter, best_residual
+                    iter,
+                    DisplayFloat(&best_residual)
                 );
             }
             return validate_best_residual(
@@ -2323,111 +2335,62 @@ fn iterate_newton(
         if r_norm < target {
             return Ok((x, r_norm));
         }
-        // Slow-progress stagnation: take a snapshot of best_residual every 15
-        // iters (after iter 10 to skip the initial transient). If 15 iters
-        // later best_residual hasn't dropped by 10x, abandon. This catches
-        // cases where each iter makes ~1% progress but we'll never reach
-        // `target` (e.g., W_k-search negative real bases hitting the
-        // discretization floor at ~1e-8 regardless of node count).
-        // TET_KOUZ_PATIENT=1 disables both stagnation cutoffs (diagnostic:
-        // distinguishes "slow curved-valley crawl" from a true floor).
-        let patient = std::env::var_os("TET_KOUZ_PATIENT").is_some();
-        if iter == 10 {
-            slow_progress_anchor = best_residual.clone();
-            slow_progress_anchor_iter = 10;
-        } else if iter > 10 && iter == slow_progress_anchor_iter + 15 {
-            if best_residual > Float::with_val(prec, &slow_progress_anchor / 10) && !patient {
-                if debug {
-                    eprintln!(
-                        "kouz LM: slow-progress stagnation at iter {} (anchor {:.3e} -> best {:.3e}, <10x in 15 iters)",
-                        iter, slow_progress_anchor, best_residual
-                    );
-                }
-                return validate_best_residual(
-                    &best_residual,
-                    digits,
-                    use_schwarz,
-                    "slow-progress stagnation",
-                )
-                .map(|_| (best_x, best_residual));
-            }
-            slow_progress_anchor = best_residual.clone();
-            slow_progress_anchor_iter = iter;
-        }
-        // Stagnation does not identify its cause or certify a discretization
-        // error. Retain only a candidate allowed by the internal gate.
-        if r_norm > Float::with_val(prec, &prev_residual * cnum::decimal("0.999", prec)) {
-            stagnation += 1;
-            if stagnation > 8 && !patient {
-                if debug {
-                    eprintln!(
-                        "kouz LM: stagnated at iter {} (residual {:.3e}); best {:.3e}",
-                        iter, r_norm, best_residual
-                    );
-                }
-                return validate_best_residual(
-                    &best_residual,
-                    digits,
-                    use_schwarz,
-                    "per-iter stagnation",
-                )
-                .map(|_| (best_x, best_residual));
-            }
-        } else {
-            stagnation = 0;
-        }
-        prev_residual = r_norm.clone();
-
         // Precompute J = I − DT helpers ONCE per Newton iteration. They
         // depend on `x` but not on the LM damping μ, so we hoist them out
         // of the inner LM line search.
         let (b_f_ln, inv_f_ln) = precompute_dt_factors(&x, ln_b, prec)?;
 
-        // Try diagonal shifts until a capped correction decreases the
-        // residual, or the retry/shift budget is exhausted.
+        // Continue damping until descent or no representable update remains.
         let mut accepted = false;
-        for _lm_try in 0..25 {
+        let mut lm_try = Integer::new();
+        loop {
+            if !mu.is_finite() {
+                break;
+            }
+            if debug {
+                eprintln!("kouz LM trial {lm_try}: mu={:.3e}", DisplayFloat(&mu));
+            }
+            lm_try += 1;
             // Boundary-pinned matvec: rows 0 and n-1 act as identity (so
             // δ[0] = r[0] = 0 and δ[n-1] = r[n-1] = 0 stay zero throughout
             // the Krylov build); interior rows compute (1+μ)·v − DT·v.
             let mu_local = mu.clone();
             let matvec = |v: &[Complex]| -> Vec<Complex> {
                 let dt_v = apply_dt_v_fft(&b_f_ln, &inv_f_ln, &kernels, weights, v, prec);
-                let scale = Float::with_val(prec, &mu_local + 1);
+                let scale = Float::with_val_64(prec, &mu_local + 1);
                 let mut out = Vec::with_capacity(n);
                 for k in 0..n {
-                    let scaled = Complex::with_val(prec, &v[k] * &scale);
-                    out.push(Complex::with_val(prec, &scaled - &dt_v[k]));
+                    let scaled = Complex::with_val_64(prec, &v[k] * &scale);
+                    out.push(Complex::with_val_64(prec, &scaled - &dt_v[k]));
                 }
                 out[0] = v[0].clone();
                 out[n - 1] = v[n - 1].clone();
                 out
             };
-            // Krylov dimension and restart count: for typical Cauchy-Newton
-            // matrices (well-conditioned with LM damping), 80 inner steps
-            // are plenty; 8 restarts buys robustness against difficult
-            // bases without ballooning memory (V matrix uses 80·N complex
-            // words, which is ≪ the dense N×N Jacobian we're avoiding).
-            //
             // Residual-scaled forcing, with a requested-precision floor.
             // GMRES measures relative L2 residual of the shifted system;
             // the outer infinity norm sets this heuristic tolerance.
             let abs_floor = cnum::epsilon(digits.saturating_add(5), prec);
-            let abs_target = (Float::with_val(prec, &r_norm * &r_norm) / 10u32).max(&abs_floor);
+            let abs_target = (Float::with_val_64(prec, &r_norm * &r_norm) / 10u32).max(&abs_floor);
             let inner_tol = if r_norm > 0 {
                 (abs_target / &r_norm).min(&cnum::decimal("1e-3", prec))
             } else {
                 cnum::decimal("1e-3", prec)
             };
             let restart = 80.min(n);
-            let delta = match gmres_complex(matvec, &r, &inner_tol, 8, restart, prec) {
+            let delta = match gmres_complex(matvec, &r, &inner_tol, restart, prec) {
                 Ok(d) => d,
                 Err(e) => {
                     if debug {
                         eprintln!(
                             "kouz LM iter {}: GMRES failed (tol={:.2e}): {}",
-                            iter, inner_tol, e
+                            iter,
+                            DisplayFloat(&inner_tol),
+                            e
                         );
+                    }
+                    if !e.contains("stagnation") && !e.contains("zero pivot") {
+                        return Err(e);
                     }
                     mu *= 4;
                     continue;
@@ -2441,7 +2404,7 @@ fn iterate_newton(
             // steps near a small residual can land in a region where J is
             // near-singular and the next iteration cannot recover.
             let max_step = r_norm.clone().max(&cnum::decimal("0.05", prec)) * 4u32;
-            let mut delta_inf = Float::new(prec);
+            let mut delta_inf = Float::new_64(prec);
             for d in &delta {
                 let m = cnum::abs(d, prec);
                 if !m.is_finite() {
@@ -2454,14 +2417,14 @@ fn iterate_newton(
             let scale = if delta_inf > max_step {
                 max_step / delta_inf
             } else {
-                Float::with_val(prec, 1)
+                Float::with_val_64(prec, 1)
             };
-            let scale_f = Float::with_val(prec, scale);
+            let scale_f = Float::with_val_64(prec, scale);
 
             let mut x_trial = Vec::with_capacity(n);
             for i in 0..n {
-                let scaled = Complex::with_val(prec, &delta[i] * &scale_f);
-                x_trial.push(Complex::with_val(prec, &x[i] + &scaled));
+                let scaled = Complex::with_val_64(prec, &delta[i] * &scale_f);
+                x_trial.push(Complex::with_val_64(prec, &x[i] + &scaled));
             }
             // Re-pin boundaries (defensive: scale may not have been applied
             // exactly to those rows if the solve had pivoting noise) and
@@ -2471,6 +2434,9 @@ fn iterate_newton(
             x_trial[n - 1] = l_upper.clone();
             if use_schwarz {
                 symmetrize_schwarz(&mut x_trial, prec);
+            }
+            if x_trial == x {
+                break;
             }
             // Cheap basin guard: for real-positive bases > e^(1/e), the natural
             // Kneser F is real and POSITIVE on Re(z)=0. If the trial step
@@ -2484,9 +2450,6 @@ fn iterate_newton(
             let f_mid_re_trial = x_trial[mid_idx].real();
             if use_schwarz && *f_mid_re_trial < 0 {
                 mu *= 4;
-                if mu > 100_000_000 {
-                    break;
-                }
                 continue;
             }
             let f_trial = match apply_t_fft(
@@ -2498,16 +2461,13 @@ fn iterate_newton(
                         eprintln!("kouz LM rejected invalid trial: {error}");
                     }
                     mu *= 4;
-                    if mu > 100_000_000 {
-                        break;
-                    }
                     continue;
                 }
             };
-            let mut r_trial_norm = Float::new(prec);
+            let mut r_trial_norm = Float::new_64(prec);
             let mut bad = false;
             for i in 1..n - 1 {
-                let dd = Complex::with_val(prec, &f_trial[i] - &x_trial[i]);
+                let dd = Complex::with_val_64(prec, &f_trial[i] - &x_trial[i]);
                 let m = cnum::abs(&dd, prec);
                 if !m.is_finite() {
                     bad = true;
@@ -2519,11 +2479,18 @@ fn iterate_newton(
             }
 
             if !bad && r_trial_norm < r_norm {
+                if debug {
+                    eprintln!(
+                        "kouz LM accepted: residual {:.6e}, decrease {:.3e}",
+                        DisplayFloat(&r_trial_norm),
+                        DisplayFloat(&Float::with_val_64(prec, &r_norm - &r_trial_norm))
+                    );
+                }
                 x = x_trial;
                 // Successful step: shrink μ aggressively when we beat the
                 // residual by a healthy margin (push toward Newton); shrink
                 // mildly for marginal improvement.
-                if r_trial_norm < Float::with_val(prec, &r_norm / 2) {
+                if r_trial_norm < Float::with_val_64(prec, &r_norm / 2) {
                     mu /= 4;
                 } else {
                     mu *= cnum::decimal("0.7", prec);
@@ -2534,9 +2501,6 @@ fn iterate_newton(
             }
             // Reject: try a larger diagonal shift.
             mu *= 4;
-            if mu > 100_000_000 {
-                break;
-            }
         }
         if !accepted {
             // Failure to find descent is not an error bound. Any retained
@@ -2544,7 +2508,9 @@ fn iterate_newton(
             if debug {
                 eprintln!(
                     "kouz LM: no descent step at iter {} (μ={:.2e}); best residual {:.3e}",
-                    iter, mu, best_residual
+                    iter,
+                    DisplayFloat(&mu),
+                    DisplayFloat(&best_residual)
                 );
             }
             return validate_best_residual(&best_residual, digits, use_schwarz, "no descent step")
@@ -2557,15 +2523,8 @@ fn iterate_newton(
                 iter_start.elapsed().as_secs_f64()
             );
         }
+        iter += 1;
     }
-
-    validate_best_residual(
-        &best_residual,
-        digits,
-        use_schwarz,
-        &format!("did not converge in {} iterations", max_iters),
-    )
-    .map(|_| (best_x, best_residual))
 }
 
 /// Retain a finite, bounded internal candidate after a stalled solve.
@@ -2577,13 +2536,13 @@ fn validate_best_residual(
     use_schwarz: bool,
     reason: &str,
 ) -> Result<(), String> {
-    let prec = best_residual.prec();
+    let prec = best_residual.prec_64();
     let threshold = if use_schwarz {
         cnum::epsilon(digits / 3, prec)
             .max(&cnum::decimal("1e-6", prec))
             .min(&cnum::decimal("1e-3", prec))
     } else {
-        Float::with_val(prec, 5)
+        Float::with_val_64(prec, 5)
     };
     if best_residual.is_finite() && *best_residual <= threshold {
         // Internal acceptance must not be mistaken for a usable final answer.
@@ -2591,14 +2550,17 @@ fn validate_best_residual(
         if *best_residual > full_target && cnum::verbose() {
             eprintln!(
                 "kouz: retaining an unconverged internal candidate ({reason}), residual \
-                 {best_residual:.2e}; it cannot be returned as a {digits}-digit answer"
+                 {:.2e}; it cannot be returned as a {digits}-digit answer",
+                DisplayFloat(best_residual)
             );
         }
         Ok(())
     } else {
         Err(format!(
-            "Kouznetsov Newton did not converge ({reason}); best residual {best_residual:.3e} \
-             exceeds acceptance threshold {threshold:.3e} for {digits} digits"
+            "Kouznetsov Newton did not converge ({reason}); best residual {:.3e} \
+             exceeds acceptance threshold {:.3e} for {digits} digits",
+            DisplayFloat(best_residual),
+            DisplayFloat(&threshold)
         ))
     }
 }
@@ -2619,47 +2581,47 @@ fn compute_jacobian_minus_dt(
     nodes: &[Float],
     weights: &[Float],
     ln_b: &Complex,
-    prec: u32,
+    prec: u64,
 ) -> Vec<Vec<Complex>> {
     let n = nodes.len();
-    let pi_f = Float::with_val(prec, rug::float::Constant::Pi);
-    let two_pi = Float::with_val(prec, &pi_f * 2u32);
+    let pi_f = Float::with_val_64(prec, rug::float::Constant::Pi);
+    let two_pi = Float::with_val_64(prec, &pi_f * 2u32);
 
     // Precompute b^F[j]·ln(b) and 1/(F[j]·ln(b)), needed in every column.
     let mut b_f_ln: Vec<Complex> = Vec::with_capacity(n);
     let mut inv_f_ln: Vec<Complex> = Vec::with_capacity(n);
     for sample in &samples[..n] {
-        let exp_arg = Complex::with_val(prec, ln_b * sample);
-        let bf = Complex::with_val(prec, exp_arg.exp_ref());
-        b_f_ln.push(Complex::with_val(prec, &bf * ln_b));
-        let f_ln = Complex::with_val(prec, sample * ln_b);
-        let one_c = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
-        inv_f_ln.push(Complex::with_val(prec, &one_c / &f_ln));
+        let exp_arg = Complex::with_val_64(prec, ln_b * sample);
+        let bf = Complex::with_val_64(prec, exp_arg.exp_ref());
+        b_f_ln.push(Complex::with_val_64(prec, &bf * ln_b));
+        let f_ln = Complex::with_val_64(prec, sample * ln_b);
+        let one_c = Complex::with_val_64(prec, (Float::with_val_64(prec, 1u32), 0));
+        inv_f_ln.push(Complex::with_val_64(prec, &one_c / &f_ln));
     }
 
-    let one_re = Float::with_val(prec, 1u32);
-    let neg_one_re = Float::with_val(prec, -1i32);
+    let one_re = Float::with_val_64(prec, 1u32);
+    let neg_one_re = Float::with_val_64(prec, -1i32);
     let mut jac = vec![vec![cnum::zero(prec); n]; n];
 
     for k in 0..n {
         for j in 0..n {
-            let dt_im = Float::with_val(prec, &nodes[j] - &nodes[k]);
+            let dt_im = Float::with_val_64(prec, &nodes[j] - &nodes[k]);
             // 1+i(t_j-t_k)
-            let denom_r = Complex::with_val(prec, (one_re.clone(), dt_im.clone()));
+            let denom_r = Complex::with_val_64(prec, (one_re.clone(), dt_im.clone()));
             // -1+i(t_j-t_k)
-            let denom_l = Complex::with_val(prec, (neg_one_re.clone(), dt_im));
+            let denom_l = Complex::with_val_64(prec, (neg_one_re.clone(), dt_im));
 
-            let term_r = Complex::with_val(prec, &b_f_ln[j] / &denom_r);
-            let term_l = Complex::with_val(prec, &inv_f_ln[j] / &denom_l);
-            let bracket = Complex::with_val(prec, &term_r - &term_l);
-            let scaled = Complex::with_val(prec, &bracket * &weights[j]);
-            let dt_kj = Complex::with_val(prec, &scaled / &two_pi);
+            let term_r = Complex::with_val_64(prec, &b_f_ln[j] / &denom_r);
+            let term_l = Complex::with_val_64(prec, &inv_f_ln[j] / &denom_l);
+            let bracket = Complex::with_val_64(prec, &term_r - &term_l);
+            let scaled = Complex::with_val_64(prec, &bracket * &weights[j]);
+            let dt_kj = Complex::with_val_64(prec, &scaled / &two_pi);
 
             // J = I − DT
             if k == j {
-                jac[k][j] = Complex::with_val(prec, Complex::with_val(prec, (1, 0)) - &dt_kj);
+                jac[k][j] = Complex::with_val_64(prec, Complex::with_val_64(prec, (1, 0)) - &dt_kj);
             } else {
-                jac[k][j] = Complex::with_val(prec, -&dt_kj);
+                jac[k][j] = Complex::with_val_64(prec, -&dt_kj);
             }
         }
     }
@@ -2671,7 +2633,7 @@ fn compute_jacobian_minus_dt(
 fn solve_complex_lin(
     a_in: &[Vec<Complex>],
     b_in: &[Complex],
-    prec: u32,
+    prec: u64,
 ) -> Result<Vec<Complex>, String> {
     let n = a_in.len();
     if n == 0 {
@@ -2683,9 +2645,9 @@ fn solve_complex_lin(
     for k in 0..n {
         // Partial pivot: find row with largest |a[i][k]| for i ≥ k.
         let mut pivot = k;
-        let mut max_abs = Float::with_val(prec, a[k][k].abs_ref());
+        let mut max_abs = Float::with_val_64(prec, a[k][k].abs_ref());
         for (i, row) in a.iter().enumerate().skip(k + 1) {
-            let abs_i = Float::with_val(prec, row[k].abs_ref());
+            let abs_i = Float::with_val_64(prec, row[k].abs_ref());
             if abs_i > max_abs {
                 max_abs = abs_i;
                 pivot = i;
@@ -2701,14 +2663,14 @@ fn solve_complex_lin(
 
         // Eliminate below.
         for i in (k + 1)..n {
-            let factor = Complex::with_val(prec, &a[i][k] / &a[k][k]);
+            let factor = Complex::with_val_64(prec, &a[i][k] / &a[k][k]);
             let (above, below) = a.split_at_mut(i);
             for (entry, pivot_entry) in below[0][k..].iter_mut().zip(&above[k][k..]) {
-                let prod = Complex::with_val(prec, &factor * pivot_entry);
-                *entry = Complex::with_val(prec, &*entry - &prod);
+                let prod = Complex::with_val_64(prec, &factor * pivot_entry);
+                *entry = Complex::with_val_64(prec, &*entry - &prod);
             }
-            let prod = Complex::with_val(prec, &factor * &b[k]);
-            b[i] = Complex::with_val(prec, &b[i] - &prod);
+            let prod = Complex::with_val_64(prec, &factor * &b[k]);
+            b[i] = Complex::with_val_64(prec, &b[i] - &prod);
         }
     }
 
@@ -2717,10 +2679,10 @@ fn solve_complex_lin(
     for i in (0..n).rev() {
         let mut sum = b[i].clone();
         for j in (i + 1)..n {
-            let prod = Complex::with_val(prec, &a[i][j] * &x[j]);
-            sum = Complex::with_val(prec, &sum - &prod);
+            let prod = Complex::with_val_64(prec, &a[i][j] * &x[j]);
+            sum = Complex::with_val_64(prec, &sum - &prod);
         }
-        x[i] = Complex::with_val(prec, &sum / &a[i][i]);
+        x[i] = Complex::with_val_64(prec, &sum / &a[i][i]);
     }
     Ok(x)
 }
@@ -2735,25 +2697,14 @@ fn eval_at_height(
     l_upper: &Complex,
     l_lower: &Complex,
     ln_b: &Complex,
-    prec: u32,
+    prec: u64,
     two_sided: bool,
 ) -> Result<Complex, String> {
     if !cnum::is_finite(h) || !t_max.is_finite() || *t_max <= 0 {
         return Err("Cauchy evaluation requires finite height and positive contour size".into());
     }
-    let shift = h
-        .real()
-        .clone()
-        .floor()
-        .to_integer()
-        .and_then(|v| v.to_i64())
-        .ok_or("Cauchy height shift exceeds the supported integer range")?;
-    if shift.unsigned_abs() > CAUCHY_MAX_SHIFTS {
-        return Err(format!(
-            "Cauchy height shift exceeds the supported {CAUCHY_MAX_SHIFTS} iterations"
-        ));
-    }
-    let h_strip = Complex::with_val(prec, h - shift);
+    let shift = h.real().clone().floor();
+    let h_strip = Complex::with_val_64(prec, h - &shift);
 
     if h_strip.imag().clone().abs() >= *t_max {
         return Err("height lies on or outside the Cauchy contour; a fixed-point limit is not a finite-height value".into());
@@ -2763,19 +2714,27 @@ fn eval_at_height(
     )?;
 
     let mut f = f_strip;
-    if shift > 0 {
-        for _ in 0..shift {
-            let exp_arg = Complex::with_val(prec, ln_b * &f);
-            f = cnum::checked_exp(&exp_arg, prec)?;
+    let forward = shift > 0;
+    let shifts = shift.abs();
+    let mut step = Integer::new();
+    while shifts > step {
+        if cnum::verbose() && (step == 0 || step.is_divisible_u(1024)) {
+            eprintln!(
+                "kouz height shift: step {step} of {:.8}",
+                DisplayFloat(&shifts)
+            );
         }
-    } else if shift < 0 {
-        for _ in 0..(-shift) {
+        if forward {
+            let exp_arg = Complex::with_val_64(prec, ln_b * &f);
+            f = cnum::checked_exp(&exp_arg, prec)?;
+        } else {
             if !cnum::is_finite(&f) || cnum::is_zero(&f) {
                 return Err("Cauchy logarithmic shift reached a zero or non-finite value".into());
             }
-            let ln_f = Complex::with_val(prec, f.ln_ref());
-            f = Complex::with_val(prec, &ln_f / ln_b);
+            let ln_f = Complex::with_val_64(prec, f.ln_ref());
+            f = Complex::with_val_64(prec, &ln_f / ln_b);
         }
+        step += 1;
     }
     if !cnum::is_finite(&f) {
         return Err("Cauchy evaluation produced a non-finite value".into());
@@ -2808,15 +2767,15 @@ fn eval_at_height(
 fn precompute_dt_factors(
     samples: &[Complex],
     ln_b: &Complex,
-    prec: u32,
+    prec: u64,
 ) -> Result<(Vec<Complex>, Vec<Complex>), String> {
-    let one_c = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+    let one_c = Complex::with_val_64(prec, (Float::with_val_64(prec, 1u32), 0));
     let factors = |s: &Complex| -> Result<(Complex, Complex), String> {
-        let exp_arg = Complex::with_val(prec, ln_b * s);
+        let exp_arg = Complex::with_val_64(prec, ln_b * s);
         let bf = cnum::checked_exp(&exp_arg, prec)?;
-        let b_f_ln = Complex::with_val(prec, &bf * ln_b);
-        let f_ln = Complex::with_val(prec, s * ln_b);
-        let inv_f_ln = Complex::with_val(prec, &one_c / &f_ln);
+        let b_f_ln = Complex::with_val_64(prec, &bf * ln_b);
+        let f_ln = Complex::with_val_64(prec, s * ln_b);
+        let inv_f_ln = Complex::with_val_64(prec, &one_c / &f_ln);
         if !cnum::is_finite(&b_f_ln) || !cnum::is_finite(&inv_f_ln) {
             return Err("Cauchy derivative factors are non-finite".into());
         }
@@ -2841,26 +2800,26 @@ fn precompute_dt_factors(
 /// divisions per (k, j) pair into 2 cache lookups + 2 complex multiplies,
 /// roughly halving total cost.
 #[allow(dead_code)]
-fn precompute_denom_inverses(nodes: &[Float], prec: u32) -> (Vec<Complex>, Vec<Complex>) {
+fn precompute_denom_inverses(nodes: &[Float], prec: u64) -> (Vec<Complex>, Vec<Complex>) {
     let n = nodes.len();
     let mut inv_r: Vec<Complex> = Vec::with_capacity(2 * n - 1);
     let mut inv_l: Vec<Complex> = Vec::with_capacity(2 * n - 1);
-    let one_re = Float::with_val(prec, 1u32);
-    let neg_one_re = Float::with_val(prec, -1i32);
-    let one_c = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+    let one_re = Float::with_val_64(prec, 1u32);
+    let neg_one_re = Float::with_val_64(prec, -1i32);
+    let one_c = Complex::with_val_64(prec, (Float::with_val_64(prec, 1u32), 0));
     let delta = if n >= 2 {
-        Float::with_val(prec, &nodes[1] - &nodes[0])
+        Float::with_val_64(prec, &nodes[1] - &nodes[0])
     } else {
-        Float::with_val(prec, 1u32)
+        Float::with_val_64(prec, 1u32)
     };
-    let max_offset = (n as i64) - 1;
+    let max_offset = Integer::from(n - 1);
     for d_idx in 0..(2 * n - 1) {
-        let d_signed = (d_idx as i64) - max_offset;
-        let dt = Float::with_val(prec, &delta * d_signed);
-        let dr = Complex::with_val(prec, (one_re.clone(), dt.clone()));
-        let dl = Complex::with_val(prec, (neg_one_re.clone(), dt));
-        inv_r.push(Complex::with_val(prec, &one_c / &dr));
-        inv_l.push(Complex::with_val(prec, &one_c / &dl));
+        let d_signed = Integer::from(d_idx) - &max_offset;
+        let dt = Float::with_val_64(prec, &delta * &d_signed);
+        let dr = Complex::with_val_64(prec, (one_re.clone(), dt.clone()));
+        let dl = Complex::with_val_64(prec, (neg_one_re.clone(), dt));
+        inv_r.push(Complex::with_val_64(prec, &one_c / &dr));
+        inv_l.push(Complex::with_val_64(prec, &one_c / &dl));
     }
     (inv_r, inv_l)
 }
@@ -2899,57 +2858,57 @@ pub(crate) fn build_cauchy_kernels(
     t_max: &Float,
     l_upper: &Complex,
     l_lower: &Complex,
-    prec: u32,
+    prec: u64,
 ) -> Result<CauchyKernels, String> {
     let n = nodes.len();
     if n < 2 || !t_max.is_finite() || *t_max <= 0 || nodes.iter().any(|t| !t.is_finite()) {
         return Err("Cauchy kernels require finite nonempty geometry".into());
     }
     let n_terms = em_n_terms(prec)?;
-    let one_re = Float::with_val(prec, 1u32);
-    let neg_one_re = Float::with_val(prec, -1i32);
-    let one_c = Complex::with_val(prec, (one_re.clone(), Float::new(prec)));
+    let one_re = Float::with_val_64(prec, 1u32);
+    let neg_one_re = Float::with_val_64(prec, -1i32);
+    let one_c = Complex::with_val_64(prec, (one_re.clone(), Float::new_64(prec)));
     let delta = if n >= 2 {
-        Float::with_val(prec, &nodes[1] - &nodes[0])
+        Float::with_val_64(prec, &nodes[1] - &nodes[0])
     } else {
-        Float::with_val(prec, 1u32)
+        Float::with_val_64(prec, 1u32)
     };
-    let max_offset = (n as i64) - 1;
+    let max_offset = Integer::from(n - 1);
     let mut h_r: Vec<Complex> = Vec::with_capacity(2 * n - 1);
     let mut h_l: Vec<Complex> = Vec::with_capacity(2 * n - 1);
     for d_idx in 0..(2 * n - 1) {
-        let d_signed = (d_idx as i64) - max_offset;
-        let dt = Float::with_val(prec, &delta * d_signed);
-        let dr = Complex::with_val(prec, (one_re.clone(), dt.clone()));
-        let dl = Complex::with_val(prec, (neg_one_re.clone(), dt));
-        h_r.push(Complex::with_val(prec, &one_c / &dr));
-        h_l.push(Complex::with_val(prec, &one_c / &dl));
+        let d_signed = Integer::from(d_idx) - &max_offset;
+        let dt = Float::with_val_64(prec, &delta * &d_signed);
+        let dr = Complex::with_val_64(prec, (one_re.clone(), dt.clone()));
+        let dl = Complex::with_val_64(prec, (neg_one_re.clone(), dt));
+        h_r.push(Complex::with_val_64(prec, &one_c / &dr));
+        h_l.push(Complex::with_val_64(prec, &one_c / &dl));
     }
     let right = precompute_kernel_fft(&h_r, n, prec);
     let left = precompute_kernel_fft(&h_l, n, prec);
 
     // EM corrections per row.
-    let em_h_powers = build_em_h_powers(&delta, n_terms, prec);
+    let em_h_powers = build_em_h_powers(&delta, n_terms, prec)?;
 
-    let pi_f = Float::with_val(prec, Constant::Pi);
-    let two_pi = Float::with_val(prec, &pi_f * 2u32);
-    let inv_two_pi = Float::with_val(prec, Float::with_val(prec, 1u32) / &two_pi);
+    let pi_f = Float::with_val_64(prec, Constant::Pi);
+    let two_pi = Float::with_val_64(prec, &pi_f * 2u32);
+    let inv_two_pi = Float::with_val_64(prec, Float::with_val_64(prec, 1u32) / &two_pi);
 
     let mut em_right_over_2pi = Vec::with_capacity(n);
     let mut em_left_over_2pi = Vec::with_capacity(n);
     for node in nodes {
-        let z0 = Complex::with_val(prec, (cnum::decimal("0.5", prec), node.clone()));
+        let z0 = Complex::with_val_64(prec, (cnum::decimal("0.5", prec), node.clone()));
         let (corr_r, corr_l) =
             compute_em_correction_z0(&z0, t_max, l_upper, l_lower, &em_h_powers, prec);
-        em_right_over_2pi.push(Complex::with_val(prec, &corr_r * &inv_two_pi));
-        em_left_over_2pi.push(Complex::with_val(prec, &corr_l * &inv_two_pi));
+        em_right_over_2pi.push(Complex::with_val_64(prec, &corr_r * &inv_two_pi));
+        em_left_over_2pi.push(Complex::with_val_64(prec, &corr_l * &inv_two_pi));
     }
 
     if cnum::verbose() {
         eprintln!(
             "kouz EM: K={} (h/T={:.3e})",
             n_terms,
-            Float::with_val(prec, &delta / t_max).abs()
+            DisplayFloat(&Float::with_val_64(prec, &delta / t_max).abs())
         );
     }
 
@@ -2970,13 +2929,13 @@ pub(crate) fn apply_dt_v_fft(
     kernels: &CauchyKernels,
     weights: &[Float],
     v: &[Complex],
-    prec: u32,
+    prec: u64,
 ) -> Vec<Complex> {
     let n = b_f_ln.len();
-    let pi_f = Float::with_val(prec, Constant::Pi);
-    let two_pi = Float::with_val(prec, &pi_f * 2u32);
-    let one_re = Float::with_val(prec, 1u32);
-    let inv_two_pi = Float::with_val(prec, &one_re / &two_pi);
+    let pi_f = Float::with_val_64(prec, Constant::Pi);
+    let two_pi = Float::with_val_64(prec, &pi_f * 2u32);
+    let one_re = Float::with_val_64(prec, 1u32);
+    let inv_two_pi = Float::with_val_64(prec, &one_re / &two_pi);
 
     // Pre-scale: a_r[j] = b_f_ln[j]·v[j]·w_j/(2π), a_l[j] similar.
     let (a_r, a_l): (Vec<Complex>, Vec<Complex>) = if crate::mt::mt_enabled() {
@@ -2985,11 +2944,11 @@ pub(crate) fn apply_dt_v_fft(
             .into_par_iter()
             .with_min_len(8)
             .map(|j| {
-                let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
-                let bv = Complex::with_val(prec, &b_f_ln[j] * &v[j]);
-                let ar = Complex::with_val(prec, &bv * &w_over_2pi);
-                let iv = Complex::with_val(prec, &inv_f_ln[j] * &v[j]);
-                let al = Complex::with_val(prec, &iv * &w_over_2pi);
+                let w_over_2pi = Float::with_val_64(prec, &weights[j] * &inv_two_pi);
+                let bv = Complex::with_val_64(prec, &b_f_ln[j] * &v[j]);
+                let ar = Complex::with_val_64(prec, &bv * &w_over_2pi);
+                let iv = Complex::with_val_64(prec, &inv_f_ln[j] * &v[j]);
+                let al = Complex::with_val_64(prec, &iv * &w_over_2pi);
                 (ar, al)
             })
             .unzip()
@@ -2997,11 +2956,11 @@ pub(crate) fn apply_dt_v_fft(
         let mut a_r: Vec<Complex> = Vec::with_capacity(n);
         let mut a_l: Vec<Complex> = Vec::with_capacity(n);
         for j in 0..n {
-            let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
-            let bv = Complex::with_val(prec, &b_f_ln[j] * &v[j]);
-            a_r.push(Complex::with_val(prec, &bv * &w_over_2pi));
-            let iv = Complex::with_val(prec, &inv_f_ln[j] * &v[j]);
-            a_l.push(Complex::with_val(prec, &iv * &w_over_2pi));
+            let w_over_2pi = Float::with_val_64(prec, &weights[j] * &inv_two_pi);
+            let bv = Complex::with_val_64(prec, &b_f_ln[j] * &v[j]);
+            a_r.push(Complex::with_val_64(prec, &bv * &w_over_2pi));
+            let iv = Complex::with_val_64(prec, &inv_f_ln[j] * &v[j]);
+            a_l.push(Complex::with_val_64(prec, &iv * &w_over_2pi));
         }
         (a_r, a_l)
     };
@@ -3011,7 +2970,7 @@ pub(crate) fn apply_dt_v_fft(
 
     let mut out = Vec::with_capacity(n);
     for k in 0..n {
-        out.push(Complex::with_val(prec, &r_part[k] - &l_part[k]));
+        out.push(Complex::with_val_64(prec, &r_part[k] - &l_part[k]));
     }
     out
 }
@@ -3030,27 +2989,27 @@ pub(crate) fn apply_t_fft(
     l_lower: &Complex,
     ln_b: &Complex,
     kernels: &CauchyKernels,
-    prec: u32,
+    prec: u64,
     two_sided: bool,
 ) -> Result<Vec<Complex>, String> {
     validate_cauchy_data(samples, nodes, weights, t_max, ln_b)?;
     let n = samples.len();
-    let pi_f = Float::with_val(prec, Constant::Pi);
-    let two_pi_f = Float::with_val(prec, &pi_f * 2u32);
-    let two_pi_i = Complex::with_val(prec, (Float::new(prec), two_pi_f.clone()));
-    let one_re = Float::with_val(prec, 1u32);
-    let inv_two_pi = Float::with_val(prec, &one_re / &two_pi_f);
+    let pi_f = Float::with_val_64(prec, Constant::Pi);
+    let two_pi_f = Float::with_val_64(prec, &pi_f * 2u32);
+    let two_pi_i = Complex::with_val_64(prec, (Float::new_64(prec), two_pi_f.clone()));
+    let one_re = Float::with_val_64(prec, 1u32);
+    let inv_two_pi = Float::with_val_64(prec, &one_re / &two_pi_f);
 
     // Build right- and left-edge values, pre-scaled by w_j / (2π) so the
     // cross-correlation result is the in-strip part of T(F).
     let ln_unwrapped = unwrapped_ln_samples(samples, l_upper, l_lower, ln_b, prec, two_sided);
     let edge_values = |j: usize| -> Result<(Complex, Complex), String> {
-        let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
-        let exp_arg = Complex::with_val(prec, ln_b * &samples[j]);
+        let w_over_2pi = Float::with_val_64(prec, &weights[j] * &inv_two_pi);
+        let exp_arg = Complex::with_val_64(prec, ln_b * &samples[j]);
         let bf = cnum::checked_exp(&exp_arg, prec)?;
-        let ar = Complex::with_val(prec, &bf * &w_over_2pi);
-        let log_b_s = Complex::with_val(prec, &ln_unwrapped[j] / ln_b);
-        let al = Complex::with_val(prec, &log_b_s * &w_over_2pi);
+        let ar = Complex::with_val_64(prec, &bf * &w_over_2pi);
+        let log_b_s = Complex::with_val_64(prec, &ln_unwrapped[j] / ln_b);
+        let al = Complex::with_val_64(prec, &log_b_s * &w_over_2pi);
         if !cnum::is_finite(&ar) || !cnum::is_finite(&al) {
             return Err("Cauchy edge integrand is non-finite".into());
         }
@@ -3072,45 +3031,45 @@ pub(crate) fn apply_t_fft(
     let l_part = cross_correlate_with_kernel(&a_l, &kernels.left, prec);
 
     // Boundary corrections (per row, O(N) total).
-    let cp1 = Complex::with_val(prec, (cnum::decimal("1.5", prec), 0));
-    let cm1 = Complex::with_val(prec, (cnum::decimal("-0.5", prec), 0));
-    let it_max = Complex::with_val(prec, (Float::new(prec), t_max.clone()));
-    let neg_it_max = Complex::with_val(prec, -&it_max);
-    let cm1_plus_itmax = Complex::with_val(prec, &cm1 + &it_max);
-    let cp1_plus_itmax = Complex::with_val(prec, &cp1 + &it_max);
-    let cp1_minus_itmax = Complex::with_val(prec, &cp1 + &neg_it_max);
-    let cm1_minus_itmax = Complex::with_val(prec, &cm1 + &neg_it_max);
+    let cp1 = Complex::with_val_64(prec, (cnum::decimal("1.5", prec), 0));
+    let cm1 = Complex::with_val_64(prec, (cnum::decimal("-0.5", prec), 0));
+    let it_max = Complex::with_val_64(prec, (Float::new_64(prec), t_max.clone()));
+    let neg_it_max = Complex::with_val_64(prec, -&it_max);
+    let cm1_plus_itmax = Complex::with_val_64(prec, &cm1 + &it_max);
+    let cp1_plus_itmax = Complex::with_val_64(prec, &cp1 + &it_max);
+    let cp1_minus_itmax = Complex::with_val_64(prec, &cp1 + &neg_it_max);
+    let cm1_minus_itmax = Complex::with_val_64(prec, &cm1 + &neg_it_max);
 
     // Per-row boundary correction: each row k is an independent computation
     // (2 complex ln + a handful of mults) reading shared precomputed values,
     // so the MT branch is a pure element-wise map — bit-identical.
     let row = |k: usize| -> Complex {
-        let z0 = Complex::with_val(prec, (cnum::decimal("0.5", prec), nodes[k].clone()));
+        let z0 = Complex::with_val_64(prec, (cnum::decimal("0.5", prec), nodes[k].clone()));
 
         // Euler-Maclaurin boundary correction: subtract the closed-form O(h²)
         // (and higher-order, up to K terms) error of the trapezoidal sums.
         // `em_*_over_2pi` is precomputed in `build_cauchy_kernels` and already
         // carries the 1/(2π) factor that `r_part`, `l_part` carry.
-        let r_corrected = Complex::with_val(prec, &r_part[k] - &kernels.em_right_over_2pi[k]);
-        let l_corrected = Complex::with_val(prec, &l_part[k] - &kernels.em_left_over_2pi[k]);
-        let part1 = Complex::with_val(prec, &r_corrected - &l_corrected);
+        let r_corrected = Complex::with_val_64(prec, &r_part[k] - &kernels.em_right_over_2pi[k]);
+        let l_corrected = Complex::with_val_64(prec, &l_part[k] - &kernels.em_left_over_2pi[k]);
+        let part1 = Complex::with_val_64(prec, &r_corrected - &l_corrected);
 
-        let top_num = Complex::with_val(prec, &cm1_plus_itmax - &z0);
-        let top_den = Complex::with_val(prec, &cp1_plus_itmax - &z0);
-        let top_ratio = Complex::with_val(prec, &top_num / &top_den);
-        let ln_top = Complex::with_val(prec, top_ratio.ln_ref());
+        let top_num = Complex::with_val_64(prec, &cm1_plus_itmax - &z0);
+        let top_den = Complex::with_val_64(prec, &cp1_plus_itmax - &z0);
+        let top_ratio = Complex::with_val_64(prec, &top_num / &top_den);
+        let ln_top = Complex::with_val_64(prec, top_ratio.ln_ref());
 
-        let bot_num = Complex::with_val(prec, &cp1_minus_itmax - &z0);
-        let bot_den = Complex::with_val(prec, &cm1_minus_itmax - &z0);
-        let bot_ratio = Complex::with_val(prec, &bot_num / &bot_den);
-        let ln_bot = Complex::with_val(prec, bot_ratio.ln_ref());
+        let bot_num = Complex::with_val_64(prec, &cp1_minus_itmax - &z0);
+        let bot_den = Complex::with_val_64(prec, &cm1_minus_itmax - &z0);
+        let bot_ratio = Complex::with_val_64(prec, &bot_num / &bot_den);
+        let ln_bot = Complex::with_val_64(prec, bot_ratio.ln_ref());
 
-        let up_term = Complex::with_val(prec, l_upper * &ln_top);
-        let dn_term = Complex::with_val(prec, l_lower * &ln_bot);
-        let upper_lower_sum = Complex::with_val(prec, &up_term + &dn_term);
-        let part2 = Complex::with_val(prec, &upper_lower_sum / &two_pi_i);
+        let up_term = Complex::with_val_64(prec, l_upper * &ln_top);
+        let dn_term = Complex::with_val_64(prec, l_lower * &ln_bot);
+        let upper_lower_sum = Complex::with_val_64(prec, &up_term + &dn_term);
+        let part2 = Complex::with_val_64(prec, &upper_lower_sum / &two_pi_i);
 
-        Complex::with_val(prec, &part1 + &part2)
+        Complex::with_val_64(prec, &part1 + &part2)
     };
 
     let out: Vec<_> = if crate::mt::mt_enabled() {
@@ -3141,37 +3100,36 @@ fn apply_dt_v(
     inv_denom_l: &[Complex],
     weights: &[Float],
     v: &[Complex],
-    prec: u32,
+    prec: u64,
 ) -> Vec<Complex> {
     let n = b_f_ln.len();
-    let pi_f = Float::with_val(prec, rug::float::Constant::Pi);
-    let two_pi = Float::with_val(prec, &pi_f * 2u32);
-    let one_re = Float::with_val(prec, 1u32);
-    let inv_two_pi = Float::with_val(prec, &one_re / &two_pi);
+    let pi_f = Float::with_val_64(prec, rug::float::Constant::Pi);
+    let two_pi = Float::with_val_64(prec, &pi_f * 2u32);
+    let one_re = Float::with_val_64(prec, 1u32);
+    let inv_two_pi = Float::with_val_64(prec, &one_re / &two_pi);
 
     // Pre-scale: `bfl_v[j]` = b_f_ln[j]·v[j]·w_j/(2π), `ifl_v[j]` similar.
     // Pulling the scalar out of the inner k-loop saves N² multiplications.
     let mut bfl_v: Vec<Complex> = Vec::with_capacity(n);
     let mut ifl_v: Vec<Complex> = Vec::with_capacity(n);
     for j in 0..n {
-        let w_over_2pi = Float::with_val(prec, &weights[j] * &inv_two_pi);
-        let bv = Complex::with_val(prec, &b_f_ln[j] * &v[j]);
-        bfl_v.push(Complex::with_val(prec, &bv * &w_over_2pi));
-        let iv = Complex::with_val(prec, &inv_f_ln[j] * &v[j]);
-        ifl_v.push(Complex::with_val(prec, &iv * &w_over_2pi));
+        let w_over_2pi = Float::with_val_64(prec, &weights[j] * &inv_two_pi);
+        let bv = Complex::with_val_64(prec, &b_f_ln[j] * &v[j]);
+        bfl_v.push(Complex::with_val_64(prec, &bv * &w_over_2pi));
+        let iv = Complex::with_val_64(prec, &inv_f_ln[j] * &v[j]);
+        ifl_v.push(Complex::with_val_64(prec, &iv * &w_over_2pi));
     }
 
-    let max_offset = (n as i64) - 1;
     let mut out = vec![cnum::zero(prec); n];
     for (k, value) in out.iter_mut().enumerate() {
         let mut acc = cnum::zero(prec);
         for j in 0..n {
             // d = j − k, indexed at d + (N − 1).
-            let idx = ((j as i64) - (k as i64) + max_offset) as usize;
-            let term_r = Complex::with_val(prec, &bfl_v[j] * &inv_denom_r[idx]);
-            let term_l = Complex::with_val(prec, &ifl_v[j] * &inv_denom_l[idx]);
-            let dt_kj_v = Complex::with_val(prec, &term_r - &term_l);
-            acc = Complex::with_val(prec, &acc + &dt_kj_v);
+            let idx = j + (n - 1 - k);
+            let term_r = Complex::with_val_64(prec, &bfl_v[j] * &inv_denom_r[idx]);
+            let term_l = Complex::with_val_64(prec, &ifl_v[j] * &inv_denom_l[idx]);
+            let dt_kj_v = Complex::with_val_64(prec, &term_r - &term_l);
+            acc = Complex::with_val_64(prec, &acc + &dt_kj_v);
         }
         *value = acc;
     }
@@ -3179,23 +3137,23 @@ fn apply_dt_v(
 }
 
 /// L2 norm of a complex vector.
-fn vector_norm_complex(v: &[Complex], prec: u32) -> Float {
-    let mut norm = Float::new(prec);
+fn vector_norm_complex(v: &[Complex], prec: u64) -> Float {
+    let mut norm = Float::new_64(prec);
     for c in v {
-        let abs = Float::with_val(prec, c.abs_ref());
-        norm = Float::with_val(prec, norm.hypot_ref(&abs));
+        let abs = Float::with_val_64(prec, c.abs_ref());
+        norm = Float::with_val_64(prec, norm.hypot_ref(&abs));
     }
     norm
 }
 
 /// Hermitian inner product `<u, v> = Σ ū·v` (conjugate on first argument so
 /// `<u, u>` is real and equals `‖u‖²`).
-fn inner_product_complex(u: &[Complex], v: &[Complex], prec: u32) -> Complex {
+fn inner_product_complex(u: &[Complex], v: &[Complex], prec: u64) -> Complex {
     let mut s = cnum::zero(prec);
     for i in 0..u.len() {
-        let conj_u = Complex::with_val(prec, u[i].conj_ref());
-        let prod = Complex::with_val(prec, &conj_u * &v[i]);
-        s = Complex::with_val(prec, &s + &prod);
+        let conj_u = Complex::with_val_64(prec, u[i].conj_ref());
+        let prod = Complex::with_val_64(prec, &conj_u * &v[i]);
+        s = Complex::with_val_64(prec, &s + &prod);
     }
     s
 }
@@ -3204,7 +3162,7 @@ fn inner_product_complex(u: &[Complex], v: &[Complex], prec: u32) -> Complex {
 ///
 /// Solves `A x = rhs` where `A` is given implicitly via a matvec closure.
 /// Returns `Ok(x)` if the relative residual `‖rhs − A x‖ / ‖rhs‖` falls below
-/// `tol_rel`, or `Err` if `max_outer` restarts exhaust without convergence.
+/// `tol_rel`. Restart on progress; enlarge a stalled Krylov window up to `n`.
 ///
 /// Uses modified Gram-Schmidt Arnoldi and complex Givens rotations of the form
 ///   G = [[c, s], [−s̄, c]]   with `c ∈ ℝ≥0`, `s ∈ ℂ`, `c² + |s|² = 1`
@@ -3215,17 +3173,16 @@ fn gmres_complex<F>(
     matvec: F,
     rhs: &[Complex],
     tol_rel: &Float,
-    max_outer: usize,
     restart: usize,
-    prec: u32,
+    prec: u64,
 ) -> Result<Vec<Complex>, String>
 where
     F: Fn(&[Complex]) -> Vec<Complex>,
 {
     let n = rhs.len();
     let zero_c = cnum::zero(prec);
-    let one_re = Float::with_val(prec, 1u32);
-    let zero_re = Float::new(prec);
+    let one_re = Float::with_val_64(prec, 1u32);
+    let zero_re = Float::new_64(prec);
 
     let rhs_norm = vector_norm_complex(rhs, prec);
     if !rhs_norm.is_finite() || !tol_rel.is_finite() || *tol_rel <= 0 || *tol_rel >= 1 {
@@ -3234,15 +3191,17 @@ where
     if rhs_norm.is_zero() {
         return Ok(vec![zero_c; n]);
     }
-    let target_abs = Float::with_val(prec, &rhs_norm * tol_rel);
+    let target_abs = Float::with_val_64(prec, &rhs_norm * tol_rel);
     if !target_abs.is_finite() || target_abs.is_zero() {
         return Err("GMRES target is outside the exponent range".into());
     }
 
     let mut x = vec![zero_c.clone(); n];
-    let restart = restart.max(1);
+    let mut restart = restart.max(1).min(n);
+    let mut outer = Integer::new();
 
-    for _outer in 0..max_outer {
+    loop {
+        cnum::check_complex_storage((restart as u128 + 1) * (n as u128 + restart as u128), prec)?;
         let ax = matvec(&x);
         if ax.len() != n || !ax.iter().all(cnum::is_finite) {
             return Err("GMRES matvec returned invalid values or dimensions".into());
@@ -3250,7 +3209,7 @@ where
         let r: Vec<Complex> = rhs
             .iter()
             .zip(ax.iter())
-            .map(|(bi, axi)| Complex::with_val(prec, bi - axi))
+            .map(|(bi, axi)| Complex::with_val_64(prec, bi - axi))
             .collect();
         let beta = vector_norm_complex(&r, prec);
         if !beta.is_finite() {
@@ -3259,19 +3218,25 @@ where
         if beta < target_abs {
             return Ok(x);
         }
-        let inv_beta = Float::with_val(prec, &one_re / &beta);
+        let inv_beta = Float::with_val_64(prec, &one_re / &beta);
         let v0: Vec<Complex> = r
             .iter()
-            .map(|c| Complex::with_val(prec, c * &inv_beta))
+            .map(|c| {
+                if inv_beta.is_finite() && !inv_beta.is_zero() {
+                    Complex::with_val_64(prec, c * &inv_beta)
+                } else {
+                    Complex::with_val_64(prec, c / &beta)
+                }
+            })
             .collect();
         let mut basis: Vec<Vec<Complex>> = Vec::with_capacity(restart + 1);
         basis.push(v0);
 
         let mut h_mat: Vec<Vec<Complex>> = vec![vec![zero_c.clone(); restart]; restart + 1];
-        let mut cs: Vec<Float> = vec![Float::with_val(prec, 1u32); restart];
+        let mut cs: Vec<Float> = vec![Float::with_val_64(prec, 1u32); restart];
         let mut sn: Vec<Complex> = vec![zero_c.clone(); restart];
         let mut g: Vec<Complex> = vec![zero_c.clone(); restart + 1];
-        g[0] = Complex::with_val(prec, (beta.clone(), zero_re.clone()));
+        g[0] = Complex::with_val_64(prec, (beta.clone(), zero_re.clone()));
 
         let mut k_done = 0usize;
 
@@ -3284,8 +3249,8 @@ where
             for j in 0..=k {
                 let h_jk = inner_product_complex(&basis[j], &w, prec);
                 for i in 0..n {
-                    let term = Complex::with_val(prec, &h_jk * &basis[j][i]);
-                    w[i] = Complex::with_val(prec, &w[i] - &term);
+                    let term = Complex::with_val_64(prec, &h_jk * &basis[j][i]);
+                    w[i] = Complex::with_val_64(prec, &w[i] - &term);
                 }
                 h_mat[j][k] = h_jk;
             }
@@ -3293,64 +3258,80 @@ where
             if !h_kp1_k_re.is_finite() {
                 return Err("GMRES Arnoldi norm is non-finite".into());
             }
-            h_mat[k + 1][k] = Complex::with_val(prec, (h_kp1_k_re.clone(), zero_re.clone()));
+            h_mat[k + 1][k] = Complex::with_val_64(prec, (h_kp1_k_re.clone(), zero_re.clone()));
 
             // Apply previously-stored Givens rotations to column k of H.
             for j in 0..k {
                 let h1 = h_mat[j][k].clone();
                 let h2 = h_mat[j + 1][k].clone();
-                let term1 = Complex::with_val(prec, &h1 * &cs[j]);
-                let term2 = Complex::with_val(prec, &sn[j] * &h2);
-                h_mat[j][k] = Complex::with_val(prec, &term1 + &term2);
-                let conj_sn = Complex::with_val(prec, sn[j].conj_ref());
-                let term3 = Complex::with_val(prec, &conj_sn * &h1);
-                let term4 = Complex::with_val(prec, &h2 * &cs[j]);
-                h_mat[j + 1][k] = Complex::with_val(prec, &term4 - &term3);
+                let term1 = Complex::with_val_64(prec, &h1 * &cs[j]);
+                let term2 = Complex::with_val_64(prec, &sn[j] * &h2);
+                h_mat[j][k] = Complex::with_val_64(prec, &term1 + &term2);
+                let conj_sn = Complex::with_val_64(prec, sn[j].conj_ref());
+                let term3 = Complex::with_val_64(prec, &conj_sn * &h1);
+                let term4 = Complex::with_val_64(prec, &h2 * &cs[j]);
+                h_mat[j + 1][k] = Complex::with_val_64(prec, &term4 - &term3);
             }
 
             // Construct new Givens rotation that zeros h_mat[k+1][k].
             let a = h_mat[k][k].clone();
             let bv = h_mat[k + 1][k].clone();
-            let abs_a = Float::with_val(prec, a.abs_ref());
-            let abs_b = Float::with_val(prec, bv.abs_ref());
+            let abs_a = Float::with_val_64(prec, a.abs_ref());
+            let abs_b = Float::with_val_64(prec, bv.abs_ref());
             if !abs_a.is_finite() || !abs_b.is_finite() {
                 return Err("GMRES Givens rotation is non-finite".into());
             }
 
             if abs_b.is_zero() {
-                cs[k] = Float::with_val(prec, 1u32);
+                cs[k] = Float::with_val_64(prec, 1u32);
                 sn[k] = zero_c.clone();
             } else if abs_a.is_zero() {
-                cs[k] = Float::new(prec);
-                let inv_abs_b = Float::with_val(prec, &one_re / &abs_b);
-                let conj_b = Complex::with_val(prec, bv.conj_ref());
-                sn[k] = Complex::with_val(prec, &conj_b * &inv_abs_b);
+                cs[k] = Float::new_64(prec);
+                let inv_abs_b = Float::with_val_64(prec, &one_re / &abs_b);
+                let conj_b = Complex::with_val_64(prec, bv.conj_ref());
+                sn[k] = if inv_abs_b.is_finite() && !inv_abs_b.is_zero() {
+                    Complex::with_val_64(prec, &conj_b * &inv_abs_b)
+                } else {
+                    Complex::with_val_64(prec, &conj_b / &abs_b)
+                };
             } else {
-                let asq = Float::with_val(prec, &abs_a * &abs_a);
-                let bsq = Float::with_val(prec, &abs_b * &abs_b);
-                let sum_sq = Float::with_val(prec, &asq + &bsq);
-                let norm = Float::with_val(prec, sum_sq.sqrt_ref());
-                cs[k] = Float::with_val(prec, &abs_a / &norm);
-                let inv_abs_a = Float::with_val(prec, &one_re / &abs_a);
-                let alpha = Complex::with_val(prec, &a * &inv_abs_a);
-                let conj_b = Complex::with_val(prec, bv.conj_ref());
-                let alpha_conj_b = Complex::with_val(prec, &alpha * &conj_b);
-                let inv_norm = Float::with_val(prec, &one_re / &norm);
-                sn[k] = Complex::with_val(prec, &alpha_conj_b * &inv_norm);
+                let asq = Float::with_val_64(prec, &abs_a * &abs_a);
+                let bsq = Float::with_val_64(prec, &abs_b * &abs_b);
+                let sum_sq = Float::with_val_64(prec, &asq + &bsq);
+                let norm = if sum_sq.is_finite() && !sum_sq.is_zero() {
+                    Float::with_val_64(prec, sum_sq.sqrt_ref())
+                } else {
+                    Float::with_val_64(prec, abs_a.hypot_ref(&abs_b))
+                };
+                cs[k] = Float::with_val_64(prec, &abs_a / &norm);
+                let inv_abs_a = Float::with_val_64(prec, &one_re / &abs_a);
+                let alpha = if inv_abs_a.is_finite() && !inv_abs_a.is_zero() {
+                    Complex::with_val_64(prec, &a * &inv_abs_a)
+                } else {
+                    Complex::with_val_64(prec, &a / &abs_a)
+                };
+                let conj_b = Complex::with_val_64(prec, bv.conj_ref());
+                let alpha_conj_b = Complex::with_val_64(prec, &alpha * &conj_b);
+                let inv_norm = Float::with_val_64(prec, &one_re / &norm);
+                sn[k] = if inv_norm.is_finite() && !inv_norm.is_zero() {
+                    Complex::with_val_64(prec, &alpha_conj_b * &inv_norm)
+                } else {
+                    Complex::with_val_64(prec, &alpha_conj_b / &norm)
+                };
             }
 
             // Apply the new rotation to column k.
-            let term_a = Complex::with_val(prec, &a * &cs[k]);
-            let term_b = Complex::with_val(prec, &sn[k] * &bv);
-            h_mat[k][k] = Complex::with_val(prec, &term_a + &term_b);
+            let term_a = Complex::with_val_64(prec, &a * &cs[k]);
+            let term_b = Complex::with_val_64(prec, &sn[k] * &bv);
+            h_mat[k][k] = Complex::with_val_64(prec, &term_a + &term_b);
             h_mat[k + 1][k] = zero_c.clone();
 
             // Apply the new rotation to g (right-hand side after rotations).
             let g_k = g[k].clone();
-            let new_g_k = Complex::with_val(prec, &g_k * &cs[k]);
-            let conj_sn_k = Complex::with_val(prec, sn[k].conj_ref());
-            let neg_term = Complex::with_val(prec, &conj_sn_k * &g_k);
-            let new_g_kp1 = Complex::with_val(prec, -&neg_term);
+            let new_g_k = Complex::with_val_64(prec, &g_k * &cs[k]);
+            let conj_sn_k = Complex::with_val_64(prec, sn[k].conj_ref());
+            let neg_term = Complex::with_val_64(prec, &conj_sn_k * &g_k);
+            let new_g_kp1 = Complex::with_val_64(prec, -&neg_term);
             g[k] = new_g_k;
             g[k + 1] = new_g_kp1;
 
@@ -3359,6 +3340,10 @@ where
             let resid_est = cnum::abs(&g[k + 1], prec);
             if !resid_est.is_finite() {
                 return Err("GMRES residual estimate is non-finite".into());
+            }
+            if cnum::verbose() && (k % 8 == 0 || k_done == restart || resid_est < target_abs) {
+                eprintln!("kouz GMRES cycle {outer}: Krylov {k_done}/{restart}, residual estimate {:.4e}, target {:.3e}",
+                    DisplayFloat(&resid_est), DisplayFloat(&target_abs));
             }
             if resid_est < target_abs {
                 break;
@@ -3369,10 +3354,16 @@ where
                 break;
             }
 
-            let inv_h = Float::with_val(prec, &one_re / &h_kp1_k_re);
+            let inv_h = Float::with_val_64(prec, &one_re / &h_kp1_k_re);
             let v_next: Vec<Complex> = w
                 .iter()
-                .map(|c| Complex::with_val(prec, c * &inv_h))
+                .map(|c| {
+                    if inv_h.is_finite() && !inv_h.is_zero() {
+                        Complex::with_val_64(prec, c * &inv_h)
+                    } else {
+                        Complex::with_val_64(prec, c / &h_kp1_k_re)
+                    }
+                })
                 .collect();
             basis.push(v_next);
         }
@@ -3382,8 +3373,8 @@ where
         for i in (0..k_done).rev() {
             let mut sum = g[i].clone();
             for j in (i + 1)..k_done {
-                let prod = Complex::with_val(prec, &h_mat[i][j] * &y[j]);
-                sum = Complex::with_val(prec, &sum - &prod);
+                let prod = Complex::with_val_64(prec, &h_mat[i][j] * &y[j]);
+                sum = Complex::with_val_64(prec, &sum - &prod);
             }
             // Defensive: pivot can become tiny if A is rank-deficient on the
             // Krylov subspace; in that case the back-sub blows up. Bail on
@@ -3395,14 +3386,14 @@ where
                     i
                 ));
             }
-            y[i] = Complex::with_val(prec, &sum / &h_mat[i][i]);
+            y[i] = Complex::with_val_64(prec, &sum / &h_mat[i][i]);
         }
 
         // x ← x + V_k · y.
         for j in 0..k_done {
             for i in 0..n {
-                let term = Complex::with_val(prec, &basis[j][i] * &y[j]);
-                x[i] = Complex::with_val(prec, &x[i] + &term);
+                let term = Complex::with_val_64(prec, &basis[j][i] * &y[j]);
+                x[i] = Complex::with_val_64(prec, &x[i] + &term);
             }
         }
 
@@ -3413,7 +3404,7 @@ where
         let residual: Vec<_> = rhs
             .iter()
             .zip(&ax)
-            .map(|(b, a)| Complex::with_val(prec, b - a))
+            .map(|(b, a)| Complex::with_val_64(prec, b - a))
             .collect();
         let actual_norm = vector_norm_complex(&residual, prec);
         if !actual_norm.is_finite() {
@@ -3422,12 +3413,26 @@ where
         if actual_norm <= target_abs {
             return Ok(x);
         }
+        if cnum::verbose() {
+            eprintln!(
+                "kouz GMRES cycle {outer}: actual residual {:.6e}",
+                DisplayFloat(&actual_norm)
+            );
+        }
+        if actual_norm >= beta {
+            if restart == n {
+                return Err(format!(
+                    "GMRES stagnation at full Krylov dimension {n}, residual {}",
+                    DisplayFloat(&actual_norm)
+                ));
+            }
+            restart = restart.saturating_mul(2).min(n);
+            if cnum::verbose() {
+                eprintln!("kouz GMRES: increasing stalled Krylov window to {restart}");
+            }
+        }
+        outer += 1;
     }
-
-    Err(format!(
-        "GMRES: failed to converge in {} restarts of size {}",
-        max_outer, restart
-    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3446,7 +3451,7 @@ fn resample_to_grid(
     new_nodes: &[Float],
     l_upper: &Complex,
     l_lower: &Complex,
-    prec: u32,
+    prec: u64,
 ) -> Result<Vec<Complex>, String> {
     if old.samples.len() < 3
         || old.samples.len() != old.nodes.len()
@@ -3462,7 +3467,7 @@ fn resample_to_grid(
                 l_upper.clone()
             }
         } else {
-            let height = Complex::with_val(prec, (cnum::decimal("0.5", prec), t));
+            let height = Complex::with_val_64(prec, (cnum::decimal("0.5", prec), t));
             cauchy_eval(
                 &height,
                 &old.samples,
@@ -3499,7 +3504,7 @@ fn resample_to_grid(
 pub fn setup_kouznetsov_continuation(
     b_target: &Complex,
     fp_target: &FixedPointData,
-    prec: u32,
+    prec: u64,
     digits: u64,
 ) -> Result<KouznetsovState, String> {
     crate::mt::init_pool()?;
@@ -3512,101 +3517,79 @@ pub fn setup_kouznetsov_continuation(
     let b_re_target = b_target.real().clone();
     let eta = cnum::eta_upper(prec);
     if b_re_target <= eta {
-        return Err(format!("continuation: b={:.5} ≤ η={:.5}", b_re_target, eta));
+        return Err(format!(
+            "continuation: b={:.5} ≤ η={:.5}",
+            DisplayFloat(&b_re_target),
+            DisplayFloat(&eta)
+        ));
     }
 
-    // Upfront cap check: compute n_nodes for b_target before doing any work.
-    // If target itself exceeds the continuation cap, fail immediately.
-    const N_CONTINUATION_CAP: usize = 131_072;
-    {
-        let arg_lambda_tgt = arg_abs(&fp_target.lambda, prec);
-        {
-            let t_max_tgt = contour_height(digits, &arg_lambda_tgt, prec)?;
-            let n_bulk_tgt = pick_node_count(digits, &t_max_tgt, prec)?;
-            if n_bulk_tgt > N_CONTINUATION_CAP {
-                return Err(format!(
-                    "continuation node budget exceeded: b={:.5} requires n_nodes={} > cap={} \
-                     (|arg(λ)|={:.4})",
-                    b_re_target, n_bulk_tgt, N_CONTINUATION_CAP, arg_lambda_tgt
-                ));
-            }
-        }
-    }
+    let arg_lambda_tgt = arg_abs(&fp_target.lambda, prec);
+    let t_max_tgt = contour_height(digits, &arg_lambda_tgt, prec)?;
+    let n_bulk_tgt = pick_node_count(digits, &t_max_tgt, prec)?;
+    crate::fft::kernel_fft_len(n_bulk_tgt, prec)?;
 
-    // Starting point: far enough from η that the direct solver handles it
-    // without triggering the parabolic-boundary cap.
+    // Start farther from the parabolic boundary for the cold solve.
     // b=1.75 has |arg(λ)|≈0.9, giving n_nodes≈4096 at 20 digits.
     let b_start = (b_re_target.clone() + cnum::decimal("0.35", prec))
         .max(&cnum::decimal("1.75", prec))
         .min(&cnum::decimal("2.5", prec));
 
     // Limit base increments to 0.025; this does not guarantee convergence.
-    let n_steps = (Float::with_val(prec, &b_start - &b_re_target).abs()
+    let mut n_steps = (Float::with_val_64(prec, &b_start - &b_re_target).abs()
         / cnum::decimal("0.025", prec))
-    .ceil()
-    .to_integer()
-    .and_then(|v| v.to_usize())
-    .and_then(|v| v.checked_add(1))
-    .ok_or("continuation step count exceeds the supported range")?;
-    let n_steps = n_steps.max(2);
-    if n_steps > 10_000 {
-        return Err("continuation requires more than 10000 steps".into());
+    .ceil();
+    n_steps += 1;
+    n_steps = n_steps.max(&Float::with_val_64(prec, 2));
+    if !n_steps.is_finite() {
+        return Err("continuation step count exceeds MPFR's exponent range".into());
     }
 
     if cnum::verbose() {
         eprintln!(
             "kouz continuation: b_target={:.5}  b_start={:.5}  n_steps={}",
-            b_re_target, b_start, n_steps
+            DisplayFloat(&b_re_target),
+            DisplayFloat(&b_start),
+            DisplayFloat(&n_steps)
         );
     }
 
     let mut prev_state: Option<KouznetsovState> = None;
 
-    for step in 0..=n_steps {
-        let frac = Float::with_val(prec, step) / n_steps;
-        let b_step = if step == n_steps {
+    let mut step = Integer::new();
+    while n_steps >= step {
+        let frac = Float::with_val_64(prec, &step) / &n_steps;
+        let b_step = if n_steps == step {
             b_re_target.clone()
         } else {
-            b_start.clone() + Float::with_val(prec, &b_re_target - &b_start) * frac
+            b_start.clone() + Float::with_val_64(prec, &b_re_target - &b_start) * frac
         };
-        let b_cplx = if step == n_steps {
-            Complex::with_val(prec, b_target)
+        let b_cplx = if n_steps == step {
+            Complex::with_val_64(prec, b_target)
         } else {
-            Complex::with_val(prec, (&b_step, 0))
+            Complex::with_val_64(prec, (&b_step, 0))
         };
 
         // Compute fixed-point pair for this b value.
-        let ln_b = Complex::with_val(prec, b_cplx.ln_ref());
-        let neg_ln_b = Complex::with_val(prec, -&ln_b);
+        let ln_b = Complex::with_val_64(prec, b_cplx.ln_ref());
+        let neg_ln_b = Complex::with_val_64(prec, -&ln_b);
         let w0_val = lambertw::w0(&neg_ln_b, prec)
             .map_err(|e| format!("continuation step {}: W₀ failed: {}", step, e))?;
-        let l_raw = Complex::with_val(prec, -w0_val / &ln_b);
+        let l_raw = Complex::with_val_64(prec, -w0_val / &ln_b);
         // Ensure l_upper has Im > 0 (the convention for Schwarz-symmetric bases).
         let l_upper_step = if l_raw.imag().is_sign_negative() {
-            Complex::with_val(prec, l_raw.conj_ref())
+            Complex::with_val_64(prec, l_raw.conj_ref())
         } else {
             l_raw
         };
-        let l_lower_step = Complex::with_val(prec, l_upper_step.conj_ref());
-        let lambda_upper = Complex::with_val(prec, &ln_b * &l_upper_step);
+        let l_lower_step = Complex::with_val_64(prec, l_upper_step.conj_ref());
+        let lambda_upper = Complex::with_val_64(prec, &ln_b * &l_upper_step);
         let arg_lambda = arg_abs(&lambda_upper, prec);
-
-        if arg_lambda <= cnum::decimal("1e-3", prec) {
-            return Err(format!(
-                "continuation step {}: |arg(λ)|={:.4} too small at b={:.5}",
-                step, arg_lambda, b_step
-            ));
-        }
 
         let t_max_fp = contour_height(digits, &arg_lambda, prec)?;
         let n_nodes = pick_node_count(digits, &t_max_fp, prec)?;
 
-        if n_nodes > N_CONTINUATION_CAP {
-            return Err(format!(
-                "continuation step {}: n_nodes={} > {} cap (b={:.5}, |arg(λ)|={:.4})",
-                step, n_nodes, N_CONTINUATION_CAP, b_step, arg_lambda
-            ));
-        }
+        crate::fft::kernel_fft_len(n_nodes, prec)?;
 
         let nodes = build_uniform_nodes(&t_max_fp, n_nodes, prec);
         let weights = build_trapezoidal_weights(&t_max_fp, n_nodes, prec);
@@ -3615,10 +3598,10 @@ pub fn setup_kouznetsov_continuation(
             eprintln!(
                 "kouz cont step {}/{}: b={:.5}  |arg(λ)|={:.4}  t_max={:.1}  n={}  warm={}",
                 step,
-                n_steps,
-                b_step,
-                arg_lambda,
-                t_max_fp,
+                DisplayFloat(&n_steps),
+                DisplayFloat(&b_step),
+                DisplayFloat(&arg_lambda),
+                DisplayFloat(&t_max_fp),
                 n_nodes,
                 prev_state.is_some()
             );
@@ -3635,11 +3618,11 @@ pub fn setup_kouznetsov_continuation(
             symmetrize_schwarz(&mut init, prec);
             init
         } else {
-            // Cold start for the first (safe) step. Use the normal capped solver.
+            // Cold start for the first step.
             let fp_step = FixedPointData {
                 fixed_point: l_upper_step.clone(),
                 lambda: lambda_upper.clone(),
-                lambda_abs: Float::with_val(prec, lambda_upper.abs_ref()),
+                lambda_abs: Float::with_val_64(prec, lambda_upper.abs_ref()),
             };
             let cold = setup_kouznetsov(&b_cplx, &fp_step, prec, digits)?;
             // Resample cold solution onto `nodes` in case step-0 geometry differs.
@@ -3694,6 +3677,7 @@ pub fn setup_kouznetsov_continuation(
             residual: step_residual,
             two_sided: false,
         });
+        step += 1;
     }
 
     prev_state.ok_or_else(|| "continuation: no state produced".into())
@@ -3711,55 +3695,43 @@ fn save_cut_ckpt(
     state: &KouznetsovState,
 ) -> Result<(), String> {
     use std::io::Write;
-    let f = |x: &Float| x.to_string_radix(10, None);
-    let mut buf = String::new();
-    buf.push_str("TETCKPT2\n");
-    buf.push_str(&format!("{}\n", f(b_re)));
-    buf.push_str(&format!("{}\n", digits));
-    buf.push_str(&format!("{}\n", state.prec));
-    buf.push_str(&format!(
-        "{} {} {} {}\n",
-        f(eps_cur),
-        f(arg_up),
-        f(arg_low),
-        f(&state.residual)
-    ));
-    buf.push_str(&format!("{}\n", f(&state.t_max)));
-    buf.push_str(&format!(
-        "{} {}\n",
-        f(&Float::with_val(state.prec, state.l_upper.real())),
-        f(&Float::with_val(state.prec, state.l_upper.imag()))
-    ));
-    buf.push_str(&format!(
-        "{} {}\n",
-        f(&Float::with_val(state.prec, state.l_lower.real())),
-        f(&Float::with_val(state.prec, state.l_lower.imag()))
-    ));
-    buf.push_str(&format!(
-        "{} {}\n",
-        f(&Float::with_val(state.prec, state.ln_b.real())),
-        f(&Float::with_val(state.prec, state.ln_b.imag()))
-    ));
-    buf.push_str(&format!("{}\n", state.samples.len()));
-    for i in 0..state.samples.len() {
-        buf.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
-            f(&state.nodes[i]),
-            f(&state.weights[i]),
-            f(&Float::with_val(state.prec, state.samples[i].real())),
-            f(&Float::with_val(state.prec, state.samples[i].imag()))
-        ));
-    }
+    let f = cnum::format_float_roundtrip;
     let tmp = format!("{}.tmp-{}", path, std::process::id());
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp)
         .map_err(|e| format!("create checkpoint temporary file {}: {}", tmp, e))?;
-    let result = file
-        .write_all(buf.as_bytes())
-        .and_then(|_| file.sync_all())
-        .and_then(|_| std::fs::rename(&tmp, path));
+    let result = (|| -> std::io::Result<()> {
+        let mut out = std::io::BufWriter::new(file);
+        writeln!(out, "TETCKPT2\n{}\n{digits}\n{}", f(b_re), state.prec)?;
+        writeln!(
+            out,
+            "{} {} {} {}",
+            f(eps_cur),
+            f(arg_up),
+            f(arg_low),
+            f(&state.residual)
+        )?;
+        writeln!(out, "{}", f(&state.t_max))?;
+        for value in [&state.l_upper, &state.l_lower, &state.ln_b] {
+            writeln!(out, "{} {}", f(value.real()), f(value.imag()))?;
+        }
+        writeln!(out, "{}", state.samples.len())?;
+        for i in 0..state.samples.len() {
+            writeln!(
+                out,
+                "{}\t{}\t{}\t{}",
+                f(&state.nodes[i]),
+                f(&state.weights[i]),
+                f(state.samples[i].real()),
+                f(state.samples[i].imag())
+            )?;
+        }
+        out.flush()?;
+        out.get_ref().sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
     if let Err(e) = result {
         if let Err(cleanup) = std::fs::remove_file(&tmp) {
             return Err(format!(
@@ -3771,7 +3743,7 @@ fn save_cut_ckpt(
     if cnum::verbose() {
         eprintln!(
             "kouz cut-base walk: checkpoint saved at epsilon={} ({} nodes) -> {}",
-            eps_cur,
+            DisplayFloat(eps_cur),
             state.samples.len(),
             path
         );
@@ -3784,7 +3756,7 @@ fn load_cut_ckpt(
     path: &str,
     b_re: &Float,
     digits: u64,
-    prec: u32,
+    prec: u64,
 ) -> Result<Option<(Float, Float, Float, KouznetsovState)>, String> {
     let txt = match std::fs::read_to_string(path) {
         Ok(txt) => txt,
@@ -3807,7 +3779,7 @@ fn load_cut_ckpt(
     if d_stored != digits {
         return None;
     }
-    let p_stored: u32 = lines.next()?.trim().parse().ok()?;
+    let p_stored: u64 = lines.next()?.trim().parse().ok()?;
     if p_stored != prec {
         return None;
     }
@@ -3837,15 +3809,17 @@ fn load_cut_ckpt(
         if it.next().is_some() {
             return None;
         }
-        Some(Complex::with_val(prec, (re, im)))
+        Some(Complex::with_val_64(prec, (re, im)))
     };
     let l_upper = pc()?;
     let l_lower = pc()?;
     let ln_b = pc()?;
     let n: usize = lines.next()?.trim().parse().ok()?;
-    if !(4..=32_768).contains(&n) {
+    if n < 4 || lines.clone().count() != n {
         return None;
     }
+    crate::fft::kernel_fft_len(n, prec).ok()?;
+    cnum::check_complex_storage(n as u128 * 2, prec).ok()?;
     let mut nodes = Vec::with_capacity(n);
     let mut weights = Vec::with_capacity(n);
     let mut samples = Vec::with_capacity(n);
@@ -3859,13 +3833,13 @@ fn load_cut_ckpt(
         if it.next().is_some() {
             return None;
         }
-        samples.push(Complex::with_val(prec, (re, im)));
+        samples.push(Complex::with_val_64(prec, (re, im)));
     }
-    let base = Complex::with_val(prec, (b_re, &eps_cur));
+    let base = Complex::with_val_64(prec, (b_re, &eps_cur));
     if lines.next().is_some() || nodes != build_uniform_nodes(&t_max, n, prec)
         || weights != build_trapezoidal_weights(&t_max, n, prec)
         || samples.first()? != &l_lower || samples.last()? != &l_upper
-        || ln_b != Complex::with_val(prec, base.ln_ref())
+        || ln_b != Complex::with_val_64(prec, base.ln_ref())
     {
         return None;
     }
@@ -3877,7 +3851,7 @@ fn load_cut_ckpt(
         l_upper,
         l_lower,
         ln_b,
-        shift: Complex::with_val(prec, (Float::new(prec), Float::new(prec))),
+        shift: Complex::with_val_64(prec, (Float::new_64(prec), Float::new_64(prec))),
         prec,
         digits,
         normalized: false,
@@ -3894,25 +3868,31 @@ fn load_cut_ckpt(
 fn cut_schedule(
     start: &Float,
     ratio: &Float,
-    prec: u32,
+    prec: u64,
 ) -> Result<std::collections::VecDeque<Float>, String> {
     if !start.is_finite() || !ratio.is_finite() || *start <= 0 || *ratio <= 0 || *ratio >= 1 {
         return Err("cut-base schedule requires a positive anchor and 0 < ratio < 1".into());
     }
     let mut queue = std::collections::VecDeque::new();
-    let mut epsilon = Float::with_val(prec, start * ratio);
-    while epsilon > cnum::decimal("1e-3", prec) {
-        if queue.len() >= 2000 {
-            return Err("cut-base schedule exceeds the 2000-step budget".into());
-        }
+    let endpoint = cnum::decimal("1e-3", prec);
+    if *start > endpoint {
+        let count = ((endpoint.clone().ln() - start.clone().ln()) / ratio.clone().ln()).ceil();
+        let count =
+            cnum::checked_usize(&count).ok_or("cut-base schedule exceeds addressable memory")?;
+        std::alloc::Layout::array::<Float>(count)
+            .map_err(|_| "cut-base schedule exceeds addressable memory")?;
+        cnum::check_float_storage(count as u128, prec)?;
+    }
+    let mut epsilon = Float::with_val_64(prec, start * ratio);
+    while epsilon > endpoint {
         queue.push_back(epsilon.clone());
-        let next = Float::with_val(prec, &epsilon * ratio);
+        let next = Float::with_val_64(prec, &epsilon * ratio);
         if next >= epsilon {
             return Err("cut-base schedule cannot decrease epsilon at this precision".into());
         }
         epsilon = next;
     }
-    queue.push_back(Float::new(prec));
+    queue.push_back(Float::new_64(prec));
     Ok(queue)
 }
 
@@ -3929,7 +3909,7 @@ fn cut_schedule(
 /// requested residual/normalization gates and is still not an error certificate.
 pub fn setup_kouznetsov_cut_base(
     b_re: &Float,
-    prec: u32,
+    prec: u64,
     digits: u64,
 ) -> Result<KouznetsovState, String> {
     crate::mt::init_pool()?;
@@ -3937,24 +3917,24 @@ pub fn setup_kouznetsov_cut_base(
     if !b_re.is_finite() || *b_re <= 0 || *b_re >= cnum::eta_lower(prec) || digits == 0 {
         return Err(format!(
             "cut-base solve: Re b = {:.6} is not in the cut band (0, e^-e)",
-            b_re
+            DisplayFloat(b_re)
         ));
     }
 
     let verbose = cnum::verbose();
-    let base_at = |eps: &Float| -> Complex { Complex::with_val(prec, (b_re, eps)) };
-    let arg_of = |z: &Complex| -> Float { Float::with_val(prec, z.arg_ref()) };
+    let base_at = |eps: &Float| -> Complex { Complex::with_val_64(prec, (b_re, eps)) };
+    let arg_of = |z: &Complex| -> Float { Float::with_val_64(prec, z.arg_ref()) };
     let dist = |a: &Complex, c: &Complex| -> Float {
-        let d = Complex::with_val(prec, a - c);
+        let d = Complex::with_val_64(prec, a - c);
         cnum::abs(&d, prec)
     };
     // Walk-continuous argument: principal arg shifted by 2πk to land within
     // π of the previous step's value (germ consistency across the ±π seam —
     // at ε = 0, λ_up is real negative and the one-sided limit is arg = +π).
-    let two_pi = Float::with_val(prec, Constant::Pi) * 2u32;
+    let two_pi = Float::with_val_64(prec, Constant::Pi) * 2u32;
     let arg_cont = |z: &Complex, prev: &Float| -> Float {
         let a = arg_of(z);
-        let turns = (Float::with_val(prec, prev - &a) / &two_pi).round();
+        let turns = (Float::with_val_64(prec, prev - &a) / &two_pi).round();
         a + turns * &two_pi
     };
 
@@ -3990,9 +3970,9 @@ pub fn setup_kouznetsov_cut_base(
         if verbose {
             eprintln!(
                 "kouz cut-base walk: RESUMED from checkpoint at ε={:.6e} ({} nodes, residual {:.3e})",
-                r_eps,
+                DisplayFloat(&r_eps),
                 r_state.samples.len(),
-                r_state.residual,
+                DisplayFloat(&r_state.residual),
             );
         }
         l_up = r_state.l_upper.clone();
@@ -4003,33 +3983,33 @@ pub fn setup_kouznetsov_cut_base(
         state = r_state;
     } else {
         let b_anchor = base_at(&eps_anchor);
-        let ln_b_anchor = Complex::with_val(prec, b_anchor.ln_ref());
-        let neg_ln_b_anchor = Complex::with_val(prec, -&ln_b_anchor);
+        let ln_b_anchor = Complex::with_val_64(prec, b_anchor.ln_ref());
+        let neg_ln_b_anchor = Complex::with_val_64(prec, -&ln_b_anchor);
         let w0_val = lambertw::w0(&neg_ln_b_anchor, prec)?;
-        let neg_w0 = Complex::with_val(prec, -&w0_val);
-        l_up = Complex::with_val(prec, &neg_w0 / &ln_b_anchor);
+        let neg_w0 = Complex::with_val_64(prec, -&w0_val);
+        l_up = Complex::with_val_64(prec, &neg_w0 / &ln_b_anchor);
         let w1_val = lambertw::wk(&neg_ln_b_anchor, 1, prec)?;
-        let neg_w1 = Complex::with_val(prec, -&w1_val);
-        l_low = Complex::with_val(prec, &neg_w1 / &ln_b_anchor);
+        let neg_w1 = Complex::with_val_64(prec, -&w1_val);
+        l_low = Complex::with_val_64(prec, &neg_w1 / &ln_b_anchor);
 
-        arg_up = arg_of(&Complex::with_val(prec, &ln_b_anchor * &l_up));
-        arg_low = arg_of(&Complex::with_val(prec, &ln_b_anchor * &l_low));
-        if !(arg_up > cnum::decimal("1e-3", prec) && arg_low < cnum::decimal("-1e-3", prec)) {
+        arg_up = arg_of(&Complex::with_val_64(prec, &ln_b_anchor * &l_up));
+        arg_low = arg_of(&Complex::with_val_64(prec, &ln_b_anchor * &l_low));
+        if !(arg_up > 0 && arg_low < 0) {
             return Err(format!(
                 "cut-base walk: anchor pair at b+{}i is not decay-compatible (arg λ_up={:.4}, arg λ_low={:.4})",
-                eps_anchor, arg_up, arg_low
+                DisplayFloat(&eps_anchor), DisplayFloat(&arg_up), DisplayFloat(&arg_low)
             ));
         }
         if verbose {
             eprintln!(
                 "kouz cut-base walk: anchor ε={}  L_up={:.4}+{:.4}i (argλ={:+.4})  L_low(W₊₁)={:.4}+{:.4}i (argλ={:+.4})",
-                eps_anchor,
-                l_up.real(),
-                l_up.imag(),
-                arg_up,
-                l_low.real(),
-                l_low.imag(),
-                arg_low,
+                DisplayFloat(&eps_anchor),
+                DisplayFloat(l_up.real()),
+                DisplayFloat(l_up.imag()),
+                DisplayFloat(&arg_up),
+                DisplayFloat(l_low.real()),
+                DisplayFloat(l_low.imag()),
+                DisplayFloat(&arg_low),
             );
         }
         state = setup_kouznetsov_core(
@@ -4048,7 +4028,8 @@ pub fn setup_kouznetsov_cut_base(
         .map_err(|e| {
             format!(
                 "cut-base walk: anchor solve at b+{}i failed: {}",
-                eps_anchor, e
+                DisplayFloat(&eps_anchor),
+                e
             )
         })?;
         eps_cur = eps_anchor;
@@ -4061,56 +4042,57 @@ pub fn setup_kouznetsov_cut_base(
         anchor_schedule
     };
 
-    let mut budget: u32 = 2000;
+    let mut solves = Integer::new();
     let mut rescue_pattern: Option<Vec<i32>> = None;
     let mut steps_since_rescue: u32 = u32::MAX;
     while let Some(eps_next) = queue.pop_front() {
-        if budget == 0 {
-            return Err(format!(
-                "cut-base walk: solve budget exhausted at ε={:.6e} (walk from ε={:.6e})",
-                eps_next, eps_cur
-            ));
-        }
-        budget -= 1;
+        solves += 1;
 
         let b_next = base_at(&eps_next);
-        let ln_b_next = Complex::with_val(prec, b_next.ln_ref());
+        let ln_b_next = Complex::with_val_64(prec, b_next.ln_ref());
 
         // Germ-track the pair by Newton from the previous values; W-branch
         // labels are meaningless mid-walk (L_low crosses Im = 0 near ε≈0.7).
         let track = |seed: &Complex| -> Result<Complex, String> {
             newton_fixed_point(&ln_b_next, seed, prec)
         };
-        let step_fail = |msg: String,
-                         queue: &mut std::collections::VecDeque<Float>,
-                         eps_cur: &Float,
-                         eps_next: &Float|
-         -> Result<(), String> {
-            // Bisect: geometric mean for interior steps, arithmetic halving
-            // for the final hop to 0. Give up when the interval collapses.
-            let mid = if *eps_next > 0 {
-                Float::with_val(prec, eps_cur * eps_next).sqrt()
-            } else {
-                Float::with_val(prec, eps_cur / 2)
-            };
-            if mid >= Float::with_val(prec, eps_cur * cnum::decimal("0.995", prec))
-                || mid <= cnum::decimal("1e-8", prec)
-            {
-                return Err(format!(
-                    "cut-base walk: stuck at ε={:.6e} → {:.6e} ({}); bisection floor reached",
-                    eps_cur, eps_next, msg
-                ));
-            }
-            if cnum::verbose() {
-                eprintln!(
+        let step_fail =
+            |msg: String,
+             queue: &mut std::collections::VecDeque<Float>,
+             eps_cur: &Float,
+             eps_next: &Float|
+             -> Result<(), String> {
+                // Bisect: geometric mean for interior steps, arithmetic halving
+                // for the final hop to 0. Give up when the interval collapses.
+                let mid = if *eps_next > 0 {
+                    let product = Float::with_val_64(prec, eps_cur * eps_next);
+                    if product.is_finite() && !product.is_zero() {
+                        product.sqrt()
+                    } else {
+                        Float::with_val_64(prec, eps_cur.sqrt_ref())
+                            * Float::with_val_64(prec, eps_next.sqrt_ref())
+                    }
+                } else {
+                    Float::with_val_64(prec, eps_cur / 2)
+                };
+                if !mid.is_finite() || mid >= *eps_cur || mid <= *eps_next {
+                    return Err(format!(
+                        "cut-base walk: stuck at ε={:.6e} → {:.6e} ({}); bisection floor reached",
+                        DisplayFloat(eps_cur),
+                        DisplayFloat(eps_next),
+                        msg
+                    ));
+                }
+                if cnum::verbose() {
+                    eprintln!(
                     "kouz cut-base walk: step ε={:.6e} → {:.6e} failed ({}); bisecting at ε={:.6e}",
-                    eps_cur, eps_next, msg, mid
+                    DisplayFloat(eps_cur), DisplayFloat(eps_next), msg, DisplayFloat(&mid)
                 );
-            }
-            queue.push_front(eps_next.clone());
-            queue.push_front(mid);
-            Ok(())
-        };
+                }
+                queue.push_front(eps_next.clone());
+                queue.push_front(mid);
+                Ok(())
+            };
 
         let (l_up_next, l_low_next) = match (track(&l_up), track(&l_low)) {
             (Ok(u), Ok(l)) => (u, l),
@@ -4130,22 +4112,29 @@ pub fn setup_kouznetsov_cut_base(
         let move_up = dist(&l_up_next, &l_up);
         let move_low = dist(&l_low_next, &l_low);
         let sep = dist(&l_up_next, &l_low_next);
-        let arg_up_next = arg_cont(&Complex::with_val(prec, &ln_b_next * &l_up_next), &arg_up);
-        let arg_low_next = arg_cont(&Complex::with_val(prec, &ln_b_next * &l_low_next), &arg_low);
+        let arg_up_next = arg_cont(
+            &Complex::with_val_64(prec, &ln_b_next * &l_up_next),
+            &arg_up,
+        );
+        let arg_low_next = arg_cont(
+            &Complex::with_val_64(prec, &ln_b_next * &l_low_next),
+            &arg_low,
+        );
         if move_up > 1 || move_low > 1 || sep < cnum::decimal("0.05", prec) {
             let msg = format!(
                 "pair guard tripped (move_up={:.3}, move_low={:.3}, sep={:.3})",
-                move_up, move_low, sep
+                DisplayFloat(&move_up),
+                DisplayFloat(&move_low),
+                DisplayFloat(&sep)
             );
             step_fail(msg, &mut queue, &eps_cur, &eps_next)?;
             continue;
         }
-        if !(arg_up_next > cnum::decimal("1e-3", prec)
-            && arg_low_next < cnum::decimal("-1e-3", prec))
-        {
+        if !(arg_up_next > 0 && arg_low_next < 0) {
             let msg = format!(
                 "decay compatibility lost (arg λ_up={:.4}, arg λ_low={:.4})",
-                arg_up_next, arg_low_next
+                DisplayFloat(&arg_up_next),
+                DisplayFloat(&arg_low_next)
             );
             step_fail(msg, &mut queue, &eps_cur, &eps_next)?;
             continue;
@@ -4153,16 +4142,16 @@ pub fn setup_kouznetsov_cut_base(
 
         if verbose {
             eprintln!(
-                "kouz cut-base walk: ε={:.6e} → {:.6e}  L_up={:.4}+{:.4}i (argλ={:+.4})  L_low={:.4}+{:.4}i (argλ={:+.4})  [{} solves left]",
-                eps_cur,
-                eps_next,
-                l_up_next.real(),
-                l_up_next.imag(),
-                arg_up_next,
-                l_low_next.real(),
-                l_low_next.imag(),
-                arg_low_next,
-                budget,
+                "kouz cut-base walk: ε={:.6e} → {:.6e}  L_up={:.4}+{:.4}i (argλ={:+.4})  L_low={:.4}+{:.4}i (argλ={:+.4})  [solve {}]",
+                DisplayFloat(&eps_cur),
+                DisplayFloat(&eps_next),
+                DisplayFloat(l_up_next.real()),
+                DisplayFloat(l_up_next.imag()),
+                DisplayFloat(&arg_up_next),
+                DisplayFloat(l_low_next.real()),
+                DisplayFloat(l_low_next.imag()),
+                DisplayFloat(&arg_low_next),
+                solves,
             );
         }
 
@@ -4222,17 +4211,16 @@ pub fn setup_kouznetsov_cut_base(
                 if kept.len() >= 3 {
                     break;
                 }
-                if kept
-                    .iter()
-                    .all(|k| Float::with_val(prec, &k.0 - &m.0).abs() >= cnum::decimal("1.5", prec))
-                {
+                if kept.iter().all(|k| {
+                    Float::with_val_64(prec, &k.0 - &m.0).abs() >= cnum::decimal("1.5", prec)
+                }) {
                     kept.push(m);
                 }
             }
             if kept.is_empty() {
                 kept.push((
-                    Float::new(prec),
-                    Float::with_val(prec, rug::float::Special::Infinity),
+                    Float::new_64(prec),
+                    Float::with_val_64(prec, rug::float::Special::Infinity),
                 ));
             }
             kept
@@ -4271,7 +4259,7 @@ pub fn setup_kouznetsov_cut_base(
                 .collect();
             move |t: &Float| -> Result<Complex, String> {
                 let tc = t.clone().max(&(-t_clamp.clone())).min(&t_clamp);
-                let z0 = Complex::with_val(prec, (cnum::decimal("0.5", prec), tc));
+                let z0 = Complex::with_val_64(prec, (cnum::decimal("0.5", prec), tc));
                 let v = cauchy_eval(
                     &z0, &samples, &nodes, &weights, &t_max, &lu, &ll, &lnb, prec, true,
                 )?;
@@ -4284,20 +4272,22 @@ pub fn setup_kouznetsov_cut_base(
                 // ramp per pinch: →1 deep below it, →0 above it; the product
                 // of correctors is ≡1 at both tails and inserts one winding
                 // loop (of the requested sign) across each active pinch.
-                let mut theta = Float::new(prec);
+                let mut theta = Float::new_64(prec);
                 for (t_p, sgn) in &correctors {
-                    let scaled = Float::with_val(prec, t - t_p) / cnum::decimal("0.75", prec);
-                    let ramp = (Float::with_val(prec, 1) - scaled.tanh()) / 2u32;
+                    let scaled = Float::with_val_64(prec, t - t_p) / cnum::decimal("0.75", prec);
+                    let ramp = (Float::with_val_64(prec, 1) - scaled.tanh()) / 2u32;
                     theta += ramp * &two_pi * *sgn;
                 }
-                let phase_arg =
-                    Complex::with_val(prec, (Float::new(prec), Float::with_val(prec, theta)));
+                let phase_arg = Complex::with_val_64(
+                    prec,
+                    (Float::new_64(prec), Float::with_val_64(prec, theta)),
+                );
                 let phase = cnum::checked_exp(&phase_arg, prec)?;
-                Ok(Complex::with_val(prec, &v * &phase))
+                Ok(Complex::with_val_64(prec, &v * &phase))
             }
         };
         let step_tight = (eps_next > 0
-            && Float::with_val(prec, &eps_cur - &eps_next)
+            && Float::with_val_64(prec, &eps_cur - &eps_next)
                 < cnum::decimal("0.02", prec) * &eps_cur)
             || (eps_next.is_zero() && eps_cur < cnum::decimal("1e-2", prec));
         let np = pinches.len();
@@ -4368,7 +4358,8 @@ pub fn setup_kouznetsov_cut_base(
         let clean_target = if eps_next.is_zero() {
             cnum::epsilon(digits.saturating_add(3), prec)
         } else {
-            (-(Float::with_val(prec, digits) * 2u32 / 5u32) * Float::with_val(prec, 10).ln()).exp()
+            (-(Float::with_val_64(prec, digits) * 2u32 / 5u32) * Float::with_val_64(prec, 10).ln())
+                .exp()
         };
         let mut solved: Option<(KouznetsovState, bool)> = None;
         let mut last_err = String::new();
@@ -4379,28 +4370,25 @@ pub fn setup_kouznetsov_cut_base(
                     .iter()
                     .zip(combo.iter())
                     .filter(|(_, &s)| s != 0)
-                    .map(|(p, &s)| format!("{:+}@t={:.3}(|F|min={:.3e})", s, p.0, p.1))
+                    .map(|(p, &s)| {
+                        format!(
+                            "{:+}@t={:.3}(|F|min={:.3e})",
+                            s,
+                            DisplayFloat(&p.0),
+                            DisplayFloat(&p.1)
+                        )
+                    })
                     .collect();
                 eprintln!(
                     "kouz cut-base walk: homotopy-jump attempt at ε={:.6e}, correctors [{}]",
-                    eps_next,
+                    DisplayFloat(&eps_next),
                     desc.join(", ")
                 );
             }
             let warm = make_warm(combo);
             // Reactive resolution escalation: when a solve is rejected as a
-            // *near-miss* (clean quadratic descent flooring within 3 decades
-            // of the gate — a trapezoidal-resolution kill, not a wrong-class
-            // ghost, which stalls at O(0.1–1)), retry the same combo once at
-            // the next node tier (2× more nodes, up to 8× = 32768 = N_MAX).
-            // Observed need: b=0.06, ε≈0.066–0.068, |F|min just above the
-            // static 4×-tier threshold — n=8192 floors at 2.05e-8 vs gate
-            // 1e-8; paying the 4× solve only after evidence beats raising
-            // the static tier for every step. One escalation per combo
-            // bounds cost; if the escalated solve still skates, bisection
-            // proceeds as before.
+            // near-miss, double resolution while the same construction remains eligible.
             let mut boost_try = node_boost;
-            let mut escalations = 0usize;
             let outcome = loop {
                 let r = setup_kouznetsov_core(
                     &b_next,
@@ -4419,18 +4407,19 @@ pub fn setup_kouznetsov_cut_base(
                     Ok(s)
                         if (s.residual.is_nan() || s.residual > clean_target)
                             && s.residual.is_finite()
-                            && s.residual <= Float::with_val(prec, &clean_target * 1000u32)
-                            && escalations == 0
-                            && boost_try < 8 =>
+                            && s.residual <= Float::with_val_64(prec, &clean_target * 1000u32) =>
                     {
+                        let next_boost = boost_try
+                            .checked_mul(2)
+                            .ok_or("cut-base node refinement exceeds addressable memory")?;
                         if verbose {
                             eprintln!(
                                 "kouz cut-base walk: near-miss at ε={:.6e} (residual {:.3e}, gate {:.1e}, boost {}×); escalating node tier to {}×",
-                                eps_next, s.residual, clean_target, boost_try, boost_try * 2
+                                DisplayFloat(&eps_next), DisplayFloat(&s.residual),
+                                DisplayFloat(&clean_target), boost_try, next_boost
                             );
                         }
-                        boost_try *= 2;
-                        escalations += 1;
+                        boost_try = next_boost;
                         continue;
                     }
                     other => break other,
@@ -4442,25 +4431,26 @@ pub fn setup_kouznetsov_cut_base(
                         if verbose {
                             eprintln!(
                                 "kouz cut-base walk: rejecting result at ε={:.6e} (jump={}): residual {:.3e} not cleanly converged (need ≤ {:.1e}; stagnation-accepted results can be wrong-family ghosts)",
-                                eps_next, is_jump, s.residual, clean_target
+                                DisplayFloat(&eps_next), is_jump, DisplayFloat(&s.residual), DisplayFloat(&clean_target)
                             );
                         }
                         last_err = format!(
                             "result rejected: residual {:.3e} above clean target {:.1e} (no descent surrogate)",
-                            s.residual, clean_target
+                            DisplayFloat(&s.residual), DisplayFloat(&clean_target)
                         );
                         continue;
                     }
                     if verbose && is_jump {
                         eprintln!(
                             "kouz cut-base walk: homotopy jump converged at ε={:.6e} (combo {:?})",
-                            eps_next, combo
+                            DisplayFloat(&eps_next),
+                            combo
                         );
                     }
                     if verbose && s.residual > cnum::epsilon(digits.saturating_add(3), prec) {
                         eprintln!(
                             "kouz: retaining internal cut-base candidate at epsilon={:.6e}, residual {:.3e}; it does not meet the final 1e-{} target",
-                            eps_next, s.residual, digits + 3
+                            DisplayFloat(&eps_next), DisplayFloat(&s.residual), digits + 3
                         );
                     }
                     if is_jump {
@@ -4498,9 +4488,9 @@ pub fn setup_kouznetsov_cut_base(
                     steps_since_rescue = steps_since_rescue.saturating_add(1);
                 }
                 if steps_since_rescue <= 5 && eps_cur > cnum::decimal("1e-3", prec) {
-                    let fine = Float::with_val(prec, &eps_cur * cnum::decimal("0.985", prec));
+                    let fine = Float::with_val_64(prec, &eps_cur * cnum::decimal("0.985", prec));
                     if queue.front().is_some_and(|front| {
-                        *front < Float::with_val(prec, &fine * cnum::decimal("0.9995", prec))
+                        *front < Float::with_val_64(prec, &fine * cnum::decimal("0.9995", prec))
                     }) {
                         queue.push_front(fine);
                     }
@@ -4529,7 +4519,7 @@ pub fn setup_kouznetsov_cut_base(
     if !eps_cur.is_zero() {
         return Err(format!(
             "cut-base walk: schedule ended at ε={:.6e} without reaching 0",
-            eps_cur
+            DisplayFloat(&eps_cur)
         ));
     }
     Ok(state)
@@ -4539,6 +4529,83 @@ pub fn setup_kouznetsov_cut_base(
 mod tests {
     use super::*;
 
+    #[test]
+    fn node_and_em_orders_have_no_practical_precision_ceiling() {
+        for (digits, expected_nodes) in [(200, 524_288), (1500, 16_777_216)] {
+            let prec = cnum::digits_to_bits(digits);
+            let base = Complex::with_val_64(prec, 2);
+            let crate::regions::Region::OutsideShellThronRealPositive(fp) =
+                crate::regions::classify(&base, prec).unwrap()
+            else {
+                panic!("base-2 region");
+            };
+            let height = contour_height(digits, &arg_abs(&fp.lambda, prec), prec).unwrap();
+            let nodes = pick_node_count(digits, &height, prec).unwrap();
+            assert_eq!(nodes, expected_nodes);
+            assert!(crate::fft::kernel_fft_len(nodes, prec).unwrap() >= nodes);
+            assert!(em_n_terms(prec).unwrap() > 20);
+        }
+        let prec = cnum::digits_to_bits(70);
+        let height = contour_height(70, &cnum::decimal("1e-30", prec), prec).unwrap();
+        assert!(pick_node_count(70, &height, prec)
+            .unwrap_err()
+            .contains("addressable memory"));
+        assert!(pick_node_count(70, &cnum::decimal("1e1000000000000000000", prec), prec).is_err());
+    }
+
+    #[test]
+    fn extended_bernoulli_coefficients_match_exact_values_and_zeta() {
+        use rug::{integer::IntegerExt64, ops::Pow};
+        let coefficients = em_coefficients(40).unwrap();
+        for (k, numerator, denominator) in [
+            (1, "1", "12"),
+            (6, "691", "32760"),
+            (20, "261082718496449122051", "541200"),
+            (21, "1520097643918070802691", "75852"),
+            (25, "495057205241079648212477525", "3300"),
+        ] {
+            let expected = Rational::from((
+                Integer::from_str_radix(numerator, 10).unwrap(),
+                Integer::from_str_radix(denominator, 10).unwrap(),
+            ));
+            assert_eq!(coefficients[k - 1], expected);
+        }
+        assert!(coefficients[39].numer().significant_bits_64() > 128);
+        let prec = cnum::digits_to_bits(120);
+        let two_pi = Float::with_val_64(prec, Constant::Pi) * 2u32;
+        for (k, coefficient) in coefficients.iter().take(40).enumerate() {
+            let n = 2 * (k + 1);
+            let factorial = Integer::from(Integer::factorial(n as u32));
+            let reference =
+                Float::with_val_64(prec, factorial) * 2 * Float::with_val_64(prec, n).zeta()
+                    / two_pi.clone().pow(n as u32)
+                    / n;
+            let actual = Float::with_val_64(prec, coefficient);
+            let error = Float::with_val_64(prec, &actual - &reference).abs();
+            assert!(
+                error <= cnum::epsilon(100, prec) * actual.abs(),
+                "Bernoulli coefficient {n}"
+            );
+        }
+        assert!(em_coefficients(usize::MAX)
+            .unwrap_err()
+            .contains("addressable memory"));
+    }
+
+    #[test]
+    fn cut_schedule_can_exceed_two_thousand_steps() {
+        let prec = cnum::digits_to_bits(70);
+        let start = Float::with_val_64(prec, 2);
+        let queue = cut_schedule(&start, &cnum::decimal("0.999", prec), prec).unwrap();
+        assert!(queue.len() > 2000);
+        let mut previous = start;
+        for next in queue {
+            assert!(next < previous);
+            previous = next;
+        }
+        assert!(previous.is_zero());
+    }
+
     fn checkpoint_fixture(digits: u64) -> (Float, Float, KouznetsovState) {
         let prec = cnum::digits_to_bits(digits);
         let base = cnum::decimal("0.04", prec);
@@ -4546,17 +4613,17 @@ mod tests {
             "0.12345678901234567890123456789012345678901234567890123456789",
             prec,
         );
-        let b = Complex::with_val(prec, (&base, &eps));
-        let t_max = Float::with_val(prec, 10);
-        let upper = Complex::with_val(prec, (1, 2));
-        let lower = Complex::with_val(prec, (1, -2));
+        let b = Complex::with_val_64(prec, (&base, &eps));
+        let t_max = Float::with_val_64(prec, 10);
+        let upper = Complex::with_val_64(prec, (1, 2));
+        let lower = Complex::with_val_64(prec, (1, -2));
         let samples = vec![
             lower.clone(),
-            Complex::with_val(
+            Complex::with_val_64(
                 prec,
                 (cnum::decimal("1e-1000", prec), cnum::epsilon(digits, prec)),
             ),
-            Complex::with_val(prec, (cnum::decimal("1e1000", prec), eps.clone())),
+            Complex::with_val_64(prec, (cnum::decimal("1e1000", prec), eps.clone())),
             upper.clone(),
         ];
         (
@@ -4569,7 +4636,7 @@ mod tests {
                 t_max,
                 l_upper: upper,
                 l_lower: lower,
-                ln_b: Complex::with_val(prec, b.ln_ref()),
+                ln_b: Complex::with_val_64(prec, b.ln_ref()),
                 shift: cnum::zero(prec),
                 prec,
                 digits,
@@ -4594,11 +4661,43 @@ mod tests {
     }
 
     #[test]
+    fn checkpoints_support_more_than_32768_nodes_and_native_exponents() {
+        let digits = 70;
+        let (base, eps, mut state) = checkpoint_fixture(digits);
+        let n = 32_769;
+        state.nodes = build_uniform_nodes(&state.t_max, n, state.prec);
+        state.weights = build_trapezoidal_weights(&state.t_max, n, state.prec);
+        state.samples = vec![cnum::one(state.prec); n];
+        state.samples[0] = state.l_lower.clone();
+        state.samples[n - 1] = state.l_upper.clone();
+        state.samples[1] = cnum::parse_complex(
+            "1e1000000000000000000",
+            "1e-1000000000000000000",
+            state.prec,
+        )
+        .unwrap();
+        let path = checkpoint_path();
+        let arg = Float::with_val_64(state.prec, Constant::Pi);
+        save_cut_ckpt(&path, &base, digits, &eps, &arg, &-arg.clone(), &state).unwrap();
+        let (_, _, _, loaded) = load_cut_ckpt(&path, &base, digits, state.prec)
+            .unwrap()
+            .unwrap();
+        assert!(loaded.samples == state.samples);
+        assert!(loaded.nodes == state.nodes);
+        assert!(loaded.weights == state.weights);
+        let original = std::fs::read_to_string(&path).unwrap();
+        let malformed = original.replacen(&format!("\n{n}\n"), &format!("\n{}\n", usize::MAX), 1);
+        std::fs::write(&path, malformed).unwrap();
+        assert!(load_cut_ckpt(&path, &base, digits, state.prec).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn checkpoint_round_trip_preserves_full_precision() {
         for digits in [50, 70, 1000] {
             let (base, eps, state) = checkpoint_fixture(digits);
             let path = checkpoint_path();
-            let arg_up = Float::with_val(state.prec, Constant::Pi);
+            let arg_up = Float::with_val_64(state.prec, Constant::Pi);
             let arg_low = -arg_up.clone();
             assert!(load_cut_ckpt(&path, &base, digits, state.prec)
                 .unwrap()
@@ -4629,8 +4728,8 @@ mod tests {
     fn checkpoint_rejects_corruption_and_reports_io_failures() {
         let (base, eps, state) = checkpoint_fixture(70);
         let path = checkpoint_path();
-        let arg_up = Float::with_val(state.prec, 2);
-        let arg_low = Float::with_val(state.prec, -2);
+        let arg_up = Float::with_val_64(state.prec, 2);
+        let arg_low = Float::with_val_64(state.prec, -2);
         save_cut_ckpt(&path, &base, 70, &eps, &arg_up, &arg_low, &state).unwrap();
         let original = std::fs::read_to_string(&path).unwrap();
         for (line, replacement) in [
@@ -4677,7 +4776,7 @@ mod tests {
     fn residual_dumps_preserve_precision_and_report_collisions() {
         let (_, _, state) = checkpoint_fixture(1000);
         let path = std::path::PathBuf::from(checkpoint_path());
-        let residuals = vec![Complex::with_val(state.prec, cnum::epsilon(1000, state.prec)); 4];
+        let residuals = vec![Complex::with_val_64(state.prec, cnum::epsilon(1000, state.prec)); 4];
         dump_residual(
             &path,
             &state.nodes,
@@ -4718,15 +4817,17 @@ mod tests {
     fn cauchy_operators_reject_nonfinite_and_exponent_range_errors() {
         for digits in [50, 70, 1000] {
             let prec = cnum::digits_to_bits(digits);
-            let t_max = Float::with_val(prec, 1);
+            let t_max = Float::with_val_64(prec, 1);
             let nodes = build_uniform_nodes(&t_max, 4, prec);
             let weights = build_trapezoidal_weights(&t_max, 4, prec);
             let one = cnum::one(prec);
-            let height = Complex::with_val(prec, cnum::decimal("0.5", prec));
+            let height = Complex::with_val_64(prec, cnum::decimal("0.5", prec));
             let kernels = build_cauchy_kernels(&nodes, &t_max, &one, &one, prec).unwrap();
             for value in ["0", "NaN", "inf", "1e1000", "-1e1000"] {
-                let bad =
-                    Complex::with_val(prec, Float::with_val(prec, Float::parse(value).unwrap()));
+                let bad = Complex::with_val_64(
+                    prec,
+                    Float::with_val_64(prec, Float::parse(value).unwrap()),
+                );
                 let mut samples = vec![one.clone(); 4];
                 samples[1] = bad;
                 assert!(cauchy_eval(
@@ -4751,18 +4852,18 @@ mod tests {
         state.ln_b = cnum::one(state.prec);
         let near_zero = cnum::epsilon(60, state.prec);
         let heights = vec![
-            Float::new(state.prec),
+            Float::new_64(state.prec),
             near_zero.clone(),
             state.t_max.clone() * 2u32,
             state.t_max.clone() * -2i32,
         ];
-        let next_upper = Complex::with_val(state.prec, (1, &near_zero));
-        let next_lower = Complex::with_val(state.prec, (1, -&near_zero));
+        let next_upper = Complex::with_val_64(state.prec, (1, &near_zero));
+        let next_lower = Complex::with_val_64(state.prec, (1, -&near_zero));
         let actual =
             resample_to_grid(&state, &heights, &next_upper, &next_lower, state.prec).unwrap();
         assert_ne!(actual[0], actual[1]);
         for (i, height) in heights.iter().take(2).enumerate() {
-            let z = Complex::with_val(state.prec, (cnum::decimal("0.5", state.prec), height));
+            let z = Complex::with_val_64(state.prec, (cnum::decimal("0.5", state.prec), height));
             assert_eq!(
                 actual[i],
                 cauchy_eval(
@@ -4787,7 +4888,7 @@ mod tests {
     #[test]
     fn cut_schedule_validates_ratio_and_decreases_without_rounding_to_f64() {
         let prec = cnum::digits_to_bits(70);
-        let start = Float::with_val(prec, 2);
+        let start = Float::with_val_64(prec, 2);
         for ratio in [
             "0",
             "-0.5",
@@ -4806,19 +4907,20 @@ mod tests {
         for epsilon in queue {
             assert!(epsilon.is_finite() && epsilon < previous && epsilon >= 0);
             if !epsilon.is_zero() {
-                assert_eq!(epsilon, Float::with_val(prec, &previous * &ratio));
+                assert_eq!(epsilon, Float::with_val_64(prec, &previous * &ratio));
             }
             previous = epsilon;
         }
         assert!(previous.is_zero());
-        assert!(cut_schedule(&Float::new(prec), &ratio, prec).is_err());
+        assert!(cut_schedule(&Float::new_64(prec), &ratio, prec).is_err());
     }
 
     #[test]
     fn cached_kouznetsov_rejects_a_different_base() {
         let (base, eps, mut state) = checkpoint_fixture(50);
         state.normalized = true;
-        let wrong_base = Complex::with_val(state.prec, (base + cnum::epsilon(45, state.prec), eps));
+        let wrong_base =
+            Complex::with_val_64(state.prec, (base + cnum::epsilon(45, state.prec), eps));
         let error = eval_kouznetsov(&state, &wrong_base, &cnum::zero(state.prec)).unwrap_err();
         assert!(error.contains("base does not match"), "{error}");
     }
@@ -4826,13 +4928,13 @@ mod tests {
     #[test]
     fn normalization_refuses_a_spurious_root_outside_the_raw_contour() {
         let prec = cnum::digits_to_bits(50);
-        let t_max = Float::with_val(prec, 10);
+        let t_max = Float::with_val_64(prec, 10);
         let nodes = build_uniform_nodes(&t_max, 64, prec);
         let weights = build_trapezoidal_weights(&t_max, 64, prec);
-        let fixed = Complex::with_val(prec, 2);
+        let fixed = Complex::with_val_64(prec, 2);
         let samples = vec![fixed.clone(); 64];
-        let base = Complex::with_val(prec, 2);
-        let ln_b = Complex::with_val(prec, base.ln_ref());
+        let base = Complex::with_val_64(prec, 2);
+        let ln_b = Complex::with_val_64(prec, base.ln_ref());
         // The inconsistent synthetic samples previously produced a raw root
         // near -4.978, although the returned function's anchor error was >2.
         let error = find_normalization_shift(
@@ -4848,13 +4950,13 @@ mod tests {
     #[test]
     fn solvers_reject_nan_instead_of_reporting_zero_residual() {
         let prec = cnum::digits_to_bits(50);
-        let t_max = Float::with_val(prec, 1);
+        let t_max = Float::with_val_64(prec, 1);
         let nodes = build_uniform_nodes(&t_max, 4, prec);
         let weights = build_trapezoidal_weights(&t_max, 4, prec);
-        let upper = Complex::with_val(prec, (1, 1));
-        let lower = Complex::with_val(prec, (1, -1));
+        let upper = Complex::with_val_64(prec, (1, 1));
+        let lower = Complex::with_val_64(prec, (1, -1));
         let mut samples = vec![cnum::one(prec); 4];
-        samples[1] = Complex::with_val(prec, Float::with_val(prec, rug::float::Special::Nan));
+        samples[1] = Complex::with_val_64(prec, Float::with_val_64(prec, rug::float::Special::Nan));
         for solve in [iterate_newton, iterate_anderson, iterate_picard] {
             assert!(solve(
                 samples.clone(),
@@ -4891,27 +4993,32 @@ mod tests {
     fn gmres_preserves_tiny_nonzero_rhs_at_high_precision() {
         for digits in [50, 70, 1000] {
             let prec = cnum::digits_to_bits(digits);
-            for value in ["1e-1000", "1e-200000000", "1e200000000"] {
+            for value in [
+                "1e-1000",
+                "1e-200000000",
+                "1e200000000",
+                "1e-1000000000000000000",
+                "1e1000000000000000000",
+            ] {
                 let rhs = vec![
-                    Complex::with_val(prec, cnum::decimal(value, prec)),
+                    Complex::with_val_64(prec, cnum::decimal(value, prec)),
                     cnum::zero(prec),
                 ];
                 let target = cnum::epsilon(digits, prec);
                 let actual = gmres_complex(
                     |v| {
                         v.iter()
-                            .map(|x| Complex::with_val(prec, x * 2u32))
+                            .map(|x| Complex::with_val_64(prec, x * 2u32))
                             .collect()
                     },
                     &rhs,
                     &target,
                     2,
-                    2,
                     prec,
                 )
                 .unwrap();
                 assert!(!cnum::is_zero(&actual[0]));
-                let residual = Complex::with_val(prec, actual[0].clone() * 2u32 - &rhs[0]);
+                let residual = Complex::with_val_64(prec, actual[0].clone() * 2u32 - &rhs[0]);
                 assert!(cnum::abs(&residual, prec) <= target * cnum::abs(&rhs[0], prec));
             }
         }
@@ -4922,30 +5029,114 @@ mod tests {
         let prec = cnum::digits_to_bits(50);
         let rhs = vec![cnum::one(prec)];
         let tol = cnum::epsilon(50, prec);
-        assert!(gmres_complex(|_| Vec::new(), &rhs, &tol, 1, 1, prec).is_err());
-        let nan = Complex::with_val(prec, Float::with_val(prec, rug::float::Special::Nan));
-        assert!(gmres_complex(|v| v.to_vec(), &[nan], &tol, 1, 1, prec).is_err());
+        assert!(gmres_complex(|_| Vec::new(), &rhs, &tol, 1, prec).is_err());
+        let nan = Complex::with_val_64(prec, Float::with_val_64(prec, rug::float::Special::Nan));
+        assert!(gmres_complex(|v| v.to_vec(), &[nan], &tol, 1, prec).is_err());
         let calls = std::cell::Cell::new(0);
         let inconsistent = |v: &[Complex]| {
             let count = calls.get();
             calls.set(count + 1);
             v.iter()
-                .map(|x| Complex::with_val(prec, x * if count < 2 { 1u32 } else { 2u32 }))
+                .map(|x| Complex::with_val_64(prec, x * if count < 2 { 1u32 } else { 2u32 }))
                 .collect()
         };
-        assert!(gmres_complex(inconsistent, &rhs, &tol, 1, 1, prec).is_err());
+        assert!(gmres_complex(inconsistent, &rhs, &tol, 1, prec).is_err());
+    }
+
+    #[test]
+    fn gmres_continues_past_eight_restarts_and_expands_a_stalled_window() {
+        let prec = cnum::digits_to_bits(100);
+        let rhs = vec![cnum::one(prec); 2];
+        let tolerance = cnum::epsilon(80, prec);
+        let calls = std::cell::Cell::new(0usize);
+        let answer = gmres_complex(
+            |v| {
+                calls.set(calls.get() + 1);
+                vec![v[0].clone(), Complex::with_val_64(prec, &v[1] * 2)]
+            },
+            &rhs,
+            &tolerance,
+            1,
+            prec,
+        )
+        .unwrap();
+        assert!(
+            calls.get() > 30,
+            "must exercise more than eight restart cycles"
+        );
+        let residual = vec![
+            Complex::with_val_64(prec, &answer[0] - 1),
+            Complex::with_val_64(prec, Complex::with_val_64(prec, &answer[1] * 2) - 1),
+        ];
+        assert!(
+            vector_norm_complex(&residual, prec) <= &tolerance * vector_norm_complex(&rhs, prec)
+        );
+
+        let rhs = vec![cnum::one(prec), cnum::zero(prec)];
+        let answer = gmres_complex(
+            |v| vec![v[1].clone(), Complex::with_val_64(prec, -&v[0])],
+            &rhs,
+            &tolerance,
+            1,
+            prec,
+        )
+        .unwrap();
+        assert!(cnum::abs(&answer[0], prec) < tolerance);
+        assert!(cnum::abs(&Complex::with_val_64(prec, &answer[1] - 1), prec) < tolerance);
+    }
+
+    #[test]
+    fn cauchy_height_shift_performs_exactly_the_requested_steps() {
+        for digits in [50, 70, 1000] {
+            let prec = cnum::digits_to_bits(digits);
+            let t_max = Float::with_val_64(prec, 10);
+            let nodes = build_uniform_nodes(&t_max, 256, prec);
+            let weights = build_trapezoidal_weights(&t_max, 256, prec);
+            let one = cnum::one(prec);
+            let samples = vec![one.clone(); nodes.len()];
+            let height = Complex::with_val_64(prec, cnum::decimal("0.25", prec));
+            let value = cauchy_eval(
+                &height, &samples, &nodes, &weights, &t_max, &one, &one, &one, prec, false,
+            )
+            .unwrap();
+            for shift in [-2i32, -1, 0, 1, 2] {
+                let mut expected = value.clone();
+                for _ in 0..shift.unsigned_abs() {
+                    expected = if shift > 0 {
+                        cnum::checked_exp(&expected, prec).unwrap()
+                    } else {
+                        Complex::with_val_64(prec, expected.ln_ref())
+                    };
+                }
+                let shifted_height = height.clone() + shift;
+                let actual = eval_at_height(
+                    &shifted_height,
+                    &samples,
+                    &nodes,
+                    &weights,
+                    &t_max,
+                    &one,
+                    &one,
+                    &one,
+                    prec,
+                    false,
+                )
+                .unwrap();
+                assert!(actual == expected, "{digits} digits, shift {shift}");
+            }
+        }
     }
 
     #[test]
     fn cauchy_geometry_never_saturates_height_or_returns_an_asymptote() {
         let prec = cnum::digits_to_bits(50);
-        let t_max = Float::with_val(prec, 1);
+        let t_max = Float::with_val_64(prec, 1);
         let nodes = build_uniform_nodes(&t_max, 4, prec);
         let weights = build_trapezoidal_weights(&t_max, 4, prec);
         let samples = vec![cnum::one(prec); 4];
         for (re, im) in [
             ("1e1000", "0"),
-            ("-9223372036854775808", "0"),
+            ("-9223372036854775808", "1"),
             ("10001", "0"),
             ("0.5", "1"),
             ("0.5", "-1"),
@@ -4982,10 +5173,10 @@ mod tests {
             let l_low = cnum::parse_complex("0.2", "-4", prec).unwrap();
             let g: Vec<Complex> = (0..n)
                 .map(|i| {
-                    let s = Float::with_val(prec, i) / (n - 1);
+                    let s = Float::with_val_64(prec, i) / (n - 1);
                     let re = cnum::decimal("0.2", prec) + s.clone() / 10u32;
                     let im = s * 8u32 - 4u32;
-                    Complex::with_val(prec, (re, im))
+                    Complex::with_val_64(prec, (re, im))
                 })
                 .collect();
             let samples: Vec<_> = g
@@ -4994,7 +5185,7 @@ mod tests {
                 .collect();
             let out = unwrapped_ln_samples(&samples, &l_up, &l_low, &ln_b, prec, true);
             for (o, gi) in out.iter().zip(g.iter()) {
-                let d = cnum::abs(&Complex::with_val(prec, o - gi), prec);
+                let d = cnum::abs(&Complex::with_val_64(prec, o - gi), prec);
                 assert!(d < cnum::epsilon(digits, prec), "unwrap deviated by {d}");
             }
         }
@@ -5009,18 +5200,18 @@ mod tests {
         for digits in [50, 70, 1000] {
             let prec = cnum::digits_to_bits(digits);
             let n = 64usize;
-            let two_pi = Float::with_val(prec, Constant::Pi) * 2u32;
+            let two_pi = Float::with_val_64(prec, Constant::Pi) * 2u32;
             let ln_b = cnum::one(prec);
             let l_up = cnum::parse_complex("0.3", "4", prec).unwrap();
             let l_low = cnum::parse_complex("0.2", "-4", prec).unwrap();
             let g: Vec<Complex> = (0..n)
                 .map(|i| {
-                    let s = Float::with_val(prec, i) / (n - 1);
+                    let s = Float::with_val_64(prec, i) / (n - 1);
                     let ramp = ((s.clone() - cnum::decimal("0.5", prec)) * 8u32).tanh() / 2u32
                         + cnum::decimal("0.5", prec);
                     let re = cnum::decimal("0.2", prec) + s.clone() / 10u32;
                     let im = s * 8u32 - 4u32 + &two_pi * ramp;
-                    Complex::with_val(prec, (re, im))
+                    Complex::with_val_64(prec, (re, im))
                 })
                 .collect();
             let samples: Vec<_> = g
@@ -5030,12 +5221,13 @@ mod tests {
             let out = unwrapped_ln_samples(&samples, &l_up, &l_low, &ln_b, prec, true);
             for (i, (o, gi)) in out.iter().zip(g.iter()).enumerate() {
                 let shift = if i < n / 2 {
-                    Float::new(prec)
+                    Float::new_64(prec)
                 } else {
                     -two_pi.clone()
                 };
-                let expected = Complex::with_val(prec, gi + Complex::with_val(prec, (0, shift)));
-                let d = cnum::abs(&Complex::with_val(prec, o - &expected), prec);
+                let expected =
+                    Complex::with_val_64(prec, gi + Complex::with_val_64(prec, (0, shift)));
+                let d = cnum::abs(&Complex::with_val_64(prec, o - &expected), prec);
                 assert!(
                     d < cnum::epsilon(digits, prec),
                     "node {i}: anchored unwrap error {d}"

@@ -33,10 +33,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rayon::prelude::*;
-use rug::{ops::Pow, Complex, Float, Integer, Rational};
+use rug::{integer::IntegerExt64, Complex, Float, Integer};
 use tetration::{cnum, dispatch, kouznetsov, regions, schroder};
-
-const MAX_GRID_CELLS: usize = 1_000_000;
 
 fn main() {
     if let Err(error) = run() {
@@ -82,11 +80,10 @@ fn run() -> Result<(), String> {
     let total_cells = total_bases
         .checked_mul(total_heights)
         .ok_or("grid size overflow")?;
-    if total_cells > MAX_GRID_CELLS {
-        return Err(format!(
-            "grid exceeds the {MAX_GRID_CELLS}-cell resource limit"
-        ));
-    }
+    let output_digits =
+        usize::try_from(digits).map_err(|_| "output precision exceeds addressable memory")?;
+    std::alloc::Layout::array::<(usize, usize)>(total_bases)
+        .map_err(|_| "base grid exceeds addressable memory")?;
     let integer_heights_only = h_im_axis.iter().all(|v| v.value.is_zero())
         && h_re_axis.iter().all(|v| v.value.is_integer());
     if cnum::verbose() {
@@ -134,7 +131,7 @@ fn run() -> Result<(), String> {
     let process_base = |&(re_idx, im_idx): &(usize, usize)| -> Result<(), String> {
         let b_re = &b_re_axis[re_idx];
         let b_im = &b_im_axis[im_idx];
-        let b = Complex::with_val(prec, (&b_re.value, &b_im.value));
+        let b = Complex::with_val_64(prec, (&b_re.value, &b_im.value));
         let b_re_s = &b_re.text;
         let b_im_s = &b_im.text;
         let base_t0 = Instant::now();
@@ -147,12 +144,12 @@ fn run() -> Result<(), String> {
         let mut base_undef: usize = 0;
         let mut base_err: usize = 0;
         // Buffer this base's rows; flush once at the end so output stays grouped.
-        let mut buf: Vec<u8> = Vec::with_capacity(h_re_axis.len() * h_im_axis.len() * 80);
+        let mut buf = Vec::new();
         for h_re in &h_re_axis {
             let h_re_s = &h_re.text;
             for h_im in &h_im_axis {
                 let h_im_s = &h_im.text;
-                let h = Complex::with_val(prec, (&h_re.value, &h_im.value));
+                let h = Complex::with_val_64(prec, (&h_re.value, &h_im.value));
                 // Domain pre-check — these are not algorithm failures, they
                 // are mathematically-undefined cells. Tag them with status
                 // `undef` so they don't pollute the algorithm-error count.
@@ -172,7 +169,7 @@ fn run() -> Result<(), String> {
                 let elapsed = cell_t0.elapsed().as_secs_f64();
                 match result {
                     Ok(v) => {
-                        let (re_str, im_str) = cnum::format_complex(&v, digits as usize);
+                        let (re_str, im_str) = cnum::format_complex(&v, output_digits);
                         use std::io::Write as _;
                         writeln!(
                             &mut buf,
@@ -315,73 +312,92 @@ fn scaled_decimal(text: &str) -> Result<(Integer, i64), String> {
         .map_err(|_| "axis decimal is too long")?
         .checked_sub(exponent)
         .ok_or("axis scale overflow")?;
-    if scale.unsigned_abs() > 1_000_000 {
-        return Err("axis decimal scale exceeds the 1000000-place resource limit".into());
-    }
     let coefficient = Integer::from_str_radix(&coefficient, 10)
         .map_err(|e| format!("invalid axis value {text:?}: {e}"))?;
     Ok((coefficient, scale))
 }
 
-fn format_scaled(coefficient: &Integer, scale: usize) -> String {
+fn format_scaled(coefficient: &Integer, scale: i64) -> String {
     if coefficient.is_zero() {
         return "0".into();
     }
     let digits = coefficient.clone().abs().to_string();
-    let mut text = if scale == 0 {
+    let exponent = -i128::from(scale);
+    let scientific = format!("{digits}e{exponent}");
+    let mut text = if scale < 0 {
+        scientific
+    } else if scale == 0 {
         digits
-    } else if digits.len() <= scale {
-        format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
     } else {
-        let split = digits.len() - scale;
-        format!("{}.{}", &digits[..split], &digits[split..])
+        let fixed_len = if digits.len() as u128 <= scale as u128 {
+            scale as u128 + 2
+        } else {
+            digits.len() as u128 + 1
+        };
+        if (scientific.len() as u128) < fixed_len {
+            scientific
+        } else {
+            let scale = usize::try_from(scale)
+                .expect("selected fixed decimal label exceeds addressable memory");
+            let fixed = if digits.len() <= scale {
+                format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
+            } else {
+                let split = digits.len() - scale;
+                format!("{}.{}", &digits[..split], &digits[split..])
+            };
+            fixed.trim_end_matches('0').trim_end_matches('.').to_owned()
+        }
     };
-    if scale != 0 {
-        text = text.trim_end_matches('0').trim_end_matches('.').to_owned();
-    }
     if coefficient < &0 {
         text.insert(0, '-');
     }
     text
 }
 
-fn build_axis(lo: &str, hi: &str, step: &str, prec: u32) -> Result<Vec<AxisValue>, String> {
+fn build_axis(lo: &str, hi: &str, step: &str, prec: u64) -> Result<Vec<AxisValue>, String> {
+    cnum::check_precision(prec)?;
     let (lo, lo_scale) = scaled_decimal(lo)?;
     let (hi, hi_scale) = scaled_decimal(hi)?;
     let (step, step_scale) = scaled_decimal(step)?;
-    let scale = lo_scale.max(hi_scale).max(step_scale).max(0);
-    let lo = lo * Integer::from(10).pow((scale - lo_scale) as u32);
-    let hi = hi * Integer::from(10).pow((scale - hi_scale) as u32);
-    let step = step * Integer::from(10).pow((scale - step_scale) as u32);
+    if step <= 0 {
+        return Err("grid axes require a positive step and lo <= hi".into());
+    }
+    let mut scale = step_scale;
+    if !lo.is_zero() {
+        scale = scale.max(lo_scale);
+    }
+    if !hi.is_zero() {
+        scale = scale.max(hi_scale);
+    }
+    let align = |coefficient: Integer, old_scale: i64| -> Result<Integer, String> {
+        if coefficient.is_zero() {
+            return Ok(coefficient);
+        }
+        let places = u64::try_from(i128::from(scale) - i128::from(old_scale))
+            .map_err(|_| "axis decimal alignment exceeds addressable memory")?;
+        let bits = (u128::from(places) * 332_193).div_ceil(100_000);
+        if bits.div_ceil(8) > isize::MAX as u128 {
+            return Err("axis decimal alignment exceeds addressable memory".into());
+        }
+        Ok(coefficient * Integer::from(Integer::u64_pow_u64(10, places)))
+    };
+    let lo = align(lo, lo_scale)?;
+    let hi = align(hi, hi_scale)?;
+    let step = align(step, step_scale)?;
     if step <= 0 || hi < lo {
         return Err("grid axes require a positive step and lo <= hi".into());
     }
-    let coordinate_bits = lo.significant_bits().max(hi.significant_bits());
     let count = ((hi - &lo) / &step + 1u32)
         .to_usize()
-        .filter(|&n| n <= MAX_GRID_CELLS)
-        .ok_or("axis exceeds the grid resource limit")?;
-    if count
-        .checked_mul(
-            scale as usize
-                + coordinate_bits as usize
-                + (prec as usize).div_ceil(64) * 8
-                + std::mem::size_of::<AxisValue>()
-                + 32,
-        )
-        .is_none_or(|bytes| bytes > 128 * 1024 * 1024)
-    {
-        return Err("axis coordinate storage exceeds the 128 MiB resource budget".into());
-    }
-    let denominator = Integer::from(10).pow(scale as u32);
+        .ok_or("axis point count exceeds addressable memory")?;
+    std::alloc::Layout::array::<AxisValue>(count)
+        .map_err(|_| "axis array exceeds addressable memory")?;
+    cnum::check_float_storage(count as u128, prec)?;
     let mut axis = Vec::with_capacity(count);
     for i in 0..count {
         let coefficient = lo.clone() + &step * i;
-        let text = format_scaled(&coefficient, scale as usize);
-        let value = Float::with_val(
-            prec,
-            Rational::from((coefficient.clone(), denominator.clone())),
-        );
+        let text = format_scaled(&coefficient, scale);
+        let value = cnum::parse_float(&text, prec)?;
         if !value.is_finite() || (value.is_zero() && !coefficient.is_zero()) {
             return Err("grid coordinate exceeds MPFR's exponent range".into());
         }
@@ -434,7 +450,7 @@ impl BaseCache {
     }
 }
 
-fn build_cache(b: &Complex, prec: u32, digits: u64) -> BaseCache {
+fn build_cache(b: &Complex, prec: u64, digits: u64) -> BaseCache {
     if cnum::is_zero(b) || cnum::is_one(b) {
         return BaseCache::SpecialBase;
     }
@@ -469,7 +485,7 @@ fn eval_cell(
     cache: &BaseCache,
     b: &Complex,
     h: &Complex,
-    prec: u32,
+    prec: u64,
     digits: u64,
 ) -> Result<Complex, String> {
     if h.imag().is_zero() && h.real().is_integer() {
@@ -544,13 +560,13 @@ mod tests {
             assert_eq!(base_axis[0].text, base);
             assert_eq!(odd_axis[0].text, odd);
             assert_eq!(fractional_axis[0].text, fractional);
-            let b = Complex::with_val(prec, (&base_axis[0].value, 0));
-            let h = Complex::with_val(prec, (&odd_axis[0].value, 0));
+            let b = Complex::with_val_64(prec, (&base_axis[0].value, 0));
+            let h = Complex::with_val_64(prec, (&odd_axis[0].value, 0));
             assert_eq!(
                 eval_cell(
                     &BaseCache::DispatchFallback,
                     &b,
-                    &Complex::with_val(prec, -1),
+                    &Complex::with_val_64(prec, -1),
                     prec,
                     digits,
                 )
@@ -561,7 +577,7 @@ mod tests {
                 eval_cell(&BaseCache::SpecialBase, &cnum::zero(prec), &h, prec, digits).unwrap(),
                 cnum::zero(prec)
             );
-            let h = Complex::with_val(prec, (&fractional_axis[0].value, 0));
+            let h = Complex::with_val_64(prec, (&fractional_axis[0].value, 0));
             assert_eq!(
                 domain_undefined(&cnum::zero(prec), &h),
                 Some("b=0: tetration only defined for non-negative integer heights")
@@ -582,11 +598,47 @@ mod tests {
             ("0", "1", "1e-1000"),
             ("0", "1.2.3", "1"),
             ("0", "1", "1e-9223372036854775808"),
-            ("0", "1e10000", "1e9995"),
         ] {
             assert!(build_axis(lo, hi, step, prec).is_err(), "{lo} {hi} {step}");
         }
-        assert!(build_axis("0", "0", "1", u32::MAX).is_err());
+        assert!(build_axis("0", "0", "1", u64::MAX).is_err());
+    }
+
+    #[test]
+    fn axes_have_no_million_point_or_128_mib_budget() {
+        let prec = cnum::digits_to_bits(50);
+        let axis = build_axis("0", "1000001", "1", prec).unwrap();
+        assert_eq!(axis.len(), 1_000_002);
+        assert_eq!(axis.first().unwrap().text, "0");
+        assert_eq!(axis.last().unwrap().text, "1000001");
+        assert_eq!(axis.last().unwrap().value, 1_000_001);
+    }
+
+    #[test]
+    fn axes_do_not_expand_common_exponents_into_integer_zeros() {
+        let prec = cnum::digits_to_bits(70);
+        for exponent in [
+            10_000,
+            1_000_001,
+            10_000_000_000i64,
+            -1_000_001,
+            -10_000_000_000,
+        ] {
+            let lo = format!("1e{exponent}");
+            let hi = format!("3e{exponent}");
+            let axis = build_axis(&lo, &hi, &lo, prec).unwrap();
+            assert_eq!(axis.len(), 3);
+            for (i, coordinate) in axis.iter().enumerate() {
+                assert!(coordinate.text.len() < 30);
+                assert_eq!(
+                    coordinate.value,
+                    cnum::decimal(&format!("{}e{exponent}", i + 1), prec)
+                );
+            }
+        }
+        let axis = build_axis("0", "1e10000", "1e9995", prec).unwrap();
+        assert_eq!(axis.len(), 100_001);
+        assert_eq!(axis.last().unwrap().value, cnum::decimal("1e10000", prec));
     }
 
     #[test]
@@ -609,7 +661,7 @@ mod tests {
         }
         let negative = cnum::parse_complex("-1e1000", "0", prec).unwrap();
         assert!(domain_undefined(&cnum::one(prec), &negative).is_none());
-        assert!(domain_undefined(&Complex::with_val(prec, 2), &negative).is_some());
+        assert!(domain_undefined(&Complex::with_val_64(prec, 2), &negative).is_some());
         assert_eq!(
             eval_cell(
                 &BaseCache::SpecialBase,

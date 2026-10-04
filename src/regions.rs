@@ -62,7 +62,7 @@ pub const SHELL_THRON_OUTER_THRESHOLD: &str = "1.05";
 
 /// Classify base `b`. Computes the fixed-point data via Lambert W and labels
 /// the region used by `dispatch::tetrate`.
-pub fn classify(b: &Complex, prec: u32) -> Result<Region, String> {
+pub fn classify(b: &Complex, prec: u64) -> Result<Region, String> {
     if !cnum::is_finite(b) {
         return Err("base classification requires a finite base".into());
     }
@@ -74,13 +74,13 @@ pub fn classify(b: &Complex, prec: u32) -> Result<Region, String> {
     }
 
     // L = -W₀(-ln b) / ln b
-    let ln_b = Complex::with_val(prec, b.ln_ref());
-    let neg_ln_b = Complex::with_val(prec, -&ln_b);
+    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let neg_ln_b = Complex::with_val_64(prec, -&ln_b);
     let w = lambertw::w0(&neg_ln_b, prec)?;
-    let neg_w = Complex::with_val(prec, -&w);
-    let l = Complex::with_val(prec, &neg_w / &ln_b);
-    let lambda = Complex::with_val(prec, &l * &ln_b);
-    let lambda_abs = Float::with_val(prec, lambda.abs_ref());
+    let neg_w = Complex::with_val_64(prec, -&w);
+    let l = Complex::with_val_64(prec, &neg_w / &ln_b);
+    let lambda = Complex::with_val_64(prec, &l * &ln_b);
+    let lambda_abs = Float::with_val_64(prec, lambda.abs_ref());
     if !cnum::is_finite(&l) || !lambda_abs.is_finite() {
         return Err("fixed-point computation produced a non-finite value".into());
     }

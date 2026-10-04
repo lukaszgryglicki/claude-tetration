@@ -28,9 +28,10 @@
 //!     inside the σ̃⁻¹ Taylor disk, then iterate `b^·` (`k<0`) or `log_b`
 //!     (`k>0`) back.
 
-use rug::{ops::Pow, Complex, Float};
+use rug::{ops::Pow, Complex, Float, Integer};
 
 use crate::{cnum, regions::FixedPointData};
+use cnum::{DisplayComplex, DisplayFloat};
 
 /// Cached per-base Schröder state. Built once via `setup_schroder` and reused
 /// for many heights via `eval_schroder`. Amortises the O(N²) σ̃ Taylor build
@@ -58,7 +59,7 @@ pub struct SchroderState {
     pub sigma_inner_radius: Float,
     /// MPC bit precision the state was built at — must match the precision
     /// used for per-cell evaluation.
-    pub prec: u32,
+    pub prec: u64,
 }
 
 /// Compute `F_b(h)` via Schröder expansion at the upper fixed point.
@@ -81,7 +82,7 @@ pub fn tetrate_schroder(
     b: &Complex,
     h: &Complex,
     fp_data: &FixedPointData,
-    prec: u32,
+    prec: u64,
 ) -> Result<Complex, String> {
     // setup_schroder now includes the anchor check (F(0)=1), so any degenerate
     // state is rejected before we reach eval.
@@ -99,40 +100,42 @@ fn validate_functional_equation(
     state: &SchroderState,
     h: &Complex,
     f_h: &Complex,
-    prec: u32,
+    prec: u64,
 ) -> Result<(), String> {
     let one = cnum::one(prec);
-    let h_plus_one = Complex::with_val(prec, h + &one);
+    let h_plus_one = Complex::with_val_64(prec, h + &one);
     let f_h_plus_one = eval_schroder_raw(state, &h_plus_one)?;
 
     // b^F(h) = exp(F(h) · ln b)
-    let exponent = Complex::with_val(prec, f_h * &state.ln_b);
+    let exponent = Complex::with_val_64(prec, f_h * &state.ln_b);
     let b_pow_f_h = cnum::checked_exp(&exponent, prec)?;
 
-    let diff = Complex::with_val(prec, &f_h_plus_one - &b_pow_f_h);
+    let diff = Complex::with_val_64(prec, &f_h_plus_one - &b_pow_f_h);
     let diff_abs = cnum::abs(&diff, prec);
-    let f_abs = cnum::abs(&f_h_plus_one, prec).max(&Float::with_val(prec, 1));
-    let rel = Float::with_val(prec, &diff_abs / &f_abs);
+    let f_abs = cnum::abs(&f_h_plus_one, prec).max(&Float::with_val_64(prec, 1));
+    let rel = Float::with_val_64(prec, &diff_abs / &f_abs);
 
     let tol = cnum::working_epsilon(prec);
     if !rel.is_finite() || rel > tol {
         if cnum::verbose() {
             eprintln!(
                 "schröder validation FAILED: |F(h+1) − b^F(h)| = {:.3e}, |F(h+1)| ≈ {:.3e}, rel = {:.3e}",
-                diff_abs, f_abs, rel
+                DisplayFloat(&diff_abs), DisplayFloat(&f_abs), DisplayFloat(&rel)
             );
         }
         return Err(format!(
             "Schröder series evaluation failed validation: \
              |F(h+1) − b^F(h)| / max(|F(h+1)|, 1) = {:.3e} exceeds {:.0e} \
              — Taylor series likely outside true radius of convergence (|λ|={:.4})",
-            rel, tol, state.lam_abs
+            DisplayFloat(&rel),
+            DisplayFloat(&tol),
+            DisplayFloat(&state.lam_abs)
         ));
     }
     if cnum::verbose() {
         eprintln!(
             "schröder validation OK: |F(h+1) − b^F(h)| / max(|F(h+1)|, 1) = {:.3e}",
-            rel
+            DisplayFloat(&rel)
         );
     }
     Ok(())
@@ -145,8 +148,10 @@ fn validate_functional_equation(
 pub fn setup_schroder(
     b: &Complex,
     fp_data: &FixedPointData,
-    prec: u32,
+    prec: u64,
 ) -> Result<SchroderState, String> {
+    crate::mt::init_pool()?;
+    cnum::check_precision(prec)?;
     if !cnum::is_finite(b)
         || !cnum::is_finite(&fp_data.fixed_point)
         || !cnum::is_finite(&fp_data.lambda)
@@ -157,25 +162,28 @@ pub fn setup_schroder(
     let lambda = &fp_data.lambda;
     let lam_abs = fp_data.lambda_abs.clone();
     if !(lam_abs > 0 && lam_abs.is_finite()) {
-        return Err(format!("Schröder: invalid |λ| = {}", lam_abs));
+        return Err(format!(
+            "Schröder: invalid |λ| = {}",
+            DisplayFloat(&lam_abs)
+        ));
     }
     // The build recursion divides by `λ^N − λ`, which vanishes only at
     // λ ∈ root-of-unity. For |λ|=1 exactly (true parabolic), we'd hit a
     // zero denominator at N=1 (since λ^1 − λ = 0 trivially). Block only
     // a very tight band around |λ|=1; let σ̃-shift + extended N handle
     // the boundary band (|λ|=0.95–0.99).
-    if Float::with_val(prec, &lam_abs - 1).abs() < cnum::decimal("0.005", prec) {
+    if Float::with_val_64(prec, &lam_abs - 1).abs() < cnum::decimal("0.005", prec) {
         return Err(format!(
             "Schröder unreliable on parabolic boundary (|λ| = {})",
-            lam_abs
+            DisplayFloat(&lam_abs)
         ));
     }
 
     let one = cnum::one(prec);
-    let w0 = Complex::with_val(prec, &one - l);
+    let w0 = Complex::with_val_64(prec, &one - l);
     let w0_abs = cnum::abs(&w0, prec);
     if !(w0_abs.is_finite() && w0_abs > 0) {
-        return Err(format!("Schröder: bad |1−L| = {}", w0_abs));
+        return Err(format!("Schröder: bad |1−L| = {}", DisplayFloat(&w0_abs)));
     }
 
     // Cheap pre-check at modest precision: if the σ̃ Taylor terms at w₀ are
@@ -186,7 +194,7 @@ pub fn setup_schroder(
     // probe only filters obviously-hopeless cases.
     radius_probe(b, l, lambda, prec, &w0, &w0_abs)?;
 
-    let n_terms = pick_n_terms(&lam_abs, prec);
+    let n_terms = pick_n_terms(&lam_abs, prec)?;
     let (sigma, sigma_inv) = build_series(b, lambda, prec, n_terms)?;
 
     // σ̃(1 − L) is needed for the F(z) = L + σ̃⁻¹(σ̃(1−L)·λ^z) formula. If the
@@ -202,15 +210,20 @@ pub fn setup_schroder(
     // justified replacement. The dispatcher may try its other constructions.
     let (s1, sigma_inner_radius) = eval_sigma_with_shift(&sigma, b, l, lambda, prec, &w0)?;
 
-    let ln_lambda = Complex::with_val(prec, lambda.ln_ref());
-    let ln_b = Complex::with_val(prec, b.ln_ref());
+    let ln_lambda = Complex::with_val_64(prec, lambda.ln_ref());
+    let ln_b = Complex::with_val_64(prec, b.ln_ref());
     let safe_radius = w0_abs.clone().max(&cnum::decimal("0.5", prec)) / 2;
 
     if cnum::verbose() {
         let s1_abs = cnum::abs(&s1, prec);
         eprintln!(
             "schröder setup: |λ|={:.6} |1−L|={:.6} |s1|={:.6} safe={:.6} inner_r={:.6} N={}",
-            lam_abs, w0_abs, s1_abs, safe_radius, sigma_inner_radius, n_terms
+            DisplayFloat(&lam_abs),
+            DisplayFloat(&w0_abs),
+            DisplayFloat(&s1_abs),
+            DisplayFloat(&safe_radius),
+            DisplayFloat(&sigma_inner_radius),
+            n_terms
         );
     }
 
@@ -233,13 +246,13 @@ pub fn setup_schroder(
     let zero = cnum::zero(prec);
     let one_c = cnum::one(prec);
     let f_zero = eval_schroder_raw(&base_state, &zero)?;
-    let anchor_diff = Complex::with_val(prec, &f_zero - &one_c);
+    let anchor_diff = Complex::with_val_64(prec, &f_zero - &one_c);
     let anchor_err = cnum::abs(&anchor_diff, prec);
     if !anchor_err.is_finite() || anchor_err > cnum::working_epsilon(prec) {
         return Err(format!(
             "Schröder anchor check failed: F(0) = {} (expected 1.0); \
              σ̃-shift likely produced degenerate fixed-point solution F≡L",
-            f_zero
+            DisplayComplex(&f_zero)
         ));
     }
 
@@ -254,6 +267,7 @@ pub fn setup_schroder(
 /// determined during setup as the radius at which σ̃ actually converged.
 /// This ensures σ̃⁻¹ is evaluated well inside its convergence disk.
 pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, String> {
+    cnum::init_mpfr();
     if !cnum::is_finite(h) {
         return Err("Schröder height must be finite".into());
     }
@@ -261,7 +275,7 @@ pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
     if h.imag().is_zero() && h.real().is_integer() && *h.real() <= -2 {
         return Err(format!(
             "integer height {} is undefined for tetration (would require log_b(0) and beyond)",
-            h.real()
+            DisplayFloat(h.real())
         ));
     }
     let value = eval_schroder_raw(state, h)?;
@@ -272,11 +286,11 @@ pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
 fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, String> {
     let prec = state.prec;
     let lam_h = lambda_pow(h, &state.ln_lambda, prec)?;
-    let t = Complex::with_val(prec, &state.s1 * &lam_h);
+    let t = Complex::with_val_64(prec, &state.s1 * &lam_h);
     let t_abs = cnum::abs(&t, prec);
 
     if !t_abs.is_finite() || t_abs <= 0 {
-        return Err(format!("Schröder: bad |t| = {}", t_abs));
+        return Err(format!("Schröder: bad |t| = {}", DisplayFloat(&t_abs)));
     }
 
     // The σ̃⁻¹ convergence radius can be smaller than sigma_inner_radius (which
@@ -288,7 +302,7 @@ fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
     // This handles bases near η where σ̃⁻¹ has a small effective radius even
     // when sigma_inner_radius reports otherwise.
     if let Ok(inv_t) = eval_series_checked(&state.sigma_inv, &t, prec) {
-        return Ok(Complex::with_val(prec, &state.l + &inv_t));
+        return Ok(Complex::with_val_64(prec, &state.l + &inv_t));
     }
 
     let log_lam_abs = state.lam_abs.clone().ln();
@@ -299,57 +313,50 @@ fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
         .min(&t_abs);
 
     let mut effective_target = initial_target / 2;
-    let mut found: Option<(i64, Complex)> = None;
-    for _attempt in 0..30 {
-        let ratio = Float::with_val(prec, &effective_target / &t_abs).ln();
-        let k_raw = ratio / &log_lam_abs;
-        let rounded = if log_lam_abs < 0 {
+    let (k, mut f) = loop {
+        let ratio = Float::with_val_64(prec, &effective_target / &t_abs);
+        if !ratio.is_finite() || ratio <= 0 {
+            return Err("Schröder height-shift target exceeded MPFR's exponent range".into());
+        }
+        let k_raw = ratio.ln() / &log_lam_abs;
+        let mut k = if log_lam_abs < 0 {
             k_raw.ceil()
         } else {
             k_raw.floor()
         };
-        let mut k = rounded
-            .to_integer()
-            .and_then(|v| v.to_i64())
-            .ok_or("Schröder: required height shift exceeds the supported range")?;
+        if !k.is_finite() {
+            return Err("Schröder required height shift exceeded MPFR's exponent range".into());
+        }
         if k == 0 {
             // Need at least one shift to move strictly inside effective_target
-            k = if log_lam_abs < 0 { 1 } else { -1 };
-        }
-        if k.unsigned_abs() > 5000 {
-            return Err(format!(
-                "Schröder: requested shift |k|={} too large; argument too far from fixed point",
-                k.unsigned_abs()
-            ));
+            k = Float::with_val_64(prec, if log_lam_abs < 0 { 1 } else { -1 });
         }
 
-        let h_shifted = Complex::with_val(prec, h + k);
+        let h_shifted = Complex::with_val_64(prec, h + &k);
         let lam_h_shifted = lambda_pow(&h_shifted, &state.ln_lambda, prec)?;
-        let t_shifted = Complex::with_val(prec, &state.s1 * &lam_h_shifted);
+        let t_shifted = Complex::with_val_64(prec, &state.s1 * &lam_h_shifted);
+        if !cnum::is_finite(&t_shifted) || cnum::is_zero(&t_shifted) {
+            return Err("Schröder height shift lost its nonzero inverse-series coordinate".into());
+        }
         match eval_series_checked(&state.sigma_inv, &t_shifted, prec) {
             Ok(inv_t_shifted) => {
-                let f0 = Complex::with_val(prec, &state.l + &inv_t_shifted);
-                found = Some((k, f0));
+                let f0 = Complex::with_val_64(prec, &state.l + &inv_t_shifted);
                 if cnum::verbose() {
                     let t_sh = cnum::abs(&t_shifted, prec);
                     eprintln!(
                         "schröder eval: k={} |t_shifted|={:.6e} (target={:.3e})",
-                        k, t_sh, effective_target
+                        DisplayFloat(&k),
+                        DisplayFloat(&t_sh),
+                        DisplayFloat(&effective_target)
                     );
                 }
-                break;
+                break (k, f0);
             }
             Err(_) => {
                 effective_target /= 2;
             }
         }
-    }
-    let (k, mut f) = found.ok_or_else(|| {
-        format!(
-            "Schröder: σ̃⁻¹ never converged after k-shift attempts (|t|={:.3e}, |λ|={:.4})",
-            t_abs, state.lam_abs
-        )
-    })?;
+    };
 
     // The unwinding chains below must never pass through an exact 0 / ∞ /
     // NaN. For very large |ln b| (e.g. b = 10⁶) the `b^·` chain can underflow
@@ -358,41 +365,48 @@ fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
     // chain SELF-VALIDATES the functional equation (both F(h) and F(h+1) come
     // from the same corrupted alternation), so the guard must live here, not
     // in the post-check. Similarly, the log chain dies if it hits 0 exactly.
-    let check_chain = |f: &Complex, step: i64| -> Result<(), String> {
+    let check_chain = |f: &Complex, step: &Integer| -> Result<(), String> {
         let fa = cnum::abs(f, prec);
         if !cnum::is_finite(f) || fa.is_zero() {
             return Err(format!(
                 "Schröder: integer-shift chain degenerated at step {} \
                  (|F| = {}); result would be underflow/overflow garbage",
-                step, fa
+                step,
+                DisplayFloat(&fa)
             ));
         }
         Ok(())
     };
-    if k > 0 {
-        // F(h) = log_b applied k times to F(h+k).
-        for step in 0..k {
-            check_chain(&f, step)?;
-            let ln_f = Complex::with_val(prec, f.ln_ref());
-            f = Complex::with_val(prec, &ln_f / &state.ln_b);
+    let forward_log = k > 0;
+    let shifts = k.abs();
+    let mut step = Integer::new();
+    while shifts > step {
+        if cnum::verbose() && (step == 0 || step.is_divisible_u(1024)) {
+            eprintln!(
+                "schröder unwind: step {step} of {:.8}",
+                DisplayFloat(&shifts)
+            );
         }
-    } else {
-        // k < 0: F(h) = b^· applied |k| times to F(h+k) = F(h−|k|).
-        for step in 0..(-k) {
-            let exponent = Complex::with_val(prec, &f * &state.ln_b);
+        if forward_log {
+            check_chain(&f, &step)?;
+            let ln_f = Complex::with_val_64(prec, f.ln_ref());
+            f = Complex::with_val_64(prec, &ln_f / &state.ln_b);
+        } else {
+            let exponent = Complex::with_val_64(prec, &f * &state.ln_b);
             f = cnum::checked_exp(&exponent, prec)?;
-            check_chain(&f, step)?;
+            check_chain(&f, &step)?;
         }
+        step += 1;
     }
-    check_chain(&f, k.unsigned_abs() as i64)?;
+    check_chain(&f, &step)?;
     Ok(f)
 }
 
 /// `λ^h = exp(h · ln λ)`. The principal branch of `ln λ` is fine inside the
 /// Shell-Thron interior because `λ` is never zero there (`λ = 0` only when
 /// `ln b = 0`, i.e., `b = 1`, which is filtered out earlier).
-fn lambda_pow(h: &Complex, ln_lambda: &Complex, prec: u32) -> Result<Complex, String> {
-    let exponent = Complex::with_val(prec, h * ln_lambda);
+fn lambda_pow(h: &Complex, ln_lambda: &Complex, prec: u64) -> Result<Complex, String> {
+    let exponent = Complex::with_val_64(prec, h * ln_lambda);
     cnum::checked_exp(&exponent, prec)
 }
 
@@ -405,19 +419,19 @@ fn radius_probe(
     b: &Complex,
     l: &Complex,
     lambda: &Complex,
-    user_prec: u32,
+    user_prec: u64,
     w0: &Complex,
     w_abs: &Float,
 ) -> Result<(), String> {
     if !(w_abs.is_finite() && *w_abs > 0) {
-        return Err(format!("radius probe: bad |w| = {}", w_abs));
+        return Err(format!("radius probe: bad |w| = {}", DisplayFloat(w_abs)));
     }
     let probe_prec = user_prec;
     let probe_n = 80usize;
-    let b_p = Complex::with_val(probe_prec, b);
-    let l_p = Complex::with_val(probe_prec, l);
-    let lambda_p = Complex::with_val(probe_prec, lambda);
-    let w0_p = Complex::with_val(probe_prec, w0);
+    let b_p = Complex::with_val_64(probe_prec, b);
+    let l_p = Complex::with_val_64(probe_prec, l);
+    let lambda_p = Complex::with_val_64(probe_prec, lambda);
+    let w0_p = Complex::with_val_64(probe_prec, w0);
     let (c_probe, _) = build_series(&b_p, &lambda_p, probe_prec, probe_n)?;
 
     // Try the same evaluation strategy that the user-precision path will use.
@@ -436,38 +450,33 @@ fn radius_probe(
         if !cn_abs.is_finite() {
             return Err(format!("Schröder σ̃ probe: coefficient {} is non-finite", n));
         }
-        last_terms.push(cn_abs * w_abs.clone().pow(n as u32));
+        last_terms.push(cn_abs * w_abs.clone().pow(&Integer::from(n)));
     }
     let m = last_terms.len();
     if m >= 60 {
-        let recent = Float::with_val(probe_prec, Float::sum(last_terms[m - 20..].iter())) / 20;
+        let recent = Float::with_val_64(probe_prec, Float::sum(last_terms[m - 20..].iter())) / 20;
         let earlier =
-            Float::with_val(probe_prec, Float::sum(last_terms[m - 40..m - 20].iter())) / 20;
-        if recent > Float::with_val(probe_prec, &earlier / 2) {
+            Float::with_val_64(probe_prec, Float::sum(last_terms[m - 40..m - 20].iter())) / 20;
+        if recent > Float::with_val_64(probe_prec, &earlier / 2) {
             return Err(format!(
                 "Schröder probe: σ̃ Taylor radius < |1−L| = {:.3} and σ̃-shift cannot rescue \
                  (recent term mean {:.3e} ≥ earlier {:.3e})",
-                w_abs, recent, earlier
+                DisplayFloat(w_abs),
+                DisplayFloat(&recent),
+                DisplayFloat(&earlier)
             ));
         }
     }
     Ok(())
 }
 
-fn pick_n_terms(lambda_abs: &Float, prec: u32) -> usize {
+fn pick_n_terms(lambda_abs: &Float, prec: u64) -> Result<usize, String> {
     // Truncation error is dominated by ρ^N with ρ ≤ |t|/R_{σ̃⁻¹}. The shift
     // mechanism caps |t| ≲ 0.5·|1 − L|, making ρ ≲ 0.5 in adverse cases.
     // Hitting d decimal digits then needs N ≳ d/log10(1/ρ) ≈ 3.5·d. Scale
     // with decimal digits, not bits.
-    //
-    // The σ̃-shift mechanism (in eval_sigma_with_shift and eval_schroder)
-    // brings |w_curr| and |t| arbitrarily close to 0, so even when the series
-    // radius R_σ is small (near-boundary |λ|), we can use a moderate N. The
-    // O(N³) build cost dominates, so keep N capped at 1500 — adequate when
-    // σ̃-shift is doing its job. Cases that genuinely need N>1500 won't be
-    // helped by larger N (the build cost would be hours).
-    let digits = (u64::from(prec) * 30_103 / 100_000) as usize;
-    let near_boundary = Float::with_val(prec, 1) - lambda_abs;
+    let digits = u128::from(prec) * 30_103 / 100_000;
+    let near_boundary = Float::with_val_64(prec, 1) - lambda_abs;
     let bonus = if near_boundary < cnum::decimal("0.2", prec) {
         250
     } else if near_boundary < cnum::decimal("0.4", prec) {
@@ -475,27 +484,34 @@ fn pick_n_terms(lambda_abs: &Float, prec: u32) -> usize {
     } else {
         0
     };
-    let base = digits.saturating_mul(4) + 80 + bonus;
-    base.clamp(150, 1500)
+    usize::try_from((digits * 4 + 80 + bonus).max(150))
+        .map_err(|_| "Schröder series length exceeds addressable memory".into())
 }
 
 fn build_series(
     b: &Complex,
     lambda: &Complex,
-    prec: u32,
+    prec: u64,
     m: usize,
 ) -> Result<(Vec<Complex>, Vec<Complex>), String> {
-    let ln_b = Complex::with_val(prec, b.ln_ref());
+    let size = (m as u128 + 1)
+        .checked_mul(m as u128 + 1)
+        .ok_or("Schröder coefficient matrix exceeds addressable memory")?;
+    cnum::check_complex_storage(size, prec)?;
+    if cnum::verbose() {
+        eprintln!("schröder build: {m} terms at {prec} bits; quadratic storage, cubic work");
+    }
+    let ln_b = Complex::with_val_64(prec, b.ln_ref());
 
     // q[j] = (ln b)^j / (j+1)! for j = 0..m-1; q has length m.
     let mut q: Vec<Complex> = Vec::with_capacity(m);
     let mut ln_b_pow = cnum::one(prec); // (ln b)^j
     let mut fact = rug::Integer::from(1u32); // (j+1)!
     for j in 0..m {
-        fact *= (j as u32) + 1;
-        let q_j = Complex::with_val(prec, &ln_b_pow / &fact);
+        fact *= j + 1;
+        let q_j = Complex::with_val_64(prec, &ln_b_pow / &fact);
         q.push(q_j);
-        ln_b_pow = Complex::with_val(prec, &ln_b_pow * &ln_b);
+        ln_b_pow = Complex::with_val_64(prec, &ln_b_pow * &ln_b);
     }
 
     // q_pow[n] = q^n truncated to degree (m - n) for n = 1..=m-1.
@@ -506,6 +522,9 @@ fn build_series(
         q_pow.push(q.clone());
     }
     for n in 2..=m - 1 {
+        if cnum::verbose() && (n.is_power_of_two() || n == m - 1) {
+            eprintln!("schröder powers: {n}/{}", m - 1);
+        }
         let need = m - n; // truncate to degree `need`
         let prev = &q_pow[n - 1];
         let mut new_pow = vec![cnum::zero(prec); need + 1];
@@ -513,7 +532,7 @@ fn build_series(
         for i in 0..i_max {
             let j_max = q.len().min(need + 1 - i);
             for j in 0..j_max {
-                let prod = Complex::with_val(prec, &prev[i] * &q[j]);
+                let prod = Complex::with_val_64(prec, &prev[i] * &q[j]);
                 new_pow[i + j] += prod;
             }
         }
@@ -524,7 +543,7 @@ fn build_series(
     let mut lam_pow: Vec<Complex> = Vec::with_capacity(m + 1);
     lam_pow.push(cnum::one(prec));
     for _ in 1..=m {
-        let next = Complex::with_val(prec, lam_pow.last().unwrap() * lambda);
+        let next = Complex::with_val_64(prec, lam_pow.last().unwrap() * lambda);
         lam_pow.push(next);
     }
 
@@ -533,25 +552,28 @@ fn build_series(
     c[1] = cnum::one(prec);
 
     for big_n in 2..=m {
+        if cnum::verbose() && (big_n.is_power_of_two() || big_n == m) {
+            eprintln!("schröder coefficients: {big_n}/{m}");
+        }
         let mut sum = cnum::zero(prec);
         for n in 1..big_n {
             let idx = big_n - n;
             if idx >= q_pow[n].len() {
                 continue;
             }
-            let term1 = Complex::with_val(prec, &c[n] * &lam_pow[n]);
-            let term2 = Complex::with_val(prec, &term1 * &q_pow[n][idx]);
+            let term1 = Complex::with_val_64(prec, &c[n] * &lam_pow[n]);
+            let term2 = Complex::with_val_64(prec, &term1 * &q_pow[n][idx]);
             sum += term2;
         }
-        let denom = Complex::with_val(prec, &lam_pow[big_n] - lambda);
+        let denom = Complex::with_val_64(prec, &lam_pow[big_n] - lambda);
         if denom.real().is_zero() && denom.imag().is_zero() {
             return Err(format!(
                 "Schröder resonance: λ^{} − λ = 0 (root-of-unity multiplier)",
                 big_n
             ));
         }
-        let neg_sum = Complex::with_val(prec, -&sum);
-        c[big_n] = Complex::with_val(prec, &neg_sum / &denom);
+        let neg_sum = Complex::with_val_64(prec, -&sum);
+        c[big_n] = Complex::with_val_64(prec, &neg_sum / &denom);
     }
 
     drop(q_pow);
@@ -563,7 +585,7 @@ fn build_series(
 /// Series reversion: given `σ̃(w) = w + Σ_{n≥2} c_n w^n` (so `c[1] = 1`),
 /// compute `d_n` such that `σ̃⁻¹(t) = t + Σ_{n≥2} d_n t^n`. Solves
 /// `σ̃(σ̃⁻¹(t)) = t` order by order using `pw[k][N] = [t^N] (σ̃⁻¹)^k`.
-fn reverse_series(c: &[Complex], m: usize, prec: u32) -> Vec<Complex> {
+fn reverse_series(c: &[Complex], m: usize, prec: u64) -> Vec<Complex> {
     let mut d: Vec<Complex> = vec![cnum::zero(prec); m + 1];
     d[1] = cnum::one(prec);
 
@@ -577,18 +599,21 @@ fn reverse_series(c: &[Complex], m: usize, prec: u32) -> Vec<Complex> {
     }
 
     for big_n in 2..=m {
+        if cnum::verbose() && (big_n.is_power_of_two() || big_n == m) {
+            eprintln!("schröder reversion: {big_n}/{m}");
+        }
         for k in 2..=big_n {
             let mut s = cnum::zero(prec);
             // pw[k][big_n] = Σ_{j=1..=big_n-k+1} d[j] · pw[k-1][big_n - j]
             for j in 1..=(big_n - k + 1) {
-                let term = Complex::with_val(prec, &d[j] * &pw[k - 1][big_n - j]);
+                let term = Complex::with_val_64(prec, &d[j] * &pw[k - 1][big_n - j]);
                 s += term;
             }
             pw[k][big_n] = s;
         }
         let mut rhs = cnum::zero(prec);
         for k in 2..=big_n {
-            let term = Complex::with_val(prec, &c[k] * &pw[k][big_n]);
+            let term = Complex::with_val_64(prec, &c[k] * &pw[k][big_n]);
             rhs -= term;
         }
         d[big_n] = rhs;
@@ -618,7 +643,7 @@ fn eval_sigma_with_shift(
     b: &Complex,
     l: &Complex,
     lambda: &Complex,
-    prec: u32,
+    prec: u64,
     w0: &Complex,
 ) -> Result<(Complex, Float), String> {
     // Fast path: direct Taylor at 0 reaches w₀.
@@ -631,42 +656,49 @@ fn eval_sigma_with_shift(
     let lam_abs = cnum::abs(lambda, prec);
     let attracting = lam_abs < 1;
 
-    let ln_b = Complex::with_val(prec, b.ln_ref());
+    let ln_b = Complex::with_val_64(prec, b.ln_ref());
     let mut w_curr = w0.clone();
-    let mut n_shifts: u32 = 0;
-    let max_shifts: u32 = 500;
+    let mut n_shifts = Integer::new();
+    let mut orbit_checkpoint = w0.clone();
     let sigma_at_curr = loop {
         match eval_series_checked(sigma, &w_curr, prec) {
             Ok(s) => break s,
             Err(e) => {
-                if n_shifts >= max_shifts {
-                    return Err(format!(
-                        "σ̃-shift exhausted {} iterations without entering Taylor disk \
-                         (|λ|={:.3}, attracting={}): {}",
-                        max_shifts, lam_abs, attracting, e
-                    ));
-                }
-                let l_plus_w = Complex::with_val(prec, l + &w_curr);
+                let l_plus_w = Complex::with_val_64(prec, l + &w_curr);
                 let lpw_abs = cnum::abs(&l_plus_w, prec);
                 if !lpw_abs.is_finite() || lpw_abs.is_zero() {
                     return Err(format!(
                         "σ̃-shift: L+w_curr = 0 or non-finite (|·|={}); cannot continue \
                          (orbit hit a singularity of φ or φ⁻¹)",
-                        lpw_abs
+                        DisplayFloat(&lpw_abs)
                     ));
                 }
                 if attracting {
                     // φ(w) = b^(L+w) − L = exp(ln_b·(L+w)) − L
-                    let exp_arg = Complex::with_val(prec, &l_plus_w * &ln_b);
+                    let exp_arg = Complex::with_val_64(prec, &l_plus_w * &ln_b);
                     let bw = cnum::checked_exp(&exp_arg, prec)?;
-                    w_curr = Complex::with_val(prec, &bw - l);
+                    w_curr = Complex::with_val_64(prec, &bw - l);
                 } else {
                     // φ⁻¹(w) = log_b(L+w) − L = ln(L+w)/ln_b − L (principal log)
-                    let ln_lpw = Complex::with_val(prec, l_plus_w.ln_ref());
-                    let logb_lpw = Complex::with_val(prec, &ln_lpw / &ln_b);
-                    w_curr = Complex::with_val(prec, &logb_lpw - l);
+                    let ln_lpw = Complex::with_val_64(prec, l_plus_w.ln_ref());
+                    let logb_lpw = Complex::with_val_64(prec, &ln_lpw / &ln_b);
+                    w_curr = Complex::with_val_64(prec, &logb_lpw - l);
                 }
                 n_shifts += 1;
+                if w_curr == orbit_checkpoint {
+                    return Err(format!(
+                        "Schröder sigma-shift repeated an orbit value without convergence: {e}"
+                    ));
+                }
+                if n_shifts.is_power_of_two() {
+                    orbit_checkpoint = w_curr.clone();
+                    if cnum::verbose() {
+                        eprintln!(
+                            "schröder sigma-shift: {n_shifts} steps, |w|={:.6e}",
+                            DisplayFloat(&cnum::abs(&w_curr, prec))
+                        );
+                    }
+                }
             }
         }
     };
@@ -686,18 +718,20 @@ fn eval_sigma_with_shift(
             } else {
                 "backward φ⁻¹"
             },
-            lam_abs
+            DisplayFloat(&lam_abs)
         );
     }
 
     let mut lam_pow = cnum::one(prec);
-    for _ in 0..n_shifts {
-        lam_pow = Complex::with_val(prec, &lam_pow * lambda);
+    let mut unwound = Integer::new();
+    while unwound < n_shifts {
+        lam_pow = Complex::with_val_64(prec, &lam_pow * lambda);
+        unwound += 1;
     }
     let value = if attracting {
-        Complex::with_val(prec, &sigma_at_curr / &lam_pow)
+        Complex::with_val_64(prec, &sigma_at_curr / &lam_pow)
     } else {
-        Complex::with_val(prec, &sigma_at_curr * &lam_pow)
+        Complex::with_val_64(prec, &sigma_at_curr * &lam_pow)
     };
     if !cnum::is_finite(&value) || cnum::is_zero(&value) {
         return Err("Schröder shift lost the nonzero normalization coordinate".into());
@@ -707,29 +741,29 @@ fn eval_sigma_with_shift(
 
 /// Check the computed tail and a roundoff estimate against working precision.
 /// This is a convergence diagnostic, not a rigorous infinite-tail bound.
-fn eval_series_checked(coeffs: &[Complex], w: &Complex, prec: u32) -> Result<Complex, String> {
+fn eval_series_checked(coeffs: &[Complex], w: &Complex, prec: u64) -> Result<Complex, String> {
     if coeffs.len() < 2 || !cnum::is_finite(w) {
         return Err("Schröder series requires coefficients and a finite argument".into());
     }
     let high = coeffs.len() - 1;
     let mut acc = cnum::zero(prec);
     let mut w_pow = cnum::one(prec);
-    let mut term_sum = Float::new(prec);
+    let mut term_sum = Float::new_64(prec);
     // Track the final ~5% of terms.
     let tail_start = high
         .saturating_sub(high / 20)
         .max(high.saturating_sub(50))
         .max(1);
-    let mut tail_sum = Float::new(prec);
+    let mut tail_sum = Float::new_64(prec);
     for (i, coefficient) in coeffs.iter().enumerate().skip(1) {
-        w_pow = Complex::with_val(prec, &w_pow * w);
+        w_pow = Complex::with_val_64(prec, &w_pow * w);
         if !cnum::is_finite(&w_pow) || (cnum::is_zero(&w_pow) && !cnum::is_zero(w)) {
             return Err(format!(
                 "Schröder series power {} exceeded the exponent range",
                 i
             ));
         }
-        let term = Complex::with_val(prec, coefficient * &w_pow);
+        let term = Complex::with_val_64(prec, coefficient * &w_pow);
         let term_abs = cnum::abs(&term, prec);
         if !term_abs.is_finite() {
             return Err(format!("Schröder series term {} overflowed", i));
@@ -741,11 +775,13 @@ fn eval_series_checked(coeffs: &[Complex], w: &Complex, prec: u32) -> Result<Com
         acc += term;
     }
     let tolerance = cnum::working_epsilon(prec) * cnum::abs(&acc, prec);
-    let roundoff = (term_sum * (high as u32) * (high as u32)) >> prec;
+    let roundoff = (term_sum * high * high)
+        >> usize::try_from(prec).expect("precision exceeds addressable bits");
     if !cnum::is_finite(&acc) || tail_sum > tolerance || roundoff > tolerance {
         return Err(format!(
             "Schröder series not accurate enough at |w|={}: tail {}, roundoff estimate {}, tolerance {}",
-            cnum::abs(w, prec), tail_sum, roundoff, tolerance
+            DisplayFloat(&cnum::abs(w, prec)), DisplayFloat(&tail_sum),
+            DisplayFloat(&roundoff), DisplayFloat(&tolerance)
         ));
     }
     Ok(acc)
@@ -756,12 +792,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn precision_driven_series_order_is_not_clamped_to_1500() {
+        let prec = cnum::digits_to_bits(1000);
+        let lambda = cnum::decimal("0.5", prec);
+        assert!(pick_n_terms(&lambda, prec).unwrap() > 1500);
+        let base = Complex::with_val_64(prec, 2);
+        let multiplier = Complex::with_val_64(prec, lambda);
+        assert!(build_series(&base, &multiplier, prec, usize::MAX)
+            .unwrap_err()
+            .contains("addressable memory"));
+    }
+
+    #[test]
     fn series_tail_has_no_machine_precision_floor() {
         for digits in [50, 70, 1000] {
             let prec = cnum::digits_to_bits(digits);
             for scale in ["1", "1e-1000"] {
                 let mut coefficients = vec![cnum::zero(prec); 41];
-                coefficients[1] = Complex::with_val(prec, cnum::decimal(scale, prec));
+                coefficients[1] = Complex::with_val_64(prec, cnum::decimal(scale, prec));
                 coefficients[40] = coefficients[1].clone() * cnum::epsilon(20, prec);
                 assert!(eval_series_checked(&coefficients, &cnum::one(prec), prec).is_err());
                 coefficients[40] = coefficients[1].clone() * cnum::epsilon(digits + 40, prec);
@@ -776,11 +824,11 @@ mod tests {
         let coefficients = [
             cnum::zero(prec),
             cnum::one(prec),
-            Complex::with_val(prec, Float::with_val(prec, rug::float::Special::Nan)),
+            Complex::with_val_64(prec, Float::with_val_64(prec, rug::float::Special::Nan)),
         ];
         assert!(eval_series_checked(&coefficients, &cnum::one(prec), prec).is_err());
         assert!(lambda_pow(
-            &Complex::with_val(prec, cnum::decimal("1e1000", prec)),
+            &Complex::with_val_64(prec, cnum::decimal("1e1000", prec)),
             &cnum::one(prec),
             prec
         )

@@ -10,21 +10,21 @@ use rug::{Complex, Float};
 
 use tetration::{cnum, dispatch, regions, schroder};
 
-fn parse(re: &str, im: &str, prec: u32) -> Complex {
+fn parse(re: &str, im: &str, prec: u64) -> Complex {
     cnum::parse_complex(re, im, prec).unwrap()
 }
 
-fn abs(z: &Complex, prec: u32) -> Float {
-    Float::with_val(prec, z.abs_ref())
+fn abs(z: &Complex, prec: u64) -> Float {
+    Float::with_val_64(prec, z.abs_ref())
 }
 
 /// Returns -log10(|a - b|) — i.e., approximate matching digits.
-fn matching_digits(a: &Complex, b: &Complex, prec: u32) -> Float {
+fn matching_digits(a: &Complex, b: &Complex, prec: u64) -> Float {
     assert!(cnum::is_finite(a) && cnum::is_finite(b));
-    let diff = Complex::with_val(prec, a - b);
+    let diff = Complex::with_val_64(prec, a - b);
     let da = abs(&diff, prec);
     if da.is_zero() {
-        return Float::with_val(prec, rug::float::Special::Infinity);
+        return Float::with_val_64(prec, rug::float::Special::Infinity);
     }
     -da.log10()
 }
@@ -41,7 +41,7 @@ fn check_functional_eq(
     let b = parse(b_re, b_im, prec);
     let z = parse(z_re, z_im, prec);
     let one = parse("1", "0", prec);
-    let z_plus_1 = Complex::with_val(prec, &z + &one);
+    let z_plus_1 = Complex::with_val_64(prec, &z + &one);
 
     let fz = dispatch::tetrate(&b, &z, prec, digits).unwrap();
     let fz1 = dispatch::tetrate(&b, &z_plus_1, prec, digits).unwrap();
@@ -116,7 +116,7 @@ fn t350_continuity_at_integer() {
     let b = parse("1.2", "0", prec);
     let h = parse("1.0000000001", "0", prec);
     let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
-    let diff = Complex::with_val(prec, &f - &b);
+    let diff = Complex::with_val_64(prec, &f - &b);
     let da = abs(&diff, prec);
     assert!(
         da < cnum::epsilon(9, prec),
@@ -135,7 +135,7 @@ fn t351_continuity_at_two() {
     let h_near = parse("1.99999999999", "0", prec);
     let f_int = dispatch::tetrate(&b, &h_int, prec, digits).unwrap();
     let f_near = dispatch::tetrate(&b, &h_near, prec, digits).unwrap();
-    let diff = Complex::with_val(prec, &f_int - &f_near);
+    let diff = Complex::with_val_64(prec, &f_int - &f_near);
     let da = abs(&diff, prec);
     assert!(
         da < cnum::epsilon(9, prec),
@@ -183,8 +183,8 @@ fn t360_precision_scaling() {
     let f_lo = dispatch::tetrate(&b_lo, &h_lo, prec_lo, digits_lo).unwrap();
     let f_hi = dispatch::tetrate(&b_hi, &h_hi, prec_hi, digits_hi).unwrap();
     // Promote f_lo to high precision for comparison.
-    let f_lo_hi = Complex::with_val(prec_hi, &f_lo);
-    let diff = Complex::with_val(prec_hi, &f_hi - &f_lo_hi);
+    let f_lo_hi = Complex::with_val_64(prec_hi, &f_lo);
+    let diff = Complex::with_val_64(prec_hi, &f_hi - &f_lo_hi);
     let da = abs(&diff, prec_hi);
     assert!(
         da < cnum::epsilon(digits_lo - 5, prec_hi),

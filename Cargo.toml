@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 rug = "1"
 rayon = "1"
+gmp-mpfr-sys = "1"
 
 [profile.release]
 opt-level = 3

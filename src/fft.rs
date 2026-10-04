@@ -38,7 +38,7 @@ use rug::{float::Constant, Complex, Float};
 /// Dispatch: with `TET_MT` unset/0 (the default) this runs the original
 /// serial implementation, untouched. With MT mode on it runs the parallel
 /// variant, which is bit-identical (see `fft_mt`).
-pub fn fft(a: &mut [Complex], prec: u32, inverse: bool) {
+pub fn fft(a: &mut [Complex], prec: u64, inverse: bool) {
     if crate::mt::mt_enabled() {
         fft_mt(a, prec, inverse);
     } else {
@@ -47,7 +47,7 @@ pub fn fft(a: &mut [Complex], prec: u32, inverse: bool) {
 }
 
 /// Original serial FFT (the default path — code unchanged).
-fn fft_serial(a: &mut [Complex], prec: u32, inverse: bool) {
+fn fft_serial(a: &mut [Complex], prec: u64, inverse: bool) {
     let n = a.len();
     if n <= 1 {
         return;
@@ -73,8 +73,8 @@ fn fft_serial(a: &mut [Complex], prec: u32, inverse: bool) {
     }
 
     // Cooley-Tukey butterflies.
-    let pi = Float::with_val(prec, Constant::Pi);
-    let two_pi = Float::with_val(prec, &pi * 2u32);
+    let pi = Float::with_val_64(prec, Constant::Pi);
+    let two_pi = Float::with_val_64(prec, &pi * 2u32);
     let sign: i32 = if inverse { 1 } else { -1 };
 
     let mut size = 2usize;
@@ -83,31 +83,34 @@ fn fft_serial(a: &mut [Complex], prec: u32, inverse: bool) {
         // omega_step = exp(sign · 2πi / size). Computing one root per stage
         // and stepping by complex multiplication inside the inner loop keeps
         // MPC trig calls out of the hot path.
-        let theta_unsigned = Float::with_val(prec, &two_pi / (size as u32));
-        let theta = Float::with_val(prec, &theta_unsigned * sign);
-        let cos_t = Float::with_val(prec, theta.cos_ref());
-        let sin_t = Float::with_val(prec, theta.sin_ref());
-        let omega_step = Complex::with_val(prec, (cos_t, sin_t));
+        let theta_unsigned = Float::with_val_64(prec, &two_pi / size);
+        let theta = Float::with_val_64(prec, &theta_unsigned * sign);
+        let cos_t = Float::with_val_64(prec, theta.cos_ref());
+        let sin_t = Float::with_val_64(prec, theta.sin_ref());
+        let omega_step = Complex::with_val_64(prec, (cos_t, sin_t));
 
         let mut start = 0usize;
         while start < n {
-            let mut omega = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+            let mut omega = Complex::with_val_64(prec, (Float::with_val_64(prec, 1u32), 0));
             for k in 0..half {
-                let t = Complex::with_val(prec, &omega * &a[start + k + half]);
+                let t = Complex::with_val_64(prec, &omega * &a[start + k + half]);
                 let u = a[start + k].clone();
-                a[start + k] = Complex::with_val(prec, &u + &t);
-                a[start + k + half] = Complex::with_val(prec, &u - &t);
-                omega = Complex::with_val(prec, &omega * &omega_step);
+                a[start + k] = Complex::with_val_64(prec, &u + &t);
+                a[start + k + half] = Complex::with_val_64(prec, &u - &t);
+                omega = Complex::with_val_64(prec, &omega * &omega_step);
             }
             start += size;
+        }
+        if size == n {
+            break;
         }
         size <<= 1;
     }
 
     if inverse {
-        let inv_n = Float::with_val(prec, 1u32) / Float::with_val(prec, n as u32);
+        let inv_n = Float::with_val_64(prec, 1u32) / Float::with_val_64(prec, n);
         for c in a.iter_mut() {
-            *c = Complex::with_val(prec, &*c * &inv_n);
+            *c = Complex::with_val_64(prec, &*c * &inv_n);
         }
     }
 }
@@ -127,12 +130,12 @@ fn fft_serial(a: &mut [Complex], prec: u32, inverse: bool) {
 ///   reorders no floating-point accumulation — each output element is
 ///   produced by the same two operations on the same operands as in the
 ///   serial code, and MPC arithmetic is deterministic and correctly rounded.
-fn fft_mt(a: &mut [Complex], prec: u32, inverse: bool) {
+fn fft_mt(a: &mut [Complex], prec: u64, inverse: bool) {
     use rayon::prelude::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    type TwiddleCache = Mutex<HashMap<(usize, u32, bool), Arc<Vec<Complex>>>>;
+    type TwiddleCache = Mutex<HashMap<(usize, u64, bool), Arc<Vec<Complex>>>>;
 
     // Twiddle-table cache. Keyed by (stage size, precision, direction);
     // tables are immutable once built and shared via Arc. FFT sizes and
@@ -166,8 +169,8 @@ fn fft_mt(a: &mut [Complex], prec: u32, inverse: bool) {
         }
     }
 
-    let pi = Float::with_val(prec, Constant::Pi);
-    let two_pi = Float::with_val(prec, &pi * 2u32);
+    let pi = Float::with_val_64(prec, Constant::Pi);
+    let two_pi = Float::with_val_64(prec, &pi * 2u32);
     let sign: i32 = if inverse { 1 } else { -1 };
 
     let mut size = 2usize;
@@ -185,16 +188,16 @@ fn fft_mt(a: &mut [Complex], prec: u32, inverse: bool) {
             match hit {
                 Some(t) => t,
                 None => {
-                    let theta_unsigned = Float::with_val(prec, &two_pi / (size as u32));
-                    let theta = Float::with_val(prec, &theta_unsigned * sign);
-                    let cos_t = Float::with_val(prec, theta.cos_ref());
-                    let sin_t = Float::with_val(prec, theta.sin_ref());
-                    let omega_step = Complex::with_val(prec, (cos_t, sin_t));
+                    let theta_unsigned = Float::with_val_64(prec, &two_pi / size);
+                    let theta = Float::with_val_64(prec, &theta_unsigned * sign);
+                    let cos_t = Float::with_val_64(prec, theta.cos_ref());
+                    let sin_t = Float::with_val_64(prec, theta.sin_ref());
+                    let omega_step = Complex::with_val_64(prec, (cos_t, sin_t));
                     let mut table: Vec<Complex> = Vec::with_capacity(half);
-                    let mut omega = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+                    let mut omega = Complex::with_val_64(prec, (Float::with_val_64(prec, 1u32), 0));
                     for _ in 0..half {
                         table.push(omega.clone());
-                        omega = Complex::with_val(prec, &omega * &omega_step);
+                        omega = Complex::with_val_64(prec, &omega * &omega_step);
                     }
                     let arc = Arc::new(table);
                     cache.lock().unwrap().insert(key, Arc::clone(&arc));
@@ -210,19 +213,22 @@ fn fft_mt(a: &mut [Complex], prec: u32, inverse: bool) {
                 .zip(twiddles.par_iter())
                 .with_min_len(16)
                 .for_each(|((u_ref, t_ref), w)| {
-                    let t = Complex::with_val(prec, w * &*t_ref);
+                    let t = Complex::with_val_64(prec, w * &*t_ref);
                     let u = u_ref.clone();
-                    *u_ref = Complex::with_val(prec, &u + &t);
-                    *t_ref = Complex::with_val(prec, &u - &t);
+                    *u_ref = Complex::with_val_64(prec, &u + &t);
+                    *t_ref = Complex::with_val_64(prec, &u - &t);
                 });
         });
+        if size == n {
+            break;
+        }
         size <<= 1;
     }
 
     if inverse {
-        let inv_n = Float::with_val(prec, 1u32) / Float::with_val(prec, n as u32);
+        let inv_n = Float::with_val_64(prec, 1u32) / Float::with_val_64(prec, n);
         a.par_iter_mut().with_min_len(16).for_each(|c| {
-            *c = Complex::with_val(prec, &*c * &inv_n);
+            *c = Complex::with_val_64(prec, &*c * &inv_n);
         });
     }
 }
@@ -230,15 +236,19 @@ fn fft_mt(a: &mut [Complex], prec: u32, inverse: bool) {
 /// Linear convolution `c[n] = Σ_m a[m] · b[n − m]`. Output length is
 /// `a.len() + b.len() − 1`. Uses a single forward+forward+inverse FFT at
 /// padded length `next_power_of_two(a.len() + b.len() − 1)`.
-pub fn convolve(a: &[Complex], b: &[Complex], prec: u32) -> Vec<Complex> {
+pub fn convolve(a: &[Complex], b: &[Complex], prec: u64) -> Vec<Complex> {
+    crate::cnum::init_mpfr();
     if a.is_empty() || b.is_empty() {
         return Vec::new();
     }
-    let result_len = a.len() + b.len() - 1;
-    let m = result_len.next_power_of_two().max(2);
+    let result_len = a
+        .len()
+        .checked_add(b.len() - 1)
+        .expect("convolution length overflow");
+    let m = checked_fft_len(result_len, prec).expect("convolution exceeds addressable memory");
 
     let mut a_pad: Vec<Complex> = Vec::with_capacity(m);
-    let zero_c = Complex::with_val(prec, (Float::new(prec), Float::new(prec)));
+    let zero_c = Complex::with_val_64(prec, (Float::new_64(prec), Float::new_64(prec)));
     a_pad.extend(a.iter().cloned());
     while a_pad.len() < m {
         a_pad.push(zero_c.clone());
@@ -259,11 +269,11 @@ pub fn convolve(a: &[Complex], b: &[Complex], prec: u32) -> Vec<Complex> {
             .zip(b_pad.par_iter())
             .with_min_len(16)
             .for_each(|(x, y)| {
-                *x = Complex::with_val(prec, &*x * y);
+                *x = Complex::with_val_64(prec, &*x * y);
             });
     } else {
         for i in 0..m {
-            a_pad[i] = Complex::with_val(prec, &a_pad[i] * &b_pad[i]);
+            a_pad[i] = Complex::with_val_64(prec, &a_pad[i] * &b_pad[i]);
         }
     }
 
@@ -285,15 +295,33 @@ pub struct KernelFft {
     pub m: usize,
 }
 
+fn checked_fft_len(len: usize, prec: u64) -> Result<usize, String> {
+    let m = len
+        .checked_next_power_of_two()
+        .ok_or("FFT padding exceeds addressable memory")?
+        .max(2);
+    std::alloc::Layout::array::<Complex>(m).map_err(|_| "FFT array exceeds addressable memory")?;
+    crate::cnum::check_complex_storage(m as u128, prec)?;
+    Ok(m)
+}
+
+pub(crate) fn kernel_fft_len(n: usize, prec: u64) -> Result<usize, String> {
+    let len = n
+        .checked_mul(3)
+        .and_then(|v| v.checked_sub(2))
+        .ok_or("Cauchy FFT length is zero or exceeds addressable memory")?;
+    checked_fft_len(len, prec)
+}
+
 /// Pre-FFT a length-`(2n − 1)` kernel `h` for repeated use in
 /// `cross_correlate_with_kernel`. `h[d]` corresponds to offset `d − (n − 1)`
 /// in the math; that is, `h[n − 1]` is the d=0 entry.
-pub fn precompute_kernel_fft(h: &[Complex], n: usize, prec: u32) -> KernelFft {
+pub fn precompute_kernel_fft(h: &[Complex], n: usize, prec: u64) -> KernelFft {
+    crate::cnum::init_mpfr();
+    let m = kernel_fft_len(n, prec).expect("Cauchy FFT exceeds addressable memory");
     assert_eq!(h.len(), 2 * n - 1, "kernel must have length 2n−1");
-    let result_len = 3 * n - 2;
-    let m = result_len.next_power_of_two().max(2);
 
-    let zero_c = Complex::with_val(prec, (Float::new(prec), Float::new(prec)));
+    let zero_c = Complex::with_val_64(prec, (Float::new_64(prec), Float::new_64(prec)));
 
     // h_rev[i] = h[2n−2−i] for i in 0..2n−1.
     let mut h_pad: Vec<Complex> = Vec::with_capacity(m);
@@ -319,11 +347,12 @@ pub fn precompute_kernel_fft(h: &[Complex], n: usize, prec: u32) -> KernelFft {
 /// reading off the central `n` outputs. The kernel FFT is precomputed; this
 /// call does one length-`m` forward FFT on `a`, a pointwise multiply, and one
 /// inverse FFT.
-pub fn cross_correlate_with_kernel(a: &[Complex], kernel: &KernelFft, prec: u32) -> Vec<Complex> {
+pub fn cross_correlate_with_kernel(a: &[Complex], kernel: &KernelFft, prec: u64) -> Vec<Complex> {
+    crate::cnum::init_mpfr();
     assert_eq!(a.len(), kernel.n, "input length must match kernel.n");
     let n = kernel.n;
     let m = kernel.m;
-    let zero_c = Complex::with_val(prec, (Float::new(prec), Float::new(prec)));
+    let zero_c = Complex::with_val_64(prec, (Float::new_64(prec), Float::new_64(prec)));
 
     let mut a_pad: Vec<Complex> = Vec::with_capacity(m);
     a_pad.extend(a.iter().cloned());
@@ -339,11 +368,11 @@ pub fn cross_correlate_with_kernel(a: &[Complex], kernel: &KernelFft, prec: u32)
             .zip(kernel.coeffs.par_iter())
             .with_min_len(16)
             .for_each(|(x, k)| {
-                *x = Complex::with_val(prec, &*x * k);
+                *x = Complex::with_val_64(prec, &*x * k);
             });
     } else {
         for (value, coefficient) in a_pad.iter_mut().zip(&kernel.coeffs) {
-            *value = Complex::with_val(prec, &*value * coefficient);
+            *value = Complex::with_val_64(prec, &*value * coefficient);
         }
     }
 
@@ -364,19 +393,19 @@ mod tests {
     use super::*;
 
     fn approx_eq(a: &Complex, b: &Complex, digits: u64) -> bool {
-        let prec = a.prec().0;
+        let prec = a.prec_64().0;
         assert!(crate::cnum::is_finite(a) && crate::cnum::is_finite(b));
-        let diff = Complex::with_val(prec, a - b);
-        let abs = Float::with_val(prec, diff.abs_ref());
+        let diff = Complex::with_val_64(prec, a - b);
+        let abs = Float::with_val_64(prec, diff.abs_ref());
         abs < crate::cnum::epsilon(digits, prec)
     }
 
     #[test]
     fn fft_roundtrip_small() {
-        let prec = 128u32;
+        let prec = 128u64;
         let n = 8;
         let mut x: Vec<Complex> = (0..n)
-            .map(|i| Complex::with_val(prec, (i, i * 2)))
+            .map(|i| Complex::with_val_64(prec, (i, i * 2)))
             .collect();
         let original: Vec<Complex> = x.to_vec();
         fft(&mut x, prec, false);
@@ -392,12 +421,12 @@ mod tests {
 
     #[test]
     fn convolution_matches_direct() {
-        let prec = 128u32;
+        let prec = 128u64;
         let a: Vec<Complex> = (0..4)
-            .map(|i| Complex::with_val(prec, (i + 1, 0)))
+            .map(|i| Complex::with_val_64(prec, (i + 1, 0)))
             .collect();
         let b: Vec<Complex> = (0..3)
-            .map(|i| Complex::with_val(prec, (2 * i + 1, 0)))
+            .map(|i| Complex::with_val_64(prec, (2 * i + 1, 0)))
             .collect();
 
         let conv = convolve(&a, &b, prec);
@@ -406,11 +435,11 @@ mod tests {
 
         // Direct: c[n] = Σ a[k] · b[n−k].
         for n in 0..m {
-            let mut expected = Complex::with_val(prec, (0, 0));
+            let mut expected = Complex::with_val_64(prec, (0, 0));
             for k in 0..a.len() {
                 if n >= k && n - k < b.len() {
-                    let prod = Complex::with_val(prec, &a[k] * &b[n - k]);
-                    expected = Complex::with_val(prec, &expected + &prod);
+                    let prod = Complex::with_val_64(prec, &a[k] * &b[n - k]);
+                    expected = Complex::with_val_64(prec, &expected + &prod);
                 }
             }
             assert!(
@@ -423,14 +452,14 @@ mod tests {
 
     #[test]
     fn cross_correlate_matches_direct() {
-        let prec = 128u32;
+        let prec = 128u64;
         let n = 4usize;
         let a: Vec<Complex> = (0..n)
-            .map(|i| Complex::with_val(prec, (i + 1, 0)))
+            .map(|i| Complex::with_val_64(prec, (i + 1, 0)))
             .collect();
         // h has length 2n−1 = 7
         let h: Vec<Complex> = (0..(2 * n - 1))
-            .map(|i| Complex::with_val(prec, (i + 1, Float::with_val(prec, i) / 2)))
+            .map(|i| Complex::with_val_64(prec, (i + 1, Float::with_val_64(prec, i) / 2)))
             .collect();
 
         let kernel = precompute_kernel_fft(&h, n, prec);
@@ -439,13 +468,11 @@ mod tests {
 
         // Direct: out[k] = Σ_{j} a[j] · h[j − k + (n−1)]
         for (k, actual) in fft_out.iter().enumerate() {
-            let mut expected = Complex::with_val(prec, (0, 0));
+            let mut expected = Complex::with_val_64(prec, (0, 0));
             for (j, value) in a.iter().enumerate() {
-                let idx = (j as i64) - (k as i64) + (n as i64) - 1;
-                if idx >= 0 && (idx as usize) < h.len() {
-                    let prod = Complex::with_val(prec, value * &h[idx as usize]);
-                    expected = Complex::with_val(prec, &expected + &prod);
-                }
+                let idx = j + (n - 1 - k);
+                let prod = Complex::with_val_64(prec, value * &h[idx]);
+                expected = Complex::with_val_64(prec, &expected + &prod);
             }
             assert!(
                 approx_eq(actual, &expected, 25),
@@ -467,11 +494,11 @@ mod tests {
             let prec = crate::cnum::digits_to_bits(digits);
             let original: Vec<_> = (0..1024)
                 .map(|i| {
-                    Complex::with_val(
+                    Complex::with_val_64(
                         prec,
                         (
-                            Float::with_val(prec, i + 1) / 7,
-                            Float::with_val(prec, i) / 11,
+                            Float::with_val_64(prec, i + 1) / 7,
+                            Float::with_val_64(prec, i) / 11,
                         ),
                     )
                 })

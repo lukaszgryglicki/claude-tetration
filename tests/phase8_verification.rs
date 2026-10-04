@@ -9,21 +9,21 @@ use rug::{Complex, Float};
 
 use tetration::{cnum, dispatch, kouznetsov, regions};
 
-fn parse(re: &str, im: &str, prec: u32) -> Complex {
+fn parse(re: &str, im: &str, prec: u64) -> Complex {
     cnum::parse_complex(re, im, prec).unwrap()
 }
 
-fn abs(z: &Complex, prec: u32) -> Float {
+fn abs(z: &Complex, prec: u64) -> Float {
     assert!(cnum::is_finite(z));
-    Float::with_val(prec, z.abs_ref())
+    Float::with_val_64(prec, z.abs_ref())
 }
 
-fn matching_digits(a: &Complex, b: &Complex, prec: u32) -> Float {
+fn matching_digits(a: &Complex, b: &Complex, prec: u64) -> Float {
     assert!(cnum::is_finite(a) && cnum::is_finite(b));
-    let diff = Complex::with_val(prec, a - b);
+    let diff = Complex::with_val_64(prec, a - b);
     let da = abs(&diff, prec);
     if da.is_zero() {
-        return Float::with_val(prec, rug::float::Special::Infinity);
+        return Float::with_val_64(prec, rug::float::Special::Infinity);
     }
     -da.log10()
 }
@@ -34,7 +34,7 @@ fn matching_digits(a: &Complex, b: &Complex, prec: u32) -> Float {
 /// the requested precision (modulo guard bits). Done at moderate precision so
 /// the test is fast — accuracy of integer iteration scales perfectly with
 /// `prec`, so 100-digit confidence is ample.
-fn unrolled_tower(b: &Complex, n: i64, prec: u32) -> Complex {
+fn unrolled_tower(b: &Complex, n: i64, prec: u64) -> Complex {
     if n == 0 {
         return cnum::one(prec);
     }
@@ -132,7 +132,7 @@ fn t810_random_functional_eq_shell_thron() {
         for (zr, zi) in &heights {
             let b = parse(br, bi, prec);
             let z = parse(zr, zi, prec);
-            let z1 = Complex::with_val(prec, &z + &one);
+            let z1 = Complex::with_val_64(prec, &z + &one);
             let fz = dispatch::tetrate(&b, &z, prec, digits).unwrap();
             let fz1 = dispatch::tetrate(&b, &z1, prec, digits).unwrap();
             let lhs = cnum::pow_complex(&b, &fz, prec);
@@ -169,9 +169,9 @@ fn t820_continuity_multiple_directions() {
         ("7.07e-10", "7.07e-10"),
     ];
     for (er, ei) in &directions {
-        let h = Complex::with_val(prec, &parse("1", "0", prec) + parse(er, ei, prec));
+        let h = Complex::with_val_64(prec, &parse("1", "0", prec) + parse(er, ei, prec));
         let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
-        let diff = Complex::with_val(prec, &f - &f_int);
+        let diff = Complex::with_val_64(prec, &f - &f_int);
         let da = abs(&diff, prec);
         assert!(
             da < cnum::epsilon(7, prec),
@@ -198,7 +198,7 @@ fn t830_precision_scaling_p_2p_complex() {
     let h_hi = parse("0.4", "0.2", prec_hi);
     let f_lo = dispatch::tetrate(&b_lo, &h_lo, prec_lo, digits_lo).unwrap();
     let f_hi = dispatch::tetrate(&b_hi, &h_hi, prec_hi, digits_hi).unwrap();
-    let f_lo_hi = Complex::with_val(prec_hi, &f_lo);
+    let f_lo_hi = Complex::with_val_64(prec_hi, &f_lo);
     let m = matching_digits(&f_lo_hi, &f_hi, prec_hi);
     assert!(
         m >= digits_lo - 5,
@@ -219,7 +219,7 @@ fn t831_precision_scaling_p_2p_4p_real_interior() {
         let h_hi = parse("0.7", "0", prec_hi);
         let f_lo = dispatch::tetrate(&b_lo, &h_lo, prec_lo, lo).unwrap();
         let f_hi = dispatch::tetrate(&b_hi, &h_hi, prec_hi, hi).unwrap();
-        let f_lo_hi = Complex::with_val(prec_hi, &f_lo);
+        let f_lo_hi = Complex::with_val_64(prec_hi, &f_lo);
         let m = matching_digits(&f_lo_hi, &f_hi, prec_hi);
         assert!(
             m >= lo - 5,
@@ -242,7 +242,7 @@ fn t840_dispatch_idempotent_on_integer() {
     for (br, bi) in &bases {
         let b = parse(br, bi, prec);
         for n in 0..5 {
-            let h_int = Complex::with_val(prec, (n, 0));
+            let h_int = Complex::with_val_64(prec, (n, 0));
             let h_complex = parse(&format!("{n}.0"), "0.0", prec);
             let f1 = dispatch::tetrate(&b, &h_int, prec, digits).unwrap();
             let f2 = dispatch::tetrate(&b, &h_complex, prec, digits).unwrap();
@@ -263,7 +263,7 @@ fn t850_kouznetsov_refuses_unchecked_real_base_asymptotes() {
     };
     let state = kouznetsov::setup_kouznetsov(&b, &fp, prec, digits).unwrap();
     for (re, sign) in [(0, 1), (0, -1), (50, 1)] {
-        let h = Complex::with_val(prec, (re, (state.t_max.clone() + 1) * sign));
+        let h = Complex::with_val_64(prec, (re, (state.t_max.clone() + 1) * sign));
         let error = kouznetsov::eval_kouznetsov(&state, &b, &h).unwrap_err();
         assert!(error.contains("outside the Cauchy contour"), "{error}");
     }
@@ -277,15 +277,15 @@ fn t852_unit_circle_bases_functional_eq() {
     let one = parse("1", "0", prec);
     for (numerator, denominator) in [(1, 6), (1, 4), (1, 3), (1, 2), (3, 4)] {
         let angle: Float =
-            Float::with_val(prec, rug::float::Constant::Pi) * numerator / denominator;
+            Float::with_val_64(prec, rug::float::Constant::Pi) * numerator / denominator;
         let b = if denominator == 2 {
             parse("0", "1", prec)
         } else {
-            Complex::with_val(prec, (angle.clone().cos(), angle.sin()))
+            Complex::with_val_64(prec, (angle.clone().cos(), angle.sin()))
         };
         for (zr, zi) in &[("0.4", "0"), ("0.5", "0.3"), ("-0.2", "0.1")] {
             let z = parse(zr, zi, prec);
-            let z1 = Complex::with_val(prec, &z + &one);
+            let z1 = Complex::with_val_64(prec, &z + &one);
             if numerator == 3 {
                 let error = dispatch::tetrate(&b, &z, prec, digits).unwrap_err();
                 assert!(
@@ -321,7 +321,7 @@ fn t851_kouznetsov_refuses_unchecked_complex_base_asymptotes() {
     let state = kouznetsov::setup_kouznetsov(&b, &fp, prec, digits).unwrap();
     let beyond: Float = state.t_max.clone() + state.shift.imag().clone().abs() + 1;
     for multiple in [1, -1, 2, -2] {
-        let h = Complex::with_val(prec, (0, beyond.clone() * multiple));
+        let h = Complex::with_val_64(prec, (0, beyond.clone() * multiple));
         let error = kouznetsov::eval_kouznetsov(&state, &b, &h).unwrap_err();
         assert!(error.contains("outside the Cauchy contour"), "{error}");
     }
@@ -366,7 +366,7 @@ fn t860_schwarz_reflection_conjugate_base() {
             .unwrap_or_else(|e| panic!("b={}-{}i h={}-{}i failed: {}", br, bi_pos, hr, hi, e));
 
         // f_neg should equal conj(f_pos)
-        let f_pos_conj = Complex::with_val(prec, f_pos.conj_ref());
+        let f_pos_conj = Complex::with_val_64(prec, f_pos.conj_ref());
         let m = matching_digits(&f_neg, &f_pos_conj, prec);
         assert!(
             m >= digits - 5,

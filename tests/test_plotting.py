@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +115,30 @@ class ChartgenTests(unittest.TestCase):
             rows = list(csv.reader(output.read_text().splitlines()))
             self.assertTrue(rows)
             self.assertTrue(all(row[1:] == ["1", "0"] for row in rows))
+
+    def test_large_valid_multiplier_has_no_decimal_scale_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            script, output = self.fixture(Path(temp), "print('1\\n0')\n")
+            result = self.run_sweep(script, output, "1e10001")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(list(csv.reader(output.read_text().splitlines()))), 31)
+
+    def test_tetration_subprocess_has_no_implicit_timeout(self):
+        source = (ROOT / "scripts/chartgen.sh").read_text().split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+        def run(arguments, **kwargs):
+            self.assertNotIn("timeout", kwargs)
+            return subprocess.CompletedProcess(arguments, 0, "1\n0\n", "")
+
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "result.csv"
+            with mock.patch.object(sys, "argv", ["-", "tet", "1", "0", str(output), "1000"]), \
+                    mock.patch.dict(os.environ, {"SILENT": "1", "TET_MT": "0"}), \
+                    mock.patch.object(subprocess, "run", side_effect=run) as process:
+                with self.assertRaises(SystemExit) as exit_status:
+                    exec(compile(source, "chartgen.sh", "exec"), {})
+                self.assertEqual(exit_status.exception.code, 0)
+                self.assertEqual(process.call_count, 31)
 
     def test_failures_and_invalid_numeric_output_are_not_success(self):
         for body in [

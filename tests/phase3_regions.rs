@@ -134,9 +134,9 @@ fn t240_lambda_at_e_to_one_over_e_is_one() {
     // |λ| at b = e^{1/e} should be ~ 1 (parabolic).
     let r = classify_real("1.44466786100976613");
     if let Region::ShellThronBoundary(d) = r {
-        let prec = d.lambda_abs.prec();
+        let prec = d.lambda_abs.prec_64();
         assert!(
-            Float::with_val(prec, &d.lambda_abs - 1).abs() < cnum::decimal("0.05", prec),
+            Float::with_val_64(prec, &d.lambda_abs - 1).abs() < cnum::decimal("0.05", prec),
             "|λ| = {} for e^(1/e)",
             d.lambda_abs
         );
@@ -168,7 +168,7 @@ fn t241_fixed_point_satisfies_b_to_l_equals_l() {
         };
         let l = &fp_data.fixed_point;
         let bl = cnum::pow_complex(&b, l, prec);
-        let r2 = Complex::with_val(prec, &bl - l);
+        let r2 = Complex::with_val_64(prec, &bl - l);
         let r_abs = cnum::abs(&r2, prec);
         assert!(
             r_abs.is_finite() && r_abs <= cnum::working_epsilon(prec),

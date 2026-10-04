@@ -40,7 +40,7 @@ struct BaseCase {
     label: &'static str,
 }
 
-fn all_bases(prec: u32) -> Vec<BaseCase> {
+fn all_bases(prec: u64) -> Vec<BaseCase> {
     let eta = cnum::eta_upper(prec);
     let mut v: Vec<BaseCase> = Vec::new();
     for (offset, label) in [
@@ -54,7 +54,7 @@ fn all_bases(prec: u32) -> Vec<BaseCase> {
     ] {
         v.push(BaseCase {
             re: eta.clone() + cnum::decimal(offset, prec),
-            im: Float::new(prec),
+            im: Float::new_64(prec),
             label,
         });
     }
@@ -69,7 +69,7 @@ fn all_bases(prec: u32) -> Vec<BaseCase> {
         let re = (lambda.clone() * (-lambda).exp()).exp();
         v.push(BaseCase {
             re,
-            im: Float::new(prec),
+            im: Float::new_64(prec),
             label,
         });
     }
@@ -148,8 +148,8 @@ fn all_bases(prec: u32) -> Vec<BaseCase> {
         });
     }
     v.push(BaseCase {
-        re: Float::with_val(prec, 1).exp(),
-        im: Float::new(prec),
+        re: Float::with_val_64(prec, 1).exp(),
+        im: Float::new_64(prec),
         label: "real-gt-eta: b=e",
     });
     v
@@ -217,7 +217,7 @@ impl BaseCache {
     }
 }
 
-fn build_cache(b: &Complex, prec: u32, digits: u64) -> BaseCache {
+fn build_cache(b: &Complex, prec: u64, digits: u64) -> BaseCache {
     if cnum::is_zero(b) || cnum::is_one(b) {
         return BaseCache::SpecialBase;
     }
@@ -260,7 +260,7 @@ fn eval_cell(
     cache: &BaseCache,
     b: &Complex,
     h: &Complex,
-    prec: u32,
+    prec: u64,
     digits: u64,
 ) -> Result<Complex, String> {
     if h.imag().is_zero() && h.real().is_integer() {
@@ -308,18 +308,18 @@ fn functional_eq_residual(
     b: &Complex,
     h: &Complex,
     fh: &Complex,
-    prec: u32,
+    prec: u64,
     digits: u64,
 ) -> Result<Float, String> {
     if !cnum::is_finite(fh) {
         return Err("functional-equation input is non-finite".into());
     }
-    let h1 = Complex::with_val(prec, h + 1u32);
+    let h1 = Complex::with_val_64(prec, h + 1u32);
     let fh1 = eval_cell(cache, b, &h1, prec, digits)?;
-    let ln_b = Complex::with_val(prec, b.ln_ref());
-    let b_to_fh = cnum::checked_exp(&Complex::with_val(prec, &ln_b * fh), prec)?;
-    let diff = Complex::with_val(prec, &fh1 - &b_to_fh);
-    let residual = cnum::abs(&diff, prec) / cnum::abs(&fh1, prec).max(&Float::with_val(prec, 1));
+    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let b_to_fh = cnum::checked_exp(&Complex::with_val_64(prec, &ln_b * fh), prec)?;
+    let diff = Complex::with_val_64(prec, &fh1 - &b_to_fh);
+    let residual = cnum::abs(&diff, prec) / cnum::abs(&fh1, prec).max(&Float::with_val_64(prec, 1));
     if !residual.is_finite() {
         return Err("functional-equation residual is non-finite".into());
     }
@@ -363,6 +363,8 @@ fn run() -> Result<(), String> {
         .parse::<u64>()
         .map_err(|e| format!("invalid digits: {e}"))?;
     let prec = cnum::checked_digits_to_bits(digits)?;
+    let output_digits =
+        usize::try_from(digits).map_err(|_| "output precision exceeds addressable memory")?;
     tetration::mt::init_pool()?;
     let bases = all_bases(prec);
     let heights = all_heights();
@@ -391,7 +393,7 @@ fn run() -> Result<(), String> {
     }
 
     let process_base = |base_case: &BaseCase| -> Result<(), String> {
-        let b = Complex::with_val(prec, (&base_case.re, &base_case.im));
+        let b = Complex::with_val_64(prec, (&base_case.re, &base_case.im));
         let t0 = Instant::now();
         let cache = build_cache(&b, prec, digits);
 
@@ -402,14 +404,19 @@ fn run() -> Result<(), String> {
         let mut base_err = 0usize;
 
         for &(h_re, h_im, h_label) in &heights {
-            let h = Complex::with_val(prec, (cnum::decimal(h_re, prec), cnum::decimal(h_im, prec)));
+            let h =
+                Complex::with_val_64(prec, (cnum::decimal(h_re, prec), cnum::decimal(h_im, prec)));
 
             if let Some(reason) = domain_undefined(&b, &h) {
                 use std::io::Write as _;
                 writeln!(
                     &mut buf,
                     "{}\t{}\t{}\t{}\tundef\t\t\t\t0.000\t{}",
-                    base_case.label, base_case.re, base_case.im, h_label, reason
+                    base_case.label,
+                    cnum::DisplayFloat(&base_case.re),
+                    cnum::DisplayFloat(&base_case.im),
+                    h_label,
+                    reason
                 )
                 .map_err(|e| format!("buffer edge row: {e}"))?;
                 base_undef += 1;
@@ -433,7 +440,12 @@ fn run() -> Result<(), String> {
                     writeln!(
                         &mut buf,
                         "{}\t{}\t{}\t{}\terror\t\t\t\t{:.3}\t{}",
-                        base_case.label, base_case.re, base_case.im, h_label, elapsed, one
+                        base_case.label,
+                        cnum::DisplayFloat(&base_case.re),
+                        cnum::DisplayFloat(&base_case.im),
+                        h_label,
+                        elapsed,
+                        one
                     )
                     .map_err(|e| format!("buffer edge row: {e}"))?;
                     base_err += 1;
@@ -445,7 +457,7 @@ fn run() -> Result<(), String> {
                             Ok(residual) => Some(residual),
                             Err(error) => {
                                 writeln!(&mut buf, "{}\t{}\t{}\t{}\terror\t\t\t\t{:.3}\tFE comparison unavailable: {}",
-                                    base_case.label, base_case.re, base_case.im, h_label, elapsed,
+                                    base_case.label, cnum::DisplayFloat(&base_case.re), cnum::DisplayFloat(&base_case.im), h_label, elapsed,
                                     error.replace(['\n', '\t'], " "))
                                     .map_err(|e| format!("buffer edge row: {e}"))?;
                                 base_err += 1;
@@ -456,19 +468,19 @@ fn run() -> Result<(), String> {
                         None
                     };
                     let feq_str = match &feq {
-                        Some(r) => format!("{:.2e}", r),
+                        Some(r) => format!("{:.2e}", cnum::DisplayFloat(r)),
                         None => "-".to_string(),
                     };
                     let feq_bad = feq.is_some_and(|r| r > cnum::epsilon(digits, prec));
                     let status = if feq_bad { "feq_fail" } else { "ok" };
-                    let (re_s, im_s) = cnum::format_complex(&fh, digits as usize);
+                    let (re_s, im_s) = cnum::format_complex(&fh, output_digits);
                     use std::io::Write as _;
                     writeln!(
                         &mut buf,
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t",
                         base_case.label,
-                        base_case.re,
-                        base_case.im,
+                        cnum::DisplayFloat(&base_case.re),
+                        cnum::DisplayFloat(&base_case.im),
                         h_label,
                         status,
                         re_s,
@@ -559,9 +571,9 @@ mod tests {
                 .iter()
                 .find(|b| b.label == "real-gt-eta: b=e")
                 .unwrap();
-            assert_eq!(e.re, Float::with_val(prec, 1).exp());
+            assert_eq!(e.re, Float::with_val_64(prec, 1).exp());
             for (index, lambda, interior) in [(7, "0.949999", true), (8, "0.950001", false)] {
-                let b = Complex::with_val(prec, (&bases[index].re, &bases[index].im));
+                let b = Complex::with_val_64(prec, (&bases[index].re, &bases[index].im));
                 let region = regions::classify(&b, prec).unwrap();
                 let actual = match region {
                     regions::Region::ShellThronInterior(fp) if interior => fp.lambda_abs,
@@ -584,7 +596,7 @@ mod tests {
         let prec = cnum::digits_to_bits(digits);
         let b = cnum::parse_complex("0.5", "0", prec).unwrap();
         let delta = cnum::epsilon(digits, prec);
-        let perturbed = Complex::with_val(prec, Float::with_val(prec, 1) + &delta);
+        let perturbed = Complex::with_val_64(prec, Float::with_val_64(prec, 1) + &delta);
         let residual = functional_eq_residual(
             &BaseCache::DispatchFallback,
             &b,
@@ -596,7 +608,7 @@ mod tests {
         .unwrap();
         assert!(residual > delta.clone() * cnum::decimal("0.3", prec));
         assert!(residual < delta * cnum::decimal("0.4", prec));
-        let nan = Complex::with_val(prec, Float::with_val(prec, rug::float::Special::Nan));
+        let nan = Complex::with_val_64(prec, Float::with_val_64(prec, rug::float::Special::Nan));
         assert!(functional_eq_residual(
             &BaseCache::SpecialBase,
             &b,
@@ -634,7 +646,7 @@ mod tests {
         );
         let negative = cnum::parse_complex("-1e60", "0", prec).unwrap();
         assert!(domain_undefined(&cnum::one(prec), &negative).is_none());
-        assert!(domain_undefined(&Complex::with_val(prec, 2), &negative).is_some());
+        assert!(domain_undefined(&Complex::with_val_64(prec, 2), &negative).is_some());
         assert_eq!(
             eval_cell(
                 &BaseCache::SpecialBase,

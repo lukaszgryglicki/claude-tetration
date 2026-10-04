@@ -9,16 +9,16 @@ use rug::{Complex, Float};
 
 use tetration::{cnum, dispatch, kouznetsov, regions};
 
-fn parse(re: &str, im: &str, prec: u32) -> Complex {
+fn parse(re: &str, im: &str, prec: u64) -> Complex {
     cnum::parse_complex(re, im, prec).unwrap()
 }
 
-fn matching_digits(a: &Complex, b: &Complex, prec: u32) -> Float {
+fn matching_digits(a: &Complex, b: &Complex, prec: u64) -> Float {
     assert!(cnum::is_finite(a) && cnum::is_finite(b));
-    let diff = Complex::with_val(prec, a - b);
-    let da = Float::with_val(prec, diff.abs_ref());
+    let diff = Complex::with_val_64(prec, a - b);
+    let da = Float::with_val_64(prec, diff.abs_ref());
     if da.is_zero() {
-        return Float::with_val(prec, rug::float::Special::Infinity);
+        return Float::with_val_64(prec, rug::float::Special::Infinity);
     }
     -da.log10()
 }
@@ -35,7 +35,7 @@ fn check_functional_eq(
     let b = parse(b_re, b_im, prec);
     let z = parse(z_re, z_im, prec);
     let one = parse("1", "0", prec);
-    let z_plus_1 = Complex::with_val(prec, &z + &one);
+    let z_plus_1 = Complex::with_val_64(prec, &z + &one);
 
     let fz = dispatch::tetrate(&b, &z, prec, digits).unwrap();
     let fz1 = dispatch::tetrate(&b, &z_plus_1, prec, digits).unwrap();
@@ -152,7 +152,8 @@ fn t428_boundary_band_real_via_kouznetsov() {
     let dispatched = dispatch::tetrate(&b, &h, prec, digits)
         .expect("a failed continuation must not skip a converging direct method");
     assert!(matching_digits(&dispatched, &direct, prec) >= digits);
-    let next = kouznetsov::eval_kouznetsov(&state, &b, &Complex::with_val(prec, &h + 1)).unwrap();
+    let next =
+        kouznetsov::eval_kouznetsov(&state, &b, &Complex::with_val_64(prec, &h + 1)).unwrap();
     assert!(matching_digits(&next, &cnum::pow_complex(&b, &dispatched, prec), prec) >= digits);
 }
 
@@ -218,7 +219,8 @@ fn t442_large_base_b50_value_check() {
     let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
     let f_re = f.real();
     assert!(
-        Float::with_val(prec, f_re - cnum::decimal("3.6480", prec)).abs() < cnum::epsilon(3, prec),
+        Float::with_val_64(prec, f_re - cnum::decimal("3.6480", prec)).abs()
+            < cnum::epsilon(3, prec),
         "F_50(0.5) = {} but expected ≈ 3.6480 (FAILURE_CASES §E)",
         f_re
     );
@@ -235,7 +237,7 @@ fn t430_integer_endpoint_exact() {
     let b = parse("2.71828182845904523536", "0", prec);
     let h_int = parse("1", "0", prec);
     let f = dispatch::tetrate(&b, &h_int, prec, digits).unwrap();
-    let diff = Complex::with_val(prec, &f - &b);
-    let da = Float::with_val(prec, diff.abs_ref());
+    let diff = Complex::with_val_64(prec, &f - &b);
+    let da = Float::with_val_64(prec, diff.abs_ref());
     assert!(da < cnum::epsilon(25, prec), "F_e(1) − e differs by {}", da);
 }

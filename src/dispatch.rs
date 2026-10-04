@@ -32,7 +32,7 @@ fn dprint(s: &str) {
 /// Regular iteration at a complex fixed point is not the real-base Kneser
 /// construction, even at a complex height. These are necessary branch checks,
 /// not a general canonicality certificate.
-fn schroder_result_is_canonical(b: &Complex, h: &Complex, v: &Complex, prec: u32) -> bool {
+fn schroder_result_is_canonical(b: &Complex, h: &Complex, v: &Complex, prec: u64) -> bool {
     if !cnum::is_finite(v) {
         return false;
     }
@@ -45,14 +45,14 @@ fn schroder_result_is_canonical(b: &Complex, h: &Complex, v: &Complex, prec: u32
     if !h.imag().is_zero() || *h.real() <= -2 {
         return true;
     }
-    let im_abs = Float::with_val(prec, v.imag().abs_ref());
-    let scale = cnum::abs(v, prec).max(&Float::with_val(prec, 1));
+    let im_abs = Float::with_val_64(prec, v.imag().abs_ref());
+    let scale = cnum::abs(v, prec).max(&Float::with_val_64(prec, 1));
     im_abs < cnum::working_epsilon(prec) * scale
 }
 
 /// Real-positive base strictly below e^{-e} (the "cut" segment).
 fn is_cut_base(b: &Complex) -> bool {
-    b.imag().is_zero() && *b.real() > 0 && *b.real() < cnum::eta_lower(b.real().prec())
+    b.imag().is_zero() && *b.real() > 0 && *b.real() < cnum::eta_lower(b.real().prec_64())
 }
 
 /// Experimental upper-half-base-plane continuation for `0 < b < e^{-e}`.
@@ -62,7 +62,7 @@ fn is_cut_base(b: &Complex) -> bool {
 fn tetrate_cut_base(
     b: &Complex,
     h: &Complex,
-    prec: u32,
+    prec: u64,
     digits: u64,
     schroder_err: &str,
 ) -> Result<Complex, String> {
@@ -72,9 +72,9 @@ fn tetrate_cut_base(
     ));
     dprint("cut base: attempting experimental epsilon-continuation from b+2i; this may take hours");
     (|| -> Result<Complex, String> {
-        let b_re = Float::with_val(prec, b.real());
+        let b_re = Float::with_val_64(prec, b.real());
         let st = kouznetsov::setup_kouznetsov_cut_base(&b_re, prec, digits)?;
-        let b_exact = Complex::with_val(prec, (b_re, Float::new(prec)));
+        let b_exact = Complex::with_val_64(prec, (b_re, Float::new_64(prec)));
         kouznetsov::eval_kouznetsov(&st, &b_exact, h)
     })()
     .map_err(|ke| {
@@ -91,7 +91,7 @@ fn tetrate_cut_base(
 
 /// Compute `F_b(h)` at the given precision (in MPC bits). `digits` is the
 /// requested decimal precision used for accuracy gates and resource checks.
-pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Complex, String> {
+pub fn tetrate(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex, String> {
     crate::mt::init_pool()?;
     cnum::require_precision(prec, digits)?;
     if !cnum::is_finite(b) || !cnum::is_finite(h) {
@@ -107,7 +107,7 @@ pub fn tetrate(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Compl
     Ok(result)
 }
 
-fn tetrate_impl(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Complex, String> {
+fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex, String> {
     // ---- Special-case bases (don't need fixed-point computation) ----
     if cnum::is_one(b) {
         dprint("special case b=1 → 1");
@@ -118,12 +118,12 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Comp
     }
 
     // ---- Integer heights: direct iteration regardless of region ----
-    if let Some(n) = cnum::as_integer(h) {
-        dprint(&format!("integer height n={}", n));
-        return integer_height::tetrate_integer(b, n, prec);
-    }
     if h.imag().is_zero() && h.real().is_integer() {
-        return Err("integer height exceeds the supported iteration range".into());
+        dprint(&format!(
+            "integer height n={}",
+            cnum::DisplayFloat(h.real())
+        ));
+        return integer_height::tetrate_integer_height(b, h.real(), prec);
     }
 
     // ---- Schwarz reflection for Im(b) < 0 ----
@@ -137,10 +137,10 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Comp
     // orientation by conjugating both inputs and the result.
     if !b.imag().is_zero() && b.imag().is_sign_negative() {
         dprint("Schwarz reflection: Im(b)<0, dispatching as conj(F_{b̄}(h̄))");
-        let b_conj = Complex::with_val(prec, b.conj_ref());
-        let h_conj = Complex::with_val(prec, h.conj_ref());
+        let b_conj = Complex::with_val_64(prec, b.conj_ref());
+        let h_conj = Complex::with_val_64(prec, h.conj_ref());
         let result = tetrate_impl(&b_conj, &h_conj, prec, digits)?;
-        return Ok(Complex::with_val(prec, result.conj_ref()));
+        return Ok(Complex::with_val_64(prec, result.conj_ref()));
     }
 
     // ---- Region classification (drives algorithm choice) ----
@@ -148,7 +148,7 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Comp
     dprint(&format!("region = {}", region.name()));
     if debug_enabled() {
         if let Some(la) = lambda_abs_of(&region) {
-            eprintln!("tet: |λ| ≈ {}", la);
+            eprintln!("tet: |λ| ≈ {}", cnum::DisplayFloat(la));
         }
     }
 
@@ -156,6 +156,10 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Comp
     // No silent linear-approximation fallback (per design): if the chosen
     // algorithm fails, propagate the Err so the caller sees an honest failure
     // rather than a wrong-but-plausible C^0 number.
+    let regular_base = !b.imag().is_zero() || *b.real() <= cnum::eta_upper(prec);
+    if !regular_base {
+        dprint("real base above eta: regular fixed-point family is not Kneser; using Kouznetsov");
+    }
     match &region {
         regions::Region::BaseOne | regions::Region::BaseZero => {
             // Already handled above.
@@ -197,15 +201,17 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Comp
             //
             // For complex bases on the boundary, |arg(λ)| can already be large,
             // so direct Kouznetsov often works; we keep the original order.
-            match schroder::tetrate_schroder(b, h, d, prec) {
-                Ok(v) if schroder_result_is_canonical(b, h, &v, prec) => {
-                    dprint("Schröder succeeded at boundary band");
-                    return Ok(v);
+            if regular_base {
+                match schroder::tetrate_schroder(b, h, d, prec) {
+                    Ok(v) if schroder_result_is_canonical(b, h, &v, prec) => {
+                        dprint("Schröder succeeded at boundary band");
+                        return Ok(v);
+                    }
+                    Ok(_) => dprint(
+                        "Schröder result fails the real-base branch requirements; trying Kouznetsov",
+                    ),
+                    Err(e) => dprint(&format!("Schröder failed at boundary band: {}", e)),
                 }
-                Ok(_) => dprint(
-                    "Schröder result fails the real-base branch requirements; trying Kouznetsov",
-                ),
-                Err(e) => dprint(&format!("Schröder failed at boundary band: {}", e)),
             }
             let is_real_base = b.imag().is_zero() && !b.real().is_sign_negative();
             if is_real_base {
@@ -241,7 +247,7 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Comp
                 Err(why) => {
                     if why.contains("parabolic boundary")
                         || why.contains("degenerate contour")
-                        || why.contains("node budget")
+                        || why.contains("addressable memory")
                     {
                         dprint(
                             "direct Kouznetsov hit a contour/precision limit; trying continuation",
@@ -263,26 +269,24 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Comp
             }
         }
         regions::Region::OutsideShellThronRealPositive(d) => {
-            // Schröder at the repelling fixed point handles bases unusually
-            // close to the Shell-Thron boundary; for typical real bases
-            // (e, 2, 10, …) the σ̃-shift orbit hits the log singularity and
-            // Schröder bails. Fall through to Newton-Kouznetsov Cauchy iteration.
-            match schroder::tetrate_schroder(b, h, d, prec) {
-                Ok(v) if schroder_result_is_canonical(b, h, &v, prec) => {
-                    dprint("Schröder succeeded at repelling fixed point");
-                    return Ok(v);
-                }
-                Ok(_) => dprint(
-                    "Schröder result fails the real-base branch requirements; trying Kouznetsov",
-                ),
-                Err(e) => {
-                    if is_cut_base(b) {
-                        return tetrate_cut_base(b, h, prec, digits, &e);
+            if regular_base {
+                match schroder::tetrate_schroder(b, h, d, prec) {
+                    Ok(v) if schroder_result_is_canonical(b, h, &v, prec) => {
+                        dprint("Schröder succeeded at repelling fixed point");
+                        return Ok(v);
                     }
-                    dprint(&format!(
-                        "Schröder unavailable ({}); switching to Newton-Kouznetsov",
-                        e
-                    ));
+                    Ok(_) => dprint(
+                        "Schröder result fails the real-base branch requirements; trying Kouznetsov",
+                    ),
+                    Err(e) => {
+                        if is_cut_base(b) {
+                            return tetrate_cut_base(b, h, prec, digits, &e);
+                        }
+                        dprint(&format!(
+                            "Schröder unavailable ({}); switching to Newton-Kouznetsov",
+                            e
+                        ));
+                    }
                 }
             }
             match kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits) {
@@ -297,7 +301,7 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u32, digits: u64) -> Result<Comp
                     let near_boundary = d.lambda_abs < cnum::decimal("1.10", prec);
                     let parabolic_signal = why.contains("parabolic boundary")
                         || why.contains("degenerate contour")
-                        || why.contains("node budget")
+                        || why.contains("addressable memory")
                         || (is_real_base
                             && near_boundary
                             && (why.contains("did not converge")
@@ -391,7 +395,7 @@ fn try_continuation(
     b: &Complex,
     h: &Complex,
     fp: &crate::regions::FixedPointData,
-    prec: u32,
+    prec: u64,
     digits: u64,
 ) -> Result<Complex, String> {
     let state = kouznetsov::setup_kouznetsov_continuation(b, fp, prec, digits)?;
@@ -403,20 +407,15 @@ fn try_continuation(
 ///   * `0^^n` for positive integer `n`: `n` even → 1, `n` odd → 0
 ///     (because `0^0 = 1` and `0^k = 0` for `k > 0`).
 ///   * Negative integer / non-integer height: undefined.
-fn tetrate_base_zero(h: &Complex, prec: u32) -> Result<Complex, String> {
+fn tetrate_base_zero(h: &Complex, prec: u64) -> Result<Complex, String> {
     if !h.imag().is_zero() || !h.real().is_integer() {
         return Err("tetration of 0 is only defined for non-negative integer heights".into());
     }
-    let n = h
-        .real()
-        .to_integer()
-        .ok_or("tetration of 0 requires a finite integer height")?;
-    if n < 0 {
+    if *h.real() < 0 {
         return Err(format!(
             "tetration of 0 with negative integer height {} is undefined",
-            n
+            cnum::DisplayFloat(h.real())
         ));
     }
-    let val = if n.is_even() { 1 } else { 0 };
-    Ok(Complex::with_val(prec, (val, 0)))
+    integer_height::tetrate_integer_height(&cnum::zero(prec), h.real(), prec)
 }

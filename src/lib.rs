@@ -37,5 +37,7 @@ pub fn tetrate_str(
     if !cnum::is_finite(&result) {
         return Err("tetration returned a non-finite result".into());
     }
-    Ok(cnum::format_complex(&result, digits as usize))
+    let output_digits =
+        usize::try_from(digits).map_err(|_| "output precision exceeds addressable memory")?;
+    Ok(cnum::format_complex(&result, output_digits))
 }

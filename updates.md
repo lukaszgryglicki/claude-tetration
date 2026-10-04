@@ -1,4 +1,101 @@
-# Status Update — 2026-08-23
+# Status Update — 2026-10-04
+
+This is a correctness/precision audit, **not a new tetration construction or
+a claim of universal canonical coverage**. Working precision, a small
+functional-equation residual and agreement between related discretizations
+are not accuracy certificates. The current contracts supersede the August
+claims archived below.
+
+## Correctness changes
+
+- Numerical tolerances, residuals, branch/region tests, normalization,
+  continuation endpoints and checkpoint data use MPFR/MPC precision.
+  Native counts, indices and timing remain native. Precision requests that
+  cannot represent their tolerances in MPFR's exponent range are rejected.
+- String/CLI and grid working precision also preserves supplied significant
+  decimal digits, without changing output precision. A long near-one base,
+  noninteger height or huge odd height must not silently become a different
+  exact special case. Redundant padding and exponent text are not counted.
+- NaN/Inf inputs, exponential overflow/underflow (including loss of only one
+  complex component), invalid precision and unsupported domains are errors.
+  Cached evaluators now refuse the same exact negative-integer singularities
+  as dispatch; roundoff in `F(-1)` must not manufacture finite `F(-2)`.
+  Positive integer towers of exact base `-1` remain exactly `-1`; repeated
+  log/exp roundoff previously grew to about `3e-21` at height 100 despite a
+  50-digit request. Domain and height-budget limits are unchanged.
+- Lambert W retains the existing seeds/Halley method, with corrected
+  logarithm-branch identity and internal guard precision near `-1/e`.
+  Requested stopping precision is separate from internal working precision.
+- Unchecked fixed-ladder Richardson output is removed; the public linear
+  surrogate is deprecated and returns an error. A limiting fixed point is
+  not substituted for a finite off-contour height.
+- Kouznetsov checks the actual normalized evaluator, cached base identity,
+  finite operators, actual GMRES residual and the full
+  `10^-(digits+3)` boundary target. Backward FE validation avoids rejecting a
+  finite requested value merely because its unnecessary successor overflows.
+- Real-boundary dispatch tries the existing direct solver after failed
+  continuation: `b=1.5` genuinely succeeds by this previously skipped route.
+  Node budgets are reported as resource limits, not mathematical
+  nonexistence or proof that a particular future theory is required.
+- Cauchy reconstruction replaces linear continuation resampling; target-base
+  fixed points remain warm seeds outside the old contour, never final answers.
+  Resampling can be very expensive at large grids.
+- Checkpoints are atomic, full-precision `TETCKPT2`; incompatibility,
+  corruption and I/O errors are explicit. Residual dumps honor their prefix.
+  Library MT initialization honors the same explicit configuration as the CLI.
+- Diagnostics remain on by default; `--quiet`, `--silent`, `-q` or
+  `SILENT=1` suppress progress, not fatal errors. Runner coordinates are exact
+  decimal grids. Plotting validates input/output, preserves failed samples,
+  escapes SVG text and handles zero-span axes. Historical galleries were not
+  regenerated or promoted to accuracy evidence.
+
+## Numerical evidence and remaining limits
+
+Six attracting regular-iteration cases have independent 260-digit mpmath
+orbit/log-unwinding references, stabilized at two orbit depths. Actual CLI
+rounding agrees at 50 and 70 digits. Durable regressions cover those references
+at 1/10/50/70 digits, lower-half-plane cases, and 1000-digit primitives,
+near-branch Lambert W, tolerances, kernels and checkpoint roundtrips.
+
+For `b=2,h=0.5`, the 50-digit result
+`1.4587818160364217006839716610385871352966066053309` differs relatively by
+`4.90e-51` from the independent fatou.gp reference. The old
+`1.4587818160364217112` anchor was inaccurate after about 16 digits.
+At 70 digits the direct solver requests 65536 nodes, above its 32768 cap;
+the bounded CLI run timed out during continuation from `b=2.35`, **before
+reaching `b=2`**. No 70-digit base-2 value was validated.
+
+An isolated rebuild of committed revision `26aec7f` also stalls at the first
+`b=1.46` continuation step, then returns unchecked Richardson output that
+disagrees with the old t880 reference after roughly eight digits. That
+legacy "full precision" test claim is retracted, not treated as lost verified
+coverage. The current dispatch explicitly refuses both failed solver paths.
+The solver's historical "LM" label means diagonally regularized Newton,
+not least-squares Levenberg-Marquardt; failure to find descent does not prove
+a discretization floor. No new optimizer was implemented in this audit.
+
+The old `b=-0.8+0.4i` value remains retracted. Known failed solves must refuse,
+including when the stricter normalization check fails before the residual
+gate. Finite all-height coverage is impossible under the nondegenerate
+`F(-1)=0` convention: a finite exponential cannot produce that zero from
+`F(-2)`. Existence/uniqueness of all intended complex-base and cut-limit
+branches is not established.
+
+See README §§5/7/8 and [the current failure atlas](FAILURE_CASES.md) for
+evidence, limitations and the assessment of future work. Maintainer-local
+logs, reference generator and snapshots are preserved in
+`~/tetration-audit-2026-10-04-artifacts/`; they are not committed gallery data.
+No new mathematical algorithm was implemented.
+
+---
+
+# Historical Status Update — 2026-08-23
+
+**Archive, not current policy or verification.** The old 20-digit-only
+validation policy is superseded. The t860 success in §1.1 was retracted in
+§1.7; an FE check or a same-family baseline did not prove its printed digits.
+The old clamped gates, Richardson successes and claims of a proven in-strip
+zero are also superseded by the October audit.
 
 Goal recap: cover **all complex bases and all complex heights** for arbitrary-precision
 tetration, or document honestly why a region cannot be covered. Standard validation

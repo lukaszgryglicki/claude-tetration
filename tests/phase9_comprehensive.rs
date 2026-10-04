@@ -16,11 +16,11 @@
 //!   * **Absolute reference values** — published Kneser constants (e^^0.5) and
 //!     high-precision regression anchors cross-validated by reality + scaling.
 //!   * **Precision scaling** — the same input at `p` and `2p` digits must agree
-//!     to ~`p` digits (proves convergence to a grid-independent limit).
+//!     to ~`p` digits (numerical convergence evidence, not a proof).
 //!   * **Reality** — `Im(F_b(h)) = 0` for real `b ∈ (1, ∞)` and real `h`
 //!     (canonical Kneser is real on the real axis). NB: this does NOT hold for
 //!     `b ∈ (0,1)` where the multiplier `λ < 0` makes `λ^h` genuinely complex.
-//!   * **Schwarz reflection** — `F_b(h̄) = conj(F_b(h))` for real-positive `b`.
+//!   * **Schwarz reflection** — `F_b(h̄) = conj(F_b(h))` for real `b > 1`.
 //!
 //! Slow Kouznetsov-heavy cases (base e, large bases, precision scaling, unit
 //! circle) are `#[ignore]`d; run them with
@@ -34,22 +34,25 @@ fn parse(re: &str, im: &str, prec: u32) -> Complex {
     cnum::parse_complex(re, im, prec).unwrap()
 }
 
-fn abs(z: &Complex, prec: u32) -> f64 {
-    Float::with_val(prec, z.abs_ref()).to_f64()
+fn abs(z: &Complex, prec: u32) -> Float {
+    assert!(cnum::is_finite(z));
+    Float::with_val(prec, z.abs_ref())
 }
 
-fn im_abs(z: &Complex, prec: u32) -> f64 {
-    Float::with_val(prec, z.imag().abs_ref()).to_f64()
+fn im_abs(z: &Complex, prec: u32) -> Float {
+    assert!(cnum::is_finite(z));
+    Float::with_val(prec, z.imag().abs_ref())
 }
 
 /// ≈ number of matching significant digits between `a` and `b`.
-fn matching_digits(a: &Complex, b: &Complex, prec: u32) -> f64 {
+fn matching_digits(a: &Complex, b: &Complex, prec: u32) -> Float {
+    assert!(cnum::is_finite(a) && cnum::is_finite(b));
     let diff = Complex::with_val(prec, a - b);
     let da = abs(&diff, prec);
-    if da == 0.0 {
-        return f64::INFINITY;
+    if da.is_zero() {
+        return Float::with_val(prec, rug::float::Special::Infinity);
     }
-    let scale = abs(b, prec).max(1.0);
+    let scale = abs(b, prec).max(&Float::with_val(prec, 1));
     -(da / scale).log10()
 }
 
@@ -82,66 +85,92 @@ fn t900_region_thresholds_consistent_real_sweep() {
             regions::Region::ShellThronInterior(d) => {
                 seen_interior = true;
                 assert!(
-                    d.lambda_abs < regions::SHELL_THRON_INTERIOR_THRESHOLD,
+                    d.lambda_abs < cnum::decimal(regions::SHELL_THRON_INTERIOR_THRESHOLD, prec),
                     "b={}: labelled interior but |λ|={} ≥ 0.95",
-                    b_str, d.lambda_abs
+                    b_str,
+                    d.lambda_abs
                 );
             }
             regions::Region::ShellThronBoundary(d) => {
                 seen_boundary = true;
                 assert!(
-                    d.lambda_abs >= regions::SHELL_THRON_INTERIOR_THRESHOLD
-                        && d.lambda_abs <= regions::SHELL_THRON_OUTER_THRESHOLD,
+                    d.lambda_abs >= cnum::decimal(regions::SHELL_THRON_INTERIOR_THRESHOLD, prec)
+                        && d.lambda_abs
+                            <= cnum::decimal(regions::SHELL_THRON_OUTER_THRESHOLD, prec),
                     "b={}: labelled boundary but |λ|={} outside [0.95,1.05]",
-                    b_str, d.lambda_abs
+                    b_str,
+                    d.lambda_abs
                 );
             }
             regions::Region::OutsideShellThronRealPositive(d) => {
                 seen_outside = true;
                 assert!(
-                    d.lambda_abs > regions::SHELL_THRON_OUTER_THRESHOLD,
+                    d.lambda_abs > cnum::decimal(regions::SHELL_THRON_OUTER_THRESHOLD, prec),
                     "b={}: labelled outside but |λ|={} ≤ 1.05",
-                    b_str, d.lambda_abs
+                    b_str,
+                    d.lambda_abs
                 );
             }
             other => panic!("b={}: unexpected region {}", b_str, other.name()),
         }
         bi += 1;
     }
-    assert!(seen_interior && seen_boundary && seen_outside,
+    assert!(
+        seen_interior && seen_boundary && seen_outside,
         "sweep should cross all three regions (interior={}, boundary={}, outside={})",
-        seen_interior, seen_boundary, seen_outside);
+        seen_interior,
+        seen_boundary,
+        seen_outside
+    );
 }
 
 /// Just inside / just outside the interior threshold (|λ|=0.95) from both sides,
 /// located by bisection so the test is robust to the exact η value.
 #[test]
 fn t901_interior_boundary_threshold_both_sides() {
-    let prec = cnum::digits_to_bits(40);
-    let lam = |b_re: f64| -> f64 {
-        let b = Complex::with_val(prec, (Float::with_val(prec, b_re), Float::new(prec)));
+    let prec = cnum::digits_to_bits(70);
+    let lam = |b_re: &Float| -> Float {
+        let b = Complex::with_val(prec, b_re);
         match region_of(&b, prec) {
             regions::Region::ShellThronInterior(d)
             | regions::Region::ShellThronBoundary(d)
             | regions::Region::OutsideShellThronRealPositive(d)
             | regions::Region::OutsideShellThronGeneral(d) => d.lambda_abs,
-            _ => f64::NAN,
+            other => panic!("unexpected region {}", other.name()),
         }
     };
     // |λ| is increasing in b on (1, η). Bisect for |λ| = 0.95.
-    let (mut lo, mut hi) = (1.30f64, 1.4446f64);
-    for _ in 0..60 {
-        let mid = 0.5 * (lo + hi);
-        if lam(mid) < 0.95 { lo = mid; } else { hi = mid; }
+    let (mut lo, mut hi) = (cnum::decimal("1.30", prec), cnum::decimal("1.4446", prec));
+    let threshold = cnum::decimal("0.95", prec);
+    for _ in 0..240 {
+        let mid = Float::with_val(prec, &lo + &hi) / 2;
+        if lam(&mid) < threshold {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
     }
-    let b_at = 0.5 * (lo + hi);
+    let b_at = Float::with_val(prec, lo + hi) / 2;
     // A hair below the crossing must be interior; a hair above must be boundary.
-    let b_below = Complex::with_val(prec, (Float::with_val(prec, b_at - 1e-4), Float::new(prec)));
-    let b_above = Complex::with_val(prec, (Float::with_val(prec, b_at + 1e-4), Float::new(prec)));
-    assert!(matches!(region_of(&b_below, prec), regions::Region::ShellThronInterior(_)),
-        "b={} (just below |λ|=0.95) should be interior", b_at - 1e-4);
-    assert!(matches!(region_of(&b_above, prec), regions::Region::ShellThronBoundary(_)),
-        "b={} (just above |λ|=0.95) should be boundary", b_at + 1e-4);
+    let delta = cnum::epsilon(60, prec);
+    let b_below = Complex::with_val(prec, Float::with_val(prec, &b_at - &delta));
+    let b_above = Complex::with_val(prec, Float::with_val(prec, &b_at + &delta));
+    assert!(
+        matches!(
+            region_of(&b_below, prec),
+            regions::Region::ShellThronInterior(_)
+        ),
+        "b={} (just below |λ|=0.95) should be interior",
+        b_below
+    );
+    assert!(
+        matches!(
+            region_of(&b_above, prec),
+            regions::Region::ShellThronBoundary(_)
+        ),
+        "b={} (just above |λ|=0.95) should be boundary",
+        b_above
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -155,7 +184,7 @@ fn t901_interior_boundary_threshold_both_sides() {
 fn t910_reality_schroder_interior_real_bases() {
     let digits = 40u64;
     let prec = cnum::digits_to_bits(digits);
-    let tol = 10f64.powi(-((digits as i32) - 6));
+    let tol = cnum::epsilon(digits - 6, prec);
     let bases = ["1.1", "1.2", "1.3", "1.4", "1.4142135623730950488"];
     let heights = ["0.5", "0.3", "0.7", "1.5", "2.5", "-0.5", "-1.5"];
     for b_str in &bases {
@@ -166,7 +195,9 @@ fn t910_reality_schroder_interior_real_bases() {
             assert!(
                 im_abs(&f, prec) < tol,
                 "Im(F_{}({})) = {:.3e} should be ≈0 (real base in (1,η), real height)",
-                b_str, h_str, im_abs(&f, prec)
+                b_str,
+                h_str,
+                im_abs(&f, prec)
             );
         }
     }
@@ -182,15 +213,18 @@ fn t911_b_below_one_gives_complex_result() {
     let b = parse("0.5", "0", prec);
     let f = dispatch::tetrate(&b, &parse("0.7", "0", prec), prec, digits).unwrap();
     assert!(
-        im_abs(&f, prec) > 0.01,
+        im_abs(&f, prec) > cnum::epsilon(2, prec),
         "F_0.5(0.7) should be genuinely complex (λ<0), got Im={:.3e}",
         im_abs(&f, prec)
     );
     // Integer heights remain real, though: 0.5^^2 = 0.5^0.5 = 1/√2.
     let f2 = dispatch::tetrate(&b, &parse("2", "0", prec), prec, digits).unwrap();
-    assert!(im_abs(&f2, prec) < 1e-30, "0.5^^2 should be real");
-    let expected = Float::with_val(prec, Float::with_val(prec, 0.5f64).sqrt_ref());
-    assert!((f2.real().to_f64() - expected.to_f64()).abs() < 1e-12);
+    assert!(
+        im_abs(&f2, prec) < cnum::epsilon(digits, prec),
+        "0.5^^2 should be real"
+    );
+    let expected = Float::with_val(prec, 2).sqrt().recip();
+    assert!(Float::with_val(prec, f2.real() - expected).abs() < cnum::epsilon(digits, prec));
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -203,17 +237,20 @@ fn t911_b_below_one_gives_complex_result() {
 fn t920_reference_sqrt2_half() {
     let digits = 60u64;
     let prec = cnum::digits_to_bits(digits);
-    let b = parse("1.41421356237309504880168872420969807856967187537694", "0", prec);
+    let b = Complex::with_val(prec, Float::with_val(prec, 2).sqrt());
     let h = parse("0.5", "0", prec);
     let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
     let reference = parse(
-        "1.24362162766852180429509898360940293168819835661552015199775",
+        "1.243621627668521804295098983609402931688198356615523786426384266739854041905083929661122492605564522",
         "0",
         prec,
     );
     let m = matching_digits(&f, &reference, prec);
     assert!(m >= 55.0, "√2^^0.5 matched only {} digits vs reference", m);
-    assert!(im_abs(&f, prec) < 1e-50, "√2^^0.5 must be real");
+    assert!(
+        im_abs(&f, prec) < cnum::epsilon(50, prec),
+        "√2^^0.5 must be real"
+    );
 }
 
 /// b = 1.2 ^^ 0.5 — interior real base, second anchor.
@@ -230,7 +267,7 @@ fn t921_reference_1p2_half() {
     );
     let m = matching_digits(&f, &reference, prec);
     assert!(m >= 55.0, "1.2^^0.5 matched only {} digits", m);
-    assert!(im_abs(&f, prec) < 1e-50);
+    assert!(im_abs(&f, prec) < cnum::epsilon(50, prec));
 }
 
 /// Imaginary base b = i (|λ|≈0.89, inside ST but reached via σ̃-shift). Complex
@@ -256,7 +293,11 @@ fn t922_reference_imaginary_base_and_schwarz() {
     let f_conj = dispatch::tetrate(&b_conj, &h, prec, digits).unwrap();
     let target = Complex::with_val(prec, f.conj_ref());
     let ms = matching_digits(&f_conj, &target, prec);
-    assert!(ms >= 35.0, "Schwarz F_{{-i}}(0.5)=conj(F_i(0.5)) matched {} digits", ms);
+    assert!(
+        ms >= 35.0,
+        "Schwarz F_{{-i}}(0.5)=conj(F_i(0.5)) matched {} digits",
+        ms
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -268,7 +309,7 @@ fn t922_reference_imaginary_base_and_schwarz() {
 /// explicitly asked for 128-digit-class precision tests).
 #[test]
 fn t930_precision_scaling_schroder_128_256() {
-    let (lo, hi, want) = (128u64, 256u64, 118.0f64);
+    let (lo, hi, want) = (128u64, 256u64, 118);
     let prec_lo = cnum::digits_to_bits(lo);
     let prec_hi = cnum::digits_to_bits(hi);
     let b_lo = parse("1.3", "0", prec_lo);
@@ -279,7 +320,13 @@ fn t930_precision_scaling_schroder_128_256() {
     let f_hi = dispatch::tetrate(&b_hi, &h_hi, prec_hi, hi).unwrap();
     let f_lo_hi = Complex::with_val(prec_hi, &f_lo);
     let m = matching_digits(&f_lo_hi, &f_hi, prec_hi);
-    assert!(m >= want, "Schröder {}→{} digit scaling: only {} digits agree", lo, hi, m);
+    assert!(
+        m >= want,
+        "Schröder {}→{} digit scaling: only {} digits agree",
+        lo,
+        hi,
+        m
+    );
 }
 
 /// Complex interior base precision scaling, 80 → 160 digits.
@@ -296,7 +343,13 @@ fn t931_precision_scaling_complex_base() {
     let f_hi = dispatch::tetrate(&b_hi, &h_hi, prec_hi, hi).unwrap();
     let f_lo_hi = Complex::with_val(prec_hi, &f_lo);
     let m = matching_digits(&f_lo_hi, &f_hi, prec_hi);
-    assert!(m >= 72.0, "complex-base {}→{} scaling: only {} digits agree", lo, hi, m);
+    assert!(
+        m >= 72.0,
+        "complex-base {}→{} scaling: only {} digits agree",
+        lo,
+        hi,
+        m
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -310,17 +363,21 @@ fn t940_integer_height_edges() {
     // 3^^3 = 3^(3^3) = 3^27 = 7625597484987.
     let b = parse("3", "0", prec);
     let f = dispatch::tetrate(&b, &parse("3", "0", prec), prec, digits).unwrap();
-    assert!(matching_digits(&f, &parse("7625597484987", "0", prec), prec) >= 40.0,
-        "3^^3 = 7625597484987");
+    assert!(
+        matching_digits(&f, &parse("7625597484987", "0", prec), prec) >= 40.0,
+        "3^^3 = 7625597484987"
+    );
     // F(0)=1, F(1)=b exactly for an arbitrary complex base.
     let bc = parse("1.7", "0.9", prec);
     let f0 = dispatch::tetrate(&bc, &parse("0", "0", prec), prec, digits).unwrap();
-    assert!(abs(&Complex::with_val(prec, &f0 - parse("1", "0", prec)), prec) < 1e-45);
+    assert!(
+        abs(&Complex::with_val(prec, &f0 - parse("1", "0", prec)), prec) < cnum::epsilon(45, prec)
+    );
     let f1 = dispatch::tetrate(&bc, &parse("1", "0", prec), prec, digits).unwrap();
-    assert!(abs(&Complex::with_val(prec, &f1 - &bc), prec) < 1e-45);
+    assert!(abs(&Complex::with_val(prec, &f1 - &bc), prec) < cnum::epsilon(45, prec));
     // F(-1) = 0.
     let fm1 = dispatch::tetrate(&bc, &parse("-1", "0", prec), prec, digits).unwrap();
-    assert!(abs(&fm1, prec) < 1e-45, "F(-1) must be 0");
+    assert!(abs(&fm1, prec) < cnum::epsilon(45, prec), "F(-1) must be 0");
 }
 
 #[test]
@@ -330,16 +387,19 @@ fn t941_undefined_domains_error() {
     // h ≤ -2 integer is undefined (log_b(0) chain).
     for hr in ["-2", "-3", "-5"] {
         let b = parse("2", "0", prec);
-        assert!(dispatch::tetrate(&b, &parse(hr, "0", prec), prec, digits).is_err(),
-            "F_2({}) should error (undefined)", hr);
+        assert!(
+            dispatch::tetrate(&b, &parse(hr, "0", prec), prec, digits).is_err(),
+            "F_2({}) should error (undefined)",
+            hr
+        );
     }
     // b=0 non-integer / negative height is undefined; non-negative integer ok.
     let zero = parse("0", "0", prec);
     assert!(dispatch::tetrate(&zero, &parse("0.5", "0", prec), prec, digits).is_err());
     assert!(dispatch::tetrate(&zero, &parse("-1", "0", prec), prec, digits).is_err());
     assert_eq!(
-        dispatch::tetrate(&zero, &parse("2", "0", prec), prec, digits).unwrap().real().to_f64(),
-        1.0
+        dispatch::tetrate(&zero, &parse("2", "0", prec), prec, digits).unwrap(),
+        cnum::one(prec)
     );
 }
 
@@ -361,23 +421,29 @@ fn t950_kouznetsov_b2_reality_reference_schwarz() {
 
     // (a) Reality for real heights, across the strip and through the integer
     //     shift recursion (Re>1 and Re<0).
-    let real_tol = 1e-9;
+    let real_tol = cnum::epsilon(9, prec);
     for h_str in &["0.5", "0.3", "1.5", "2.5", "-0.5", "-1.5"] {
         let h = parse(h_str, "0", prec);
         let f = kouznetsov::eval_kouznetsov(&state, &b, &h).unwrap();
         assert!(
             im_abs(&f, prec) < real_tol,
             "Im(F_2({})) = {:.3e} should be ≈0",
-            h_str, im_abs(&f, prec)
+            h_str,
+            im_abs(&f, prec)
         );
     }
 
-    // (b) Absolute reference: 2^^0.5 = 1.4587818160364217112… (validated by
-    //     reality + precision scaling; matches FAILURE_CASES §F).
+    // (b) Independent fatou.gp numerical reference: gp-tetration values.json,
+    //     sexp|2|0.5|500. This is not an interval certificate.
     let f05 = kouznetsov::eval_kouznetsov(&state, &b, &parse("0.5", "0", prec)).unwrap();
-    let reference = parse("1.4587818160364217112", "0", prec);
+    let reference = parse("1.458781816036421700683971661038587135296606605330907141888207751656464160881083209019144256057703804", "0", prec);
     let m = matching_digits(&f05, &reference, prec);
-    assert!(m >= 9.0, "2^^0.5 matched only {} digits vs reference (got {})", m, f05.real());
+    assert!(
+        m >= 9.0,
+        "2^^0.5 matched only {} digits vs reference (got {})",
+        m,
+        f05.real()
+    );
 
     // (c) Schwarz reflection in the HEIGHT: F_2(h̄) = conj(F_2(h)).
     let hp = parse("0.4", "0.3", prec);
@@ -386,16 +452,18 @@ fn t950_kouznetsov_b2_reality_reference_schwarz() {
     let fm_v = kouznetsov::eval_kouznetsov(&state, &b, &hm).unwrap();
     let target = Complex::with_val(prec, fp_v.conj_ref());
     let ms = matching_digits(&fm_v, &target, prec);
-    assert!(ms >= 9.0, "Schwarz F_2(h̄)=conj(F_2(h)) matched only {} digits", ms);
+    assert!(
+        ms >= 9.0,
+        "Schwarz F_2(h̄)=conj(F_2(h)) matched only {} digits",
+        ms
+    );
 
-    // (d) Asymptote: large |Im(h)| must approach the fixed points L_upper /
-    //     L_lower, not NaN/0.
-    let f_up = kouznetsov::eval_kouznetsov(&state, &b, &parse("0", "100", prec)).unwrap();
-    let m_up = matching_digits(&f_up, &state.l_upper, prec);
-    assert!(m_up >= 9.0, "F_2(100i) should approach L_upper, matched {}", m_up);
-    let f_dn = kouznetsov::eval_kouznetsov(&state, &b, &parse("0", "-100", prec)).unwrap();
-    let m_dn = matching_digits(&f_dn, &state.l_lower, prec);
-    assert!(m_dn >= 9.0, "F_2(-100i) should approach L_lower, matched {}", m_dn);
+    // (d) A limiting fixed point is not a checked finite-height value.
+    for sign in [-1, 1] {
+        let h = Complex::with_val(prec, (0, (state.t_max.clone() + 1) * sign));
+        let error = kouznetsov::eval_kouznetsov(&state, &b, &h).unwrap_err();
+        assert!(error.contains("outside the Cauchy contour"), "{error}");
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -404,24 +472,31 @@ fn t950_kouznetsov_b2_reality_reference_schwarz() {
 //    Run: cargo test --release --test phase9_comprehensive -- --ignored
 // ────────────────────────────────────────────────────────────────────────────
 
-/// External reference: e^^0.5 = 1.6463542337511945… (published Kneser
-/// constant). This is the strongest absolute-correctness check in the suite.
+/// Independent fatou.gp numerical reference, gp-tetration values.json
+/// sexp|e|0.5|500; not an interval certificate.
 #[test]
 #[ignore]
 fn t960_reference_e_half_external() {
     let digits = 20u64;
     let prec = cnum::digits_to_bits(digits);
-    let b = parse("2.71828182845904523536028747135266", "0", prec);
+    let b = Complex::with_val(prec, (Float::with_val(prec, 1).exp(), 0));
     let f = dispatch::tetrate(&b, &parse("0.5", "0", prec), prec, digits).unwrap();
-    let reference = parse("1.6463542337511945", "0", prec);
+    let reference = parse("1.646354233751194580971924031592114518205311648969041530394879047518804627043365960655603009256205342", "0", prec);
     let m = matching_digits(&f, &reference, prec);
-    assert!(m >= 15.0, "e^^0.5 matched only {} digits vs published Kneser value", m);
-    assert!(im_abs(&f, prec) < 1e-12, "e^^0.5 must be real, Im={:.3e}", im_abs(&f, prec));
+    assert!(
+        m >= digits,
+        "e^^0.5 matched only {} digits vs independent reference",
+        m
+    );
+    assert!(
+        im_abs(&f, prec) < cnum::epsilon(digits, prec),
+        "e^^0.5 must be real, Im={:.3e}",
+        im_abs(&f, prec)
+    );
 }
 
 /// Kouznetsov precision scaling: b=2 at 12 vs 20 digits must agree to ≥11
-/// digits — proves the Newton-Cauchy result converges to a grid-independent
-/// limit (refutes the stale "discretization floor ~1e-4" comment).
+/// digits. This checks numerical consistency, not a grid-independent limit.
 #[test]
 #[ignore]
 fn t961_kouznetsov_precision_scaling_b2() {
@@ -437,7 +512,13 @@ fn t961_kouznetsov_precision_scaling_b2() {
     let f_hi = dispatch::tetrate(&b_hi, &h_hi, prec_hi, hi).unwrap();
     let f_lo_hi = Complex::with_val(prec_hi, &f_lo);
     let m = matching_digits(&f_lo_hi, &f_hi, prec_hi);
-    assert!(m >= 11.0, "Kouznetsov b=2 {}→{} scaling: only {} digits agree", lo, hi, m);
+    assert!(
+        m >= 11.0,
+        "Kouznetsov b=2 {}→{} scaling: only {} digits agree",
+        lo,
+        hi,
+        m
+    );
 }
 
 /// Complex heights with larger |Im| for a Kouznetsov real base (coverage gap:
@@ -454,16 +535,26 @@ fn t962_kouznetsov_b2_complex_heights() {
     };
     let state = kouznetsov::setup_kouznetsov(&b, &fp, prec, digits).unwrap();
     // Schwarz must hold for each: F(h̄)=conj(F(h)).
-    for (hr, hi) in &[("0.5", "1.5"), ("0.5", "2.5"), ("1.5", "0.8"), ("-0.5", "1.2")] {
+    for (hr, hi) in &[
+        ("0.5", "1.5"),
+        ("0.5", "2.5"),
+        ("1.5", "0.8"),
+        ("-0.5", "1.2"),
+    ] {
         let h = parse(hr, hi, prec);
         let h_conj = parse(hr, &format!("-{}", hi), prec);
         let f = kouznetsov::eval_kouznetsov(&state, &b, &h).unwrap();
         let fc = kouznetsov::eval_kouznetsov(&state, &b, &h_conj).unwrap();
-        assert!(f.real().to_f64().is_finite() && f.imag().to_f64().is_finite(),
-            "F_2({}+{}i) must be finite", hr, hi);
+        assert!(cnum::is_finite(&f), "F_2({}+{}i) must be finite", hr, hi);
         let target = Complex::with_val(prec, f.conj_ref());
         let m = matching_digits(&fc, &target, prec);
-        assert!(m >= 9.0, "Schwarz failed for h={}+{}i: {} digits", hr, hi, m);
+        assert!(
+            m >= 9.0,
+            "Schwarz failed for h={}+{}i: {} digits",
+            hr,
+            hi,
+            m
+        );
     }
 }
 
@@ -476,30 +567,69 @@ fn t963_large_base_b100_reality() {
     let prec = cnum::digits_to_bits(digits);
     let b = parse("100", "0", prec);
     let f = dispatch::tetrate(&b, &parse("0.5", "0", prec), prec, digits).unwrap();
-    assert!(im_abs(&f, prec) < 1e-8, "F_100(0.5) should be real, Im={:.3e}", im_abs(&f, prec));
-    assert!((f.real().to_f64() - 4.2131).abs() < 1e-2,
-        "F_100(0.5) ≈ 4.213 (FAILURE_CASES §E), got {}", f.real());
+    assert!(
+        im_abs(&f, prec) < cnum::epsilon(8, prec),
+        "F_100(0.5) should be real, Im={:.3e}",
+        im_abs(&f, prec)
+    );
+    assert!(
+        (f.real() - cnum::decimal("4.2131", prec)).abs() < cnum::epsilon(2, prec),
+        "F_100(0.5) ≈ 4.213 (FAILURE_CASES §E), got {}",
+        f.real()
+    );
 }
 
-/// Unit-circle bases |b|=1 at several angles — hard OutsideShellThronGeneral
-/// region the default grid never lands on. Just require a finite result and
-/// Schwarz consistency (these are non-canonical-partner W_k cases).
+/// Additional unit-circle directions missed by the rectangular grid.
+/// This is an availability check, not an independent accuracy certificate.
 #[test]
 #[ignore]
 fn t964_unit_circle_bases() {
     let digits = 12u64;
     let prec = cnum::digits_to_bits(digits);
-    let angles: &[(&str, &str)] = &[
-        ("0.809016994374947", "0.587785252292473"),   // 36°
-        ("0.309016994374947", "0.951056516295154"),   // 72°
-        ("-0.309016994374947", "0.951056516295154"),  // 108°
-    ];
-    for (br, bi) in angles {
-        let b = parse(br, bi, prec);
+    for numerator in 1..=3 {
+        let angle: Float = Float::with_val(prec, rug::float::Constant::Pi) * numerator / 5;
+        let b = Complex::with_val(prec, (angle.clone().cos(), angle.sin()));
         let h = parse("0.5", "0", prec);
-        let f = dispatch::tetrate(&b, &h, prec, digits)
-            .unwrap_or_else(|e| panic!("b={}+{}i failed: {}", br, bi, e));
-        assert!(f.real().to_f64().is_finite() && f.imag().to_f64().is_finite(),
-            "F for unit-circle base {}+{}i must be finite", br, bi);
+        let f =
+            dispatch::tetrate(&b, &h, prec, digits).unwrap_or_else(|e| panic!("b={b} failed: {e}"));
+        assert!(
+            cnum::is_finite(&f),
+            "F for unit-circle base {b} must be finite"
+        );
+    }
+}
+
+#[test]
+fn t965_kouznetsov_direct_precision_budget_is_explicit() {
+    for digits in [70, 1000] {
+        let prec = cnum::digits_to_bits(digits);
+        let base = parse("2", "0", prec);
+        let regions::Region::OutsideShellThronRealPositive(fp) = region_of(&base, prec) else {
+            panic!("unexpected base-2 region");
+        };
+        let error = kouznetsov::setup_kouznetsov(&base, &fp, prec, digits)
+            .err()
+            .expect("requested grid must exceed the direct node budget");
+        assert!(
+            error.contains("node budget") && error.contains("n_nodes="),
+            "{error}"
+        );
+        assert!(
+            !error.contains("needs Abel"),
+            "a resource cap is not a theorem requirement: {error}"
+        );
+        if digits == 1000 {
+            let error = kouznetsov::setup_kouznetsov_continuation(&base, &fp, prec, digits)
+                .err()
+                .expect("requested grid must also exceed the continuation budget");
+            assert!(
+                error.contains("node budget") && error.contains("n_nodes="),
+                "{error}"
+            );
+            assert!(
+                !error.contains("needs Abel"),
+                "a resource cap is not a theorem requirement: {error}"
+            );
+        }
     }
 }

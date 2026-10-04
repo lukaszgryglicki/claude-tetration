@@ -7,21 +7,23 @@
 
 use rug::{Complex, Float};
 
-use tetration::{cnum, dispatch, lambertw};
+use tetration::{cnum, dispatch, kouznetsov, regions};
 
 fn parse(re: &str, im: &str, prec: u32) -> Complex {
     cnum::parse_complex(re, im, prec).unwrap()
 }
 
-fn abs(z: &Complex, prec: u32) -> f64 {
-    Float::with_val(prec, z.abs_ref()).to_f64()
+fn abs(z: &Complex, prec: u32) -> Float {
+    assert!(cnum::is_finite(z));
+    Float::with_val(prec, z.abs_ref())
 }
 
-fn matching_digits(a: &Complex, b: &Complex, prec: u32) -> f64 {
+fn matching_digits(a: &Complex, b: &Complex, prec: u32) -> Float {
+    assert!(cnum::is_finite(a) && cnum::is_finite(b));
     let diff = Complex::with_val(prec, a - b);
     let da = abs(&diff, prec);
-    if da == 0.0 {
-        return f64::INFINITY;
+    if da.is_zero() {
+        return Float::with_val(prec, rug::float::Special::Infinity);
     }
     -da.log10()
 }
@@ -53,7 +55,7 @@ fn t800_golden_two_to_four() {
     let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
     let expected = parse("65536", "0", prec);
     let m = matching_digits(&f, &expected, prec);
-    assert!(m >= 45.0, "2^^4 differs: matched only {} digits", m);
+    assert!(m >= 45, "2^^4 differs: matched only {} digits", m);
 }
 
 #[test]
@@ -61,12 +63,16 @@ fn t801_golden_e_to_three() {
     // F_e(3) = e^(e^e). Cross-check vs unrolled tower at 100 digits.
     let digits = 100;
     let prec = cnum::digits_to_bits(digits);
-    let b = parse("2.71828182845904523536028747135266249775724709369995", "0", prec);
+    let b = parse(
+        "2.71828182845904523536028747135266249775724709369995",
+        "0",
+        prec,
+    );
     let h = parse("3", "0", prec);
     let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
     let expected = unrolled_tower(&b, 3, prec);
     let m = matching_digits(&f, &expected, prec);
-    assert!(m >= 90.0, "e^^3 differs: matched only {} digits", m);
+    assert!(m >= 90, "e^^3 differs: matched only {} digits", m);
 }
 
 #[test]
@@ -79,7 +85,7 @@ fn t802_golden_complex_base_integer_height() {
     let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
     let expected = unrolled_tower(&b, 4, prec);
     let m = matching_digits(&f, &expected, prec);
-    assert!(m >= 45.0, "(1+i)^^4 differs: matched only {} digits", m);
+    assert!(m >= 45, "(1+i)^^4 differs: matched only {} digits", m);
 }
 
 #[test]
@@ -90,7 +96,11 @@ fn t803_golden_negative_integer_height() {
     let b = parse("2.71828182845904523536", "0", prec);
     let h = parse("-1", "0", prec);
     let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
-    assert!(abs(&f, prec) < 1e-25, "F_e(-1) ≈ {}, expected 0", abs(&f, prec));
+    assert!(
+        abs(&f, prec) < cnum::epsilon(25, prec),
+        "F_e(-1) ≈ {}, expected 0",
+        abs(&f, prec)
+    );
 }
 
 // ---------- Random functional-equation sampling ----------
@@ -127,12 +137,14 @@ fn t810_random_functional_eq_shell_thron() {
             let fz1 = dispatch::tetrate(&b, &z1, prec, digits).unwrap();
             let lhs = cnum::pow_complex(&b, &fz, prec);
             let m = matching_digits(&fz1, &lhs, prec);
-            // Schröder interior bases reliably hit ≥25 digits at 40-digit
-            // precision (≥15-digit margin for guard bits / shift errors).
             assert!(
-                m >= 20.0,
+                m >= digits - 5,
                 "b={}+{}i z={}+{}i: matched only {} digits",
-                br, bi, zr, zi, m
+                br,
+                bi,
+                zr,
+                zi,
+                m
             );
         }
     }
@@ -162,9 +174,11 @@ fn t820_continuity_multiple_directions() {
         let diff = Complex::with_val(prec, &f - &f_int);
         let da = abs(&diff, prec);
         assert!(
-            da < 1e-7,
+            da < cnum::epsilon(7, prec),
             "direction ε=({},{}): F(1+ε)−b = {}, expected ≪1",
-            er, ei, da
+            er,
+            ei,
+            da
         );
     }
 }
@@ -186,7 +200,11 @@ fn t830_precision_scaling_p_2p_complex() {
     let f_hi = dispatch::tetrate(&b_hi, &h_hi, prec_hi, digits_hi).unwrap();
     let f_lo_hi = Complex::with_val(prec_hi, &f_lo);
     let m = matching_digits(&f_lo_hi, &f_hi, prec_hi);
-    assert!(m >= 30.0, "precision-scaling 40→80: only {} digits agree", m);
+    assert!(
+        m >= digits_lo - 5,
+        "precision-scaling 40→80: only {} digits agree",
+        m
+    );
 }
 
 #[test]
@@ -204,9 +222,11 @@ fn t831_precision_scaling_p_2p_4p_real_interior() {
         let f_lo_hi = Complex::with_val(prec_hi, &f_lo);
         let m = matching_digits(&f_lo_hi, &f_hi, prec_hi);
         assert!(
-            m >= (lo as f64) - 5.0,
+            m >= lo - 5,
             "precision-scaling {}→{}: only {} digits agree",
-            lo, hi, m
+            lo,
+            hi,
+            m
         );
     }
 }
@@ -223,153 +243,87 @@ fn t840_dispatch_idempotent_on_integer() {
         let b = parse(br, bi, prec);
         for n in 0..5 {
             let h_int = Complex::with_val(prec, (n, 0));
-            let h_complex = Complex::with_val(prec, (n as f64, 0.0));
+            let h_complex = parse(&format!("{n}.0"), "0.0", prec);
             let f1 = dispatch::tetrate(&b, &h_int, prec, digits).unwrap();
             let f2 = dispatch::tetrate(&b, &h_complex, prec, digits).unwrap();
             let m = matching_digits(&f1, &f2, prec);
-            assert!(m >= 45.0, "b={}+{}i n={}: matched {} digits", br, bi, n, m);
+            assert!(m >= 45, "b={}+{}i n={}: matched {} digits", br, bi, n, m);
         }
     }
 }
 
 #[test]
-fn t850_kouznetsov_asymptote_large_imag_height() {
-    // For Kouznetsov bases (real b > e^(1/e), complex bases outside ST), the
-    // natural F satisfies F(z) → L_upper as Im(z) → +∞, F(z) → L_lower as
-    // Im(z) → −∞. Heights with |Im(h)| beyond the Cauchy contour t_max must
-    // return the asymptote, not NaN/0/inf.
+fn t850_kouznetsov_refuses_unchecked_real_base_asymptotes() {
     let digits = 15;
     let prec = cnum::digits_to_bits(digits);
     let b = parse("2", "0", prec);
-    let ln_b = Complex::with_val(prec, b.ln_ref());
-    let neg_ln_b = Complex::with_val(prec, -&ln_b);
-    let w0 = lambertw::w0(&neg_ln_b, prec).unwrap();
-    let neg_w0 = Complex::with_val(prec, -&w0);
-    let l_plus = Complex::with_val(prec, &neg_w0 / &ln_b);
-    let l_upper = if l_plus.imag().is_sign_negative() {
-        Complex::with_val(prec, l_plus.conj_ref())
-    } else {
-        l_plus.clone()
+    let regions::Region::OutsideShellThronRealPositive(fp) = regions::classify(&b, prec).unwrap()
+    else {
+        panic!("unexpected base-2 region");
     };
-    let l_lower = Complex::with_val(prec, l_upper.conj_ref());
-
-    let h_far_up = parse("0", "100", prec);
-    let f_up = dispatch::tetrate(&b, &h_far_up, prec, digits).unwrap();
-    let m_up = matching_digits(&f_up, &l_upper, prec);
-    assert!(
-        m_up >= 12.0,
-        "F(100i) should match L_upper to ≥12 digits; matched {}", m_up
-    );
-
-    let h_far_down = parse("0", "-100", prec);
-    let f_down = dispatch::tetrate(&b, &h_far_down, prec, digits).unwrap();
-    let m_down = matching_digits(&f_down, &l_lower, prec);
-    assert!(
-        m_down >= 12.0,
-        "F(-100i) should match L_lower to ≥12 digits; matched {}", m_down
-    );
-
-    // Re-shift + asymptote: h = 50+50i should NOT give NaN/inf. After integer
-    // shift Re by 50, h_strip = 0+50i; if t_max ≈ 49 < 50, asymptote engages
-    // and returns L_upper. b^L_upper = L_upper, so the recursion is a no-op.
-    let h_diag = parse("50", "50", prec);
-    let f_diag = dispatch::tetrate(&b, &h_diag, prec, digits).unwrap();
-    let f_diag_re = Float::with_val(prec, f_diag.real()).to_f64();
-    let f_diag_im = Float::with_val(prec, f_diag.imag()).to_f64();
-    assert!(
-        f_diag_re.is_finite() && f_diag_im.is_finite(),
-        "F(50+50i) should be finite, got {}+{}i", f_diag_re, f_diag_im
-    );
-    let m_diag = matching_digits(&f_diag, &l_upper, prec);
-    assert!(
-        m_diag >= 10.0,
-        "F(50+50i) should match L_upper (asymptote engages); matched {}", m_diag
-    );
+    let state = kouznetsov::setup_kouznetsov(&b, &fp, prec, digits).unwrap();
+    for (re, sign) in [(0, 1), (0, -1), (50, 1)] {
+        let h = Complex::with_val(prec, (re, (state.t_max.clone() + 1) * sign));
+        let error = kouznetsov::eval_kouznetsov(&state, &b, &h).unwrap_err();
+        assert!(error.contains("outside the Cauchy contour"), "{error}");
+    }
 }
 
 #[test]
 fn t852_unit_circle_bases_functional_eq() {
-    // Bases on the complex unit circle |b|=1 (e.g., b = e^(iθ)) sit outside
-    // Shell-Thron interior for most θ. Verify the algorithm produces values
-    // satisfying F(z+1) = b^F(z). Coverage gap noted in audit findings: the
-    // 19^4 grid uses step 0.4 and never lands exactly on |b|=1.
+    // The coarse rectangular grid misses these unit-circle directions.
     let digits = 25;
     let prec = cnum::digits_to_bits(digits);
     let one = parse("1", "0", prec);
-    // Six points on the unit circle at 30°, 45°, 60°, 90°, 135°, 180°. b = -1
-    // and b = i are special; including them stress-tests the W_k partner
-    // search for non-real bases whose Im(L_+) is small.
-    let bases = [
-        ("0.866025403784438646763723", "0.5"),                            // 30°
-        ("0.707106781186547524400844", "0.707106781186547524400844"),     // 45°
-        ("0.5", "0.866025403784438646763723"),                            // 60°
-        ("0", "1"),                                                       // 90° (i)
-        ("-0.707106781186547524400844", "0.707106781186547524400844"),    // 135°
-    ];
-    for (br, bi) in &bases {
-        let b = parse(br, bi, prec);
+    for (numerator, denominator) in [(1, 6), (1, 4), (1, 3), (1, 2), (3, 4)] {
+        let angle: Float =
+            Float::with_val(prec, rug::float::Constant::Pi) * numerator / denominator;
+        let b = if denominator == 2 {
+            parse("0", "1", prec)
+        } else {
+            Complex::with_val(prec, (angle.clone().cos(), angle.sin()))
+        };
         for (zr, zi) in &[("0.4", "0"), ("0.5", "0.3"), ("-0.2", "0.1")] {
             let z = parse(zr, zi, prec);
             let z1 = Complex::with_val(prec, &z + &one);
-            // Honesty semantics (post stalled-solve-rejection gate): a
-            // unit-circle base may either produce a verified solve (then the
-            // functional equation must hold to ≥15 digits) or refuse cleanly
-            // with the parabolic-band-stall / unsupported error. What it must
-            // NEVER do is return garbage from an O(1)-residual stalled solve
-            // (pre-gate behavior; see FAILURE_CASES.md §A.1/§A.2). A base that
-            // refuses once is skipped for the remaining heights: each refusal
-            // costs a full solve chain (principal + two-sided retry +
-            // Richardson probes), and the refusal is per-base, not per-height.
-            let fz = match dispatch::tetrate(&b, &z, prec, digits) {
-                Ok(v) => v,
-                Err(e) => {
-                    assert!(
-                        e.contains("stall") || e.contains("unsupported") || e.contains("Richardson"),
-                        "b={}+{}i z={}+{}i: unexpected error kind: {}",
-                        br, bi, zr, zi, e
-                    );
-                    break;
-                }
-            };
-            let fz1 = match dispatch::tetrate(&b, &z1, prec, digits) {
-                Ok(v) => v,
-                Err(e) => {
-                    assert!(
-                        e.contains("stall") || e.contains("unsupported") || e.contains("Richardson"),
-                        "b={}+{}i z+1={}+{}i: unexpected error kind: {}",
-                        br, bi, zr, zi, e
-                    );
-                    break;
-                }
-            };
+            if numerator == 3 {
+                let error = dispatch::tetrate(&b, &z, prec, digits).unwrap_err();
+                assert!(
+                    error.contains("unsupported case") && error.contains("residual"),
+                    "{error}"
+                );
+                break;
+            }
+            let fz = dispatch::tetrate(&b, &z, prec, digits).unwrap();
+            let fz1 = dispatch::tetrate(&b, &z1, prec, digits).unwrap();
             let lhs = cnum::pow_complex(&b, &fz, prec);
             let m = matching_digits(&fz1, &lhs, prec);
             assert!(
-                m >= 15.0,
-                "b={}+{}i z={}+{}i: F(z+1) vs b^F(z) matched only {} digits",
-                br, bi, zr, zi, m
+                m >= digits - 5,
+                "b={} z={}+{}i: F(z+1) vs b^F(z) matched only {} digits",
+                b,
+                zr,
+                zi,
+                m
             );
         }
     }
 }
 
 #[test]
-fn t851_kouznetsov_asymptote_complex_base() {
-    // Complex base outside ST: F(z) → L_upper as Im(z) → +∞ where L_upper is
-    // the algorithm's chosen partner from W_k search (not necessarily conjugate
-    // of L_+ for non-real bases). Just verify F is finite at large |Im|.
+fn t851_kouznetsov_refuses_unchecked_complex_base_asymptotes() {
     let digits = 12;
     let prec = cnum::digits_to_bits(digits);
-    let b = parse("0.5", "1.5", prec);
-    for im_str in &["50", "-50", "100", "-200"] {
-        let h = parse("0", im_str, prec);
-        let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
-        let fr = Float::with_val(prec, f.real()).to_f64();
-        let fi = Float::with_val(prec, f.imag()).to_f64();
-        assert!(
-            fr.is_finite() && fi.is_finite(),
-            "F(0+{}i) for b=0.5+1.5i not finite: {}+{}i", im_str, fr, fi
-        );
+    let b = parse("2", "0.1", prec);
+    let regions::Region::OutsideShellThronGeneral(fp) = regions::classify(&b, prec).unwrap() else {
+        panic!("unexpected near-real complex-base region");
+    };
+    let state = kouznetsov::setup_kouznetsov(&b, &fp, prec, digits).unwrap();
+    let beyond: Float = state.t_max.clone() + state.shift.imag().clone().abs() + 1;
+    for multiple in [1, -1, 2, -2] {
+        let h = Complex::with_val(prec, (0, beyond.clone() * multiple));
+        let error = kouznetsov::eval_kouznetsov(&state, &b, &h).unwrap_err();
+        assert!(error.contains("outside the Cauchy contour"), "{error}");
     }
 }
 
@@ -384,45 +338,30 @@ fn t860_schwarz_reflection_conjugate_base() {
     // Each entry: (b_re, b_im_pos, h_re, h_im) — dispatcher computes both
     // b=b_re+b_im_pos·i and b=b_re-b_im_pos·i and checks conj symmetry.
     //
-    // The -0.8±0.4i case (outside ST, |λ|≈1.15) is HONESTY-GATED: its LM
-    // solve never truly converges. The pre-gate code accepted a residual-1.577
-    // stall whose value (0.70282898…+0.82145795…i) was "verified" only against
-    // baseline ac19851 — the same solver family with the same stall, i.e.
-    // circular. Cross-discretization probes (principal vs two-sided unwrap,
-    // 12/20/25 digits) produce wildly different values, so no value at this
-    // base is currently verifiable. The honest outcomes are: Ok (if a future
-    // solver genuinely converges — then Schwarz symmetry must hold) or a clean
-    // parabolic-band-stall / unsupported error. Garbage output is the only
-    // failure. See FAILURE_CASES.md §A.2.
+    // The old -0.8+0.4i "reference" was a same-family discretization artifact
+    // (FAILURE_CASES.md A.2). This case must refuse, not pass on symmetry alone.
     let cases = [
-        ("1.2", "0.4", "0.5", "0"),        // Shell-Thron interior, quick
-        ("1.2", "0.4", "0.5", "0.3"),       // complex height
-        ("-0.8", "0.4", "0.5", "0"),        // outside ST, near-real
+        ("1.2", "0.4", "0.5", "0"),   // Shell-Thron interior, quick
+        ("1.2", "0.4", "0.5", "0.3"), // complex height
+        ("-0.8", "0.4", "0.5", "0"),  // outside ST, near-real
     ];
     for (br, bi_pos, hr, hi) in &cases {
-        let b_pos = parse(br, bi_pos, prec);            // Im(b) > 0
+        let b_pos = parse(br, bi_pos, prec); // Im(b) > 0
         let b_neg = parse(br, &format!("-{}", bi_pos), prec); // Im(b) < 0 → Schwarz path
         let h = parse(hr, hi, prec);
         let h_conj = parse(hr, &format!("-{}", hi), prec);
 
-        let honest_err = |e: &str| {
-            e.contains("stall") || e.contains("unsupported") || e.contains("Richardson")
-        };
-        let f_pos = match dispatch::tetrate(&b_pos, &h, prec, digits) {
-            Ok(v) => v,
-            Err(e) => {
-                assert!(honest_err(&e), "b={}+{}i h={}+{}i: unexpected error kind: {}", br, bi_pos, hr, hi, e);
-                // Conjugate base must refuse identically (Schwarz symmetry of
-                // the failure itself).
-                let neg = dispatch::tetrate(&b_neg, &h_conj, prec, digits);
-                assert!(
-                    neg.is_err(),
-                    "b={}-{}i succeeded while b={}+{}i honestly refused — asymmetric gate",
-                    br, bi_pos, br, bi_pos
-                );
-                continue;
+        if *br == "-0.8" {
+            for (base, height) in [(&b_pos, &h), (&b_neg, &h_conj)] {
+                let error = dispatch::tetrate(base, height, prec, digits).unwrap_err();
+                assert!(error.contains("unsupported case")
+                    && (error.contains("residual")
+                        || error.contains("Kouznetsov normalization: no grid seed produced Newton-converged root")),
+                    "{error}");
             }
-        };
+            continue;
+        }
+        let f_pos = dispatch::tetrate(&b_pos, &h, prec, digits).unwrap();
         let f_neg = dispatch::tetrate(&b_neg, &h_conj, prec, digits)
             .unwrap_or_else(|e| panic!("b={}-{}i h={}-{}i failed: {}", br, bi_pos, hr, hi, e));
 
@@ -430,7 +369,7 @@ fn t860_schwarz_reflection_conjugate_base() {
         let f_pos_conj = Complex::with_val(prec, f_pos.conj_ref());
         let m = matching_digits(&f_neg, &f_pos_conj, prec);
         assert!(
-            m >= 15.0,
+            m >= digits - 5,
             "Schwarz symmetry failed for b={}±{}i h={}+{}i: F_b̄(h̄)={} but conj(F_b(h))={}, {} digits",
             br, bi_pos, hr, hi, f_neg, f_pos_conj, m
         );
@@ -438,153 +377,64 @@ fn t860_schwarz_reflection_conjugate_base() {
 }
 
 #[test]
-fn t870_parabolic_boundary_iperturbation_fallback() {
-    // Class A: bases extremely close to η=e^(1/e) have |arg(λ)| ≈ 0 and
-    // n_nodes that exceeds BOTH the direct-solver cap (32K) AND the continuation
-    // cap (131K). Must NOT hang and must NOT return ERR — instead,
-    // fall back to the iε-perturbation Richardson extrapolation:
-    //   F(b, h) ≈ (4·F(b+0.05i, h) − F(b+0.1i, h))/3.
-    // The complex-base path handles b±iε successfully because |arg(λ)| there
-    // is no longer ≈ 0. Quadratic Richardson on the real part cancels the
-    // O(ε²) correction (Schwarz reflection makes Re(F) even in ε); the
-    // imaginary part is odd in ε so it collapses to ~0 after cancellation.
-    // Practical reach is ~6 digits, so we only assert order-of-magnitude
-    // agreement here.
-    //
-    // b=1.4448 is 0.0001 above η=1.44467:
-    //   |arg(λ)| ≈ 0.019 → t_max ≈ 3400 → n_nodes ≈ 262K → exceeds both caps.
-    let digits = 20u64;
-    let prec = cnum::digits_to_bits(digits);
-    let b = parse("1.4448", "0", prec);
-    let h = parse("0.5", "0", prec);
-    let result = dispatch::tetrate(&b, &h, prec, digits);
-    let value = result.expect("iε-perturbation fallback should return a value");
-    // Expect Re ≈ 1.257 (limiting value at η for h=0.5) and Im ≈ 0.
-    let re_f64 = value.real().to_f64();
-    let im_f64 = value.imag().to_f64();
-    assert!(
-        (re_f64 - 1.257).abs() < 0.01,
-        "expected Re ≈ 1.257, got {}",
-        re_f64
-    );
-    assert!(
-        im_f64.abs() < 1e-10,
-        "expected Im ≈ 0 (Schwarz cancellation), got {}",
-        im_f64
-    );
+fn t870_parabolic_boundary_refuses_unvalidated_extrapolation() {
+    for digits in [20, 50, 70] {
+        let prec = cnum::digits_to_bits(digits);
+        let b = parse("1.4448", "0", prec);
+        let h = parse("0.5", "0", prec);
+        let error = dispatch::tetrate(&b, &h, prec, digits).unwrap_err();
+        assert!(
+            error.contains("unsupported case") && error.contains("unchecked polynomial"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
-fn t871_iperturbation_r4_functional_equation() {
-    // R₄ self-consistency check: at b=η (the worst-case parabolic point),
-    // F(h+1) computed via iε R₄ should equal b^F(h) to roughly the empirical
-    // ceiling of the iε method (~15-17 digits). This is a stronger test than
-    // t870's order-of-magnitude check — it certifies the precision claim of
-    // "~15-17 useful digits via iε R₄" baked into the warning message.
-    //
-    // Each tetrate call runs 5 perturbed Kouznetsov evaluations (~10s each)
-    // for ~50s per call; two calls → ~100s. Acceptable for the verification
-    // value.
-    use rug::ops::Pow;
-
+fn t871_near_parabolic_refusal_is_consistent_across_heights() {
     let digits = 25u64;
     let prec = cnum::digits_to_bits(digits);
     let b = parse("1.444667861009766", "0", prec);
-    let h_lower = parse("0.5", "0", prec);
-    let h_upper = parse("1.5", "0", prec);
-
-    let f_lower = dispatch::tetrate(&b, &h_lower, prec, digits)
-        .expect("F(η, 0.5) via iε R₄ must succeed");
-    let f_upper = dispatch::tetrate(&b, &h_upper, prec, digits)
-        .expect("F(η, 1.5) via iε R₄ must succeed");
-
-    // b^F(0.5) should match F(1.5) up to R₄'s empirical precision.
-    let b_pow = b.clone().pow(&f_lower);
-    let diff = Complex::with_val(prec, &b_pow - &f_upper);
-    let abs_diff = abs(&diff, prec);
-    let abs_upper = abs(&f_upper, prec).max(1.0);
-    let rel_err = abs_diff / abs_upper;
-
-    // Empirical: at b=η, residual is ~6e-17 → ~16 digits.
-    // Assert at least 14 digits (gives a safety margin for slight numerical drift).
-    assert!(
-        rel_err < 1e-14,
-        "R₄ functional-equation residual too large: rel_err={:.3e}, F(0.5)={}, F(1.5)={}",
-        rel_err, f_lower, f_upper
-    );
+    for height in ["0.5", "1.5"] {
+        let error = dispatch::tetrate(&b, &parse(height, "0", prec), prec, digits).unwrap_err();
+        assert!(
+            error.contains("unsupported case") && error.contains("unchecked polynomial"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
-#[ignore] // Slow (~3.5 min): two complex-h iε R₄ evaluations × 5 perturbed Kouznetsov solves each.
-fn t872_iperturbation_r4_functional_equation_complex_h() {
-    // R₄ self-consistency check on the COMPLEX-h path. For complex h the
-    // Schwarz-symmetry F(b−iε, h) = conj(F(b+iε, conj(h))) is restored by
-    // explicit symmetrization
-    //   G(ε) := (F(b+iε, h) + conj(F(b+iε, conj(h))))/2
-    // doubling the per-ε work (10 tetrate calls instead of 5).
-    //
-    // Verifies that F(b, h+1) = b^F(b, h) holds to ~15-17 digits at
-    // b=1.4447 (parabolic boundary), h=0.5+0.5i. This certifies the iε
-    // complex-h path's precision matches the real-h path's.
-    use rug::ops::Pow;
-
+fn t872_parabolic_complex_heights_do_not_use_a_surrogate() {
     let digits = 25u64;
     let prec = cnum::digits_to_bits(digits);
     let b = parse("1.4447", "0", prec);
-    let h_lower = parse("0.5", "0.5", prec);
-    let h_upper = parse("1.5", "0.5", prec);
-
-    let f_lower = dispatch::tetrate(&b, &h_lower, prec, digits)
-        .expect("F(1.4447, 0.5+0.5i) via iε R₄ complex-h must succeed");
-    let f_upper = dispatch::tetrate(&b, &h_upper, prec, digits)
-        .expect("F(1.4447, 1.5+0.5i) via iε R₄ complex-h must succeed");
-
-    let b_pow = b.clone().pow(&f_lower);
-    let diff = Complex::with_val(prec, &b_pow - &f_upper);
-    let abs_diff = abs(&diff, prec);
-    let abs_upper = abs(&f_upper, prec).max(1.0);
-    let rel_err = abs_diff / abs_upper;
-
-    // Empirical at b=1.4447, h=0.5+0.5i: rel_err ≈ 1.3e-16 → ~16 digits.
-    assert!(
-        rel_err < 1e-14,
-        "R₄ complex-h functional-equation residual too large: rel_err={:.3e}, F(0.5+0.5i)={}, F(1.5+0.5i)={}",
-        rel_err, f_lower, f_upper
-    );
+    for height in ["0.5", "1.5"] {
+        let error = dispatch::tetrate(&b, &parse(height, "0.5", prec), prec, digits).unwrap_err();
+        assert!(
+            error.contains("unsupported case") && error.contains("unchecked polynomial"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
-#[ignore] // Slow (~3-5 min): continuation solver warm-starts from b=1.81, walks 16 steps to 1.46.
-fn t880_parabolic_boundary_continuation_full_precision() {
-    // b=1.46 sits in the parabolic boundary band but far enough from η that
-    // the continuation solver (warm-start from b=1.81 walking back in steps)
-    // converges at full precision. This locks in the dispatch reordering
-    // that skips direct Kouznetsov for real-base parabolic boundary cases
-    // and tries continuation BEFORE iε-perturbation Richardson.
-    //
-    // Expected: F_{1.46}(0.5) = 1.2638346032868236084… (18+ digits)
-    // Verified against the continuation solver output during development.
-    //
-    // Run with: cargo test --release --test phase8_verification -- --ignored t880
+#[ignore] // Slow: exercises both continuation and the direct fallback.
+fn t880_parabolic_boundary_rejects_legacy_extrapolation() {
+    // The committed implementation also stalled at the first continuation
+    // step, then returned unchecked Richardson output. Its old "full
+    // precision" reference was neither reproduced nor independently verified.
     let digits = 20u64;
     let prec = cnum::digits_to_bits(digits);
     let b = parse("1.46", "0", prec);
     let h = parse("0.5", "0", prec);
-    let result = dispatch::tetrate(&b, &h, prec, digits);
-    let value = result.expect("continuation solver should succeed for b=1.46");
-    let expected = parse("1.2638346032868236084", "0", prec);
-    let m = matching_digits(&value, &expected, prec);
+    let error = dispatch::tetrate(&b, &h, prec, digits).unwrap_err();
     assert!(
-        m >= 16.0,
-        "expected ≥16 matching digits with continuation result, got {} (value={}, expected={})",
-        m, value, expected
-    );
-    // Im should be ≈0 (real base, real height).
-    let im_f64 = Float::with_val(prec, value.imag()).to_f64();
-    assert!(
-        im_f64.abs() < 1e-15,
-        "expected Im ≈ 0 for real base+height, got {}",
-        im_f64
+        error.contains("unsupported case")
+            && error.contains("continuation: Kouznetsov Newton did not converge")
+            && error.contains("direct Kouznetsov: Kouznetsov Newton did not converge")
+            && error.contains("unchecked polynomial extrapolation is not a tetration result"),
+        "{error}"
     );
 }
 
@@ -599,29 +449,20 @@ fn t880_parabolic_boundary_continuation_full_precision() {
 /// diverged to 10^6913 under upward iteration while the true orbit is
 /// bounded (integer-height F(48) = 0.1353 − 0.0070i).
 ///
-/// With the honesty gate in `setup_kouznetsov`, the acceptable outcomes
-/// are: a clean Err (expected today: the iε-Richardson probes land back
-/// in the band), or — should a future method genuinely crack this base —
-/// an Ok that stays consistent with the bounded integer-height tower.
+/// A bounded-looking answer is not enough to replace this refusal contract.
 #[test]
 fn t890_deep_band_complex_base_no_garbage() {
     let digits = 10u64;
     let prec = cnum::digits_to_bits(digits);
     let b = parse("0.0653281554868594", "0.025", prec);
     let h = parse("48.013", "0", prec);
-    match dispatch::tetrate(&b, &h, prec, digits) {
-        Err(_) => {} // honest refusal — the currently expected outcome
-        Ok(v) => {
-            // If some day this succeeds, it must be near the bounded orbit:
-            // |F| along the true orbit stays ≤ ~1.1 for this base. The old
-            // garbage was |F| ≈ 8.7 at this height (then → ∞ at h ≈ 51).
-            let mag = abs(&v, prec);
-            assert!(
-                mag < 2.0,
-                "deep-band solve returned suspicious magnitude {} (garbage \
-                 regression: stalled LM samples accepted as final answer?)",
-                mag
-            );
-        }
-    }
+    let error = dispatch::tetrate(&b, &h, prec, digits).unwrap_err();
+    assert!(
+        error.contains("unsupported case")
+            && (error.contains("residual")
+                || error.contains(
+                    "Kouznetsov normalization: no grid seed produced Newton-converged root"
+                )),
+        "{error}"
+    );
 }

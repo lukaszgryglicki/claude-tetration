@@ -4,9 +4,8 @@
 
 Renders (x, Re F, Im F) triples from CSV files as an SVG orthographic
 3D line with a real turntable camera, painter-sorted depth shading and
-an *isotropic* complex plane (Re and Im share one scale and the screen
-fit is uniform, so the period-2 spiral weave projects to true circles
-instead of ellipses/polygons).
+an isotropic complex plane (Re and Im share one scale). Projection does
+not imply that the underlying curves are circles or certified values.
 
 Usage:
   plot3d.py [options] out.svg title subtitle spec [spec ...]
@@ -16,7 +15,7 @@ Each spec is  csv_path:label:color  where csv_path has lines `x,re,im`
 
   --az DEG      turntable azimuth about the Re-axis (vertical). 0 looks
                 straight down the x axis: the pure complex-plane portrait
-                (swirls become circles). 90 is the classic side view
+                without projection foreshortening. 90 is the classic side view
                 (x horizontal, Re F up). Default 35.
   --el DEG      camera elevation. 0 = level, 90 = top-down (x vs Im F).
                 Default 18.
@@ -27,11 +26,13 @@ Each spec is  csv_path:label:color  where csv_path has lines `x,re,im`
                 irrelevant at --az 0).
   --no-shadows  skip floor/wall shadow projections.
   --dot-ends    mark first/last point of each curve.
+  --break-negative-integers  break at integer x <= -2 for nondegenerate bases.
 
 World frame: X = x (scaled), Y = Im F (depth at az 90), Z = Re F (up).
 No external dependencies; pure stdlib.
 """
 import argparse
+from html import escape
 import math
 import sys
 
@@ -39,7 +40,7 @@ BG = (0x10, 0x14, 0x18)
 CLIP = 50.0
 
 
-def read_csv(path, xr):
+def read_csv(path, xr, break_negative_integers=False):
     segs, cur = [], []
     with open(path) as fh:
         for line in fh:
@@ -57,6 +58,8 @@ def read_csv(path, xr):
                     cur = []
                 continue
             bad = not (math.isfinite(x) and math.isfinite(re) and math.isfinite(im))
+            if not bad and break_negative_integers and x <= -2 and x.is_integer():
+                bad = True
             if not bad and xr and not (xr[0] <= x <= xr[1]):
                 bad = True
             if bad or math.hypot(re, im) > CLIP:
@@ -64,6 +67,11 @@ def read_csv(path, xr):
                     segs.append(cur)
                     cur = []
                 continue
+            if cur and break_negative_integers:
+                lo, hi = sorted((cur[-1][0], x))
+                if math.floor(lo) + 1 <= min(hi, -2):
+                    segs.append(cur)
+                    cur = []
             cur.append((x, re, im))
     if cur:
         segs.append(cur)
@@ -116,23 +124,38 @@ def main():
     ap.add_argument("--xscale", type=float, default=None)
     ap.add_argument("--no-shadows", action="store_true")
     ap.add_argument("--dot-ends", action="store_true")
+    ap.add_argument("--break-negative-integers", action="store_true")
     ap.add_argument("out")
     ap.add_argument("title")
     ap.add_argument("subtitle")
     ap.add_argument("specs", nargs="+")
     args = ap.parse_args()
 
-    W, H = (int(v) for v in args.size.lower().split("x"))
+    try:
+        W, H = (int(v) for v in args.size.lower().split("x"))
+    except ValueError:
+        ap.error("--size must be WxH")
+    if W < 320 or H < 240:
+        ap.error("--size must be at least 320x240")
+    if not (math.isfinite(args.az) and math.isfinite(args.el)):
+        ap.error("camera angles must be finite")
+    if args.xscale is not None and (not math.isfinite(args.xscale) or args.xscale <= 0):
+        ap.error("--xscale must be finite and positive")
     margin = max(70, W // 22)
     xr = None
     if args.xrange:
-        a, b = (float(v) for v in args.xrange.split(":"))
+        try:
+            a, b = (float(v) for v in args.xrange.split(":"))
+        except ValueError:
+            ap.error("--xrange must be A:B")
+        if not (math.isfinite(a) and math.isfinite(b)):
+            ap.error("--xrange bounds must be finite")
         xr = (min(a, b), max(a, b))
 
     curves = []
     for spec in args.specs:
         path, label, color = spec.rsplit(":", 2)
-        segs = read_csv(path, xr)
+        segs = read_csv(path, xr, args.break_negative_integers)
         if segs:
             curves.append((segs, label, hexrgb(color)))
     pts = [p for segs, _, _ in curves for s in segs for p in s]
@@ -141,6 +164,8 @@ def main():
 
     # ---- world scaling: Re/Im isotropic, x compressed to a companion span
     x0, x1 = min(p[0] for p in pts), max(p[0] for p in pts)
+    if not math.isfinite(x1 - x0):
+        ap.error("height range exceeds the plotter's machine-coordinate range")
     cspan = max(
         max(p[1] for p in pts) - min(p[1] for p in pts),
         max(p[2] for p in pts) - min(p[2] for p in pts),
@@ -150,14 +175,18 @@ def main():
         xs = args.xscale
     else:
         xs = (2.2 * cspan) / ((x1 - x0) or 1.0)
+    if not math.isfinite(xs):
+        ap.error("height range exceeds the plotter's machine-coordinate range")
 
     def world(p):
-        return (p[0] * xs, p[2], p[1])  # X = x, Y = Im, Z = Re
+        return ((p[0] - x0) * xs, p[2], p[1])  # X = height offset, Y = Im, Z = Re
 
     cam = Camera(args.az, args.el)
 
     # ---- uniform screen fit (single scale for u and v: angles preserved)
     prj = [cam.proj(world(p)) for p in pts]
+    if not all(math.isfinite(value) for point in prj for value in point):
+        ap.error("projection exceeds the plotter's machine-coordinate range")
     u0, u1 = min(q[0] for q in prj), max(q[0] for q in prj)
     v0, v1 = min(q[1] for q in prj), max(q[1] for q in prj)
     d0, d1 = min(q[2] for q in prj), max(q[2] for q in prj)
@@ -186,9 +215,9 @@ def main():
         f'viewBox="0 0 {W} {H}" font-family="Georgia,serif">',
         f'<rect width="{W}" height="{H}" fill="#101418"/>',
         f'<text x="{W/2}" y="{margin*0.55:.0f}" fill="#e8e2d5" font-size="{W//60}" '
-        f'text-anchor="middle">{args.title}</text>',
+        f'text-anchor="middle">{escape(args.title)}</text>',
         f'<text x="{W/2}" y="{margin*0.55 + W//55:.0f}" fill="#9aa3ad" '
-        f'font-size="{W//110}" text-anchor="middle">{args.subtitle}</text>',
+        f'font-size="{W//110}" text-anchor="middle">{escape(args.subtitle)}</text>',
     ]
 
     # ---- axes (world lines through the data box edges)
@@ -217,13 +246,17 @@ def main():
         )
         # x ticks
         span = x1 - x0
-        step = 10 ** math.floor(math.log10(span / 6))
-        for m in (1, 2, 5, 10):
-            if span / (step * m) <= 9:
-                step *= m
-                break
-        t = math.ceil(x0 / step) * step
-        while t <= x1:
+        if span == 0:
+            ticks = [x0]
+        else:
+            step = 10 ** math.floor(math.log10(span / 6))
+            for m in (1, 2, 5, 10):
+                if span / (step * m) <= 9:
+                    step *= m
+                    break
+            first = math.ceil(x0 / step) * step
+            ticks = [first + k * step for k in range(12) if first + k * step <= x1]
+        for t in ticks:
             T = scr(spro((t, ax_re, ax_im)))
             svg.append(
                 f'<line x1="{T[0]:.1f}" y1="{T[1]-4:.1f}" x2="{T[0]:.1f}" '
@@ -233,7 +266,6 @@ def main():
                 f'<text x="{T[0]:.1f}" y="{T[1]+20:.1f}" fill="#7d8894" '
                 f'font-size="{W//140}" text-anchor="middle">{t:g}</text>'
             )
-            t += step
     xa = x0 if not down_axis else (x0 + x1) / 2
     _, re_e = line3((xa, r0, ax_im), (xa, r1, ax_im))
     svg.append(
@@ -262,8 +294,8 @@ def main():
                 f'font-size="{W//150}">|F|={rad:g}</text>'
             )
 
-    # ---- pole markers
-    if x0 < -2 and not down_axis:
+    # ---- singular-height markers
+    if args.break_negative_integers and x0 < -2 and not down_axis:
         k, first = -2, True
         while k >= x0:
             if k <= x1:
@@ -274,7 +306,7 @@ def main():
                 if first:
                     svg.append(
                         f'<text x="{B[0]:.1f}" y="{B[1]-6:.1f}" fill="#b06060" '
-                        f'font-size="{W//140}" text-anchor="middle">poles at '
+                        f'font-size="{W//140}" text-anchor="middle">singularities at '
                         f'integer x &#8804; &#8722;2</text>'
                     )
                     first = False
@@ -344,7 +376,7 @@ def main():
         )
         svg.append(
             f'<text x="{W-288}" y="{ly+5}" fill="#c9c2b4" '
-            f'font-size="{W//130}">{label}</text>'
+            f'font-size="{W//130}">{escape(label)}</text>'
         )
         ly += 26
     svg.append(

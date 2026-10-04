@@ -55,42 +55,43 @@ critique are most welcome there or via GitHub issues.
 
 **Tetration** `F_b(h)` — the analytic extension of the tower
 `b^(b^(b^…))` of height `h` — for **complex bases** and **complex
-heights**, at any requested decimal precision, in Rust.
+heights**, using request-sized arbitrary-precision arithmetic in Rust.
+Coverage is incomplete, and working precision is not a certified error bound.
 
 ```console
-$ tet 20 2 0 0.5 0        # ²(2^^0.5): base 2, height 1/2, 20 digits
-1.4587818160364217112
-0
+$ tet --quiet 50 2 0 0.5 0    # base 2, height 1/2
+1.4587818160364217006839716610385871352966066053309
+1.4385466959000460791684806773926427793264165481517e-69
 
-$ tet 20 0 1 0.5 0        # base i: complex base, complex machinery
-1.1667009135704745687
-0.73456353698672133009
+$ tet --quiet 20 0.5 0 0.5 0  # real base below one; genuinely complex result
+0.62978622839612487196
+0.21786186312508402837
 ```
 
-The solver portfolio covers the base plane with the method that is
-mathematically natural in each regime — exact special cases, Schröder
+The solver portfolio attempts the method appropriate to each regime: special cases, Schröder
 regular iteration at the attracting fixed point, Kouznetsov's
-Cauchy-integral construction, warm-started continuation, Richardson
-extrapolation on the parabolic boundary, and a germ-tracked
+Cauchy-integral construction, warm-started continuation, and an experimental germ-tracked
 ε-continuation walker for the branch-cut segment `0 < b < e^{−e}`.
-Every returned value is validated internally (functional-equation
-post-check, solver residual gates); anything the program cannot certify
-is an **honest error**, never a plausible-looking wrong number.
+Unchecked Richardson and linear-surrogate answers have been removed.
+Finite-value, convergence, normalization and functional-equation checks reject
+known failures. These checks do **not** prove forward accuracy, uniqueness, or
+global canonicality; the functional equation can hold for a wrong reconstruction.
+The 50-digit base-2 example agrees with an independent-method numerical reference;
+its tiny imaginary part is numerical roundoff, not a mathematical imaginary part.
 
 * **Language / deps:** Rust, [`rug`](https://crates.io/crates/rug)
   (GMP/MPFR/MPC bindings) for arbitrary-precision complex arithmetic,
   [`rayon`](https://crates.io/crates/rayon) for parallel kernels.
 * **Interface:** a single CLI binary `tet`, plus a string-in/string-out
   library API (`tetration::tetrate_str`).
-* **Definition used:** `F_b(0) = 1`, `F_b(z+1) = b^{F_b(z)}`, canonical
-  (Kneser-type) normalization — real-on-real where a real-analytic
-  solution exists, Schwarz-reflection and boundary-limit conventions
-  everywhere else (§ [Conventions](#12-conventions-and-normalization)).
-* **Status:** all base regimes covered with certified accuracy except
-  two documented frontiers (parabolic boundary ≈ 15–17 digits; cut
-  segment `0 < b < e^{−e}` under active development in this repo —
-  see [`FAILURE_CASES.md`](FAILURE_CASES.md) and
-  [`updates.md`](updates.md) for the live research log).
+* **Definition used:** `F_b(0) = 1`, `F_b(z+1) = b^{F_b(z)}`, with
+  method-specific branch and normalization conventions
+  (§ [Conventions](#12-conventions-and-normalization)).
+* **Status (October 2026 audit):** useful numerical coverage, not universal or
+  certified tetration. Some near-parabolic, negative-real, general-complex and
+  cut-base cases remain unsupported. See [`FAILURE_CASES.md`](FAILURE_CASES.md)
+  and [`updates.md`](updates.md); August success claims are historical, not
+  current accuracy guarantees.
 * **License:** Apache-2.0.
 
 ---
@@ -116,7 +117,7 @@ is an **honest error**, never a plausible-looking wrong number.
    3. [Schröder regular tetration](#63-schröder-regular-tetration-shellthron-interior)
    4. [Kouznetsov Cauchy-integral method](#64-kouznetsov-cauchy-integral-method-outside-shellthron)
    5. [Continuation solver](#65-continuation-solver)
-   6. [iε-perturbation Richardson fallback](#66-iε-perturbation-richardson-fallback-parabolic-band)
+   6. [Retired polynomial fallback](#66-retired-polynomial-fallback)
    7. [The cut-base ε-walker](#67-the-cut-base-ε-walker-0--b--e−e)
 7. [Numerical honesty](#7-numerical-honesty)
 8. [Known limitations](#8-known-limitations)
@@ -148,40 +149,47 @@ F_b(0) = 1        (normalization)
 F_b(z+1) = b^F_b(z)   (the Abel / functional equation, "FE")
 ```
 
-The FE alone does not pin down a unique function: any solution can be
-pre-composed with a 1-periodic map. Uniqueness comes from **asymptotic
-conditions at `Im z → ±∞`**: the canonical ("Kneser") tetration
-approaches the fixed points of `z ↦ b^z` in the upper/lower half-planes
-and is real-analytic on `h ∈ (−2, ∞)` for real bases `b > 1` where such
-a solution exists. This is the function computed by Kouznetsov (2009)
-for `b = e` and generalized since; it is the standard object of study
-on [tetrationforum.org](https://tetrationforum.org).
+The FE and normalization alone do not determine a unique function:
+reparameterizations `h ↦ h+p(h)` with suitable 1-periodic `p` preserve the FE.
+Kneser-type uniqueness requires additional analytic hypotheses, not just
+agreement of two numerical runs. For example, Trappmann–Kouznetsov's Abel
+criterion requires an injective holomorphic Abel function on an initial
+region, a normalization, and coverage of the complex plane by integer
+translates of its image. This implementation does not verify that criterion.
+For the real-base Kneser construction above `e^{1/e}`, the selected solution
+is real on `h ∈ (−2,∞)` and has specified limiting fixed points.
 
 ### 1.2 Conventions and normalization
 
 Precise statements of what `tet` returns:
 
-* **Normalization** `F_b(0) = 1`, hence `F_b(1) = b`, `F_b(−1) = 0`,
-  `F_b(−2) = −∞` (pole/branch point for real `b > 1`).
-* **Principal branches everywhere**: `ln` and `b^z = exp(z·ln b)` use
-  the principal branch of `ln b` (`Im ln b ∈ (−π, π]`).
-* **Real bases `b > e^{−e}`, real heights:** the real-analytic
-  (Kneser-canonical) value. `F` is real on the real axis; the solver
-  enforces and verifies this (`F(z̄) = F̄(z)` Schwarz symmetry).
-* **`Im(b) < 0`:** by Schwarz reflection, `F_b(h) := conj(F_{b̄}(h̄))`.
-  This makes the two half-planes consistent and leaves only `Im(b) ≥ 0`
-  to solve directly.
-* **The cut segment `0 < b < e^{−e}`:** no real-analytic tetration
-  exists (the real fixed point is repelling with multiplier
-  `λ < −1`; the real iteration has an attracting 2-cycle). The
-  canonical value is defined as the **boundary limit from the upper
-  half base-plane**, `F_b(h) := lim_{ε→0⁺} F_{b+iε}(h)` — complex for
-  non-integer real heights, and consistent with the `Im(b) < 0`
-  reflection convention. This is the branch the ε-walker (§ 6.7)
-  computes.
-* **Integer heights** are computed by exact iteration for any base
-  (no analytic machinery involved), so `tet 50 2 0 3 0` returns
-  exactly `16`.
+* **Normalization:** `F_b(0)=1`, `F_b(1)=b`, `F_b(−1)=0` for nondegenerate
+  bases. A finite `F_b(−2)` would require an exponential to equal zero, so
+  it cannot exist. The program rejects integer heights `≤−2`; it does not
+  return an infinity as a successful complex value. Base one is a separate
+  constant-function convention, including at negative heights.
+* **Branches:** `b^z=exp(z·Log(b))` uses the principal base logarithm.
+  Height reduction uses principal logs; experimental contour continuation
+  can use explicitly tracked logarithmic branches. A global single-valued
+  function on all heights is not claimed.
+* **Real bases above one:** regular attracting iteration is used where
+  available below `e^{1/e}`; the Kneser-type Cauchy construction is used
+  above it. Real-height reality checks apply on the relevant real domain,
+  not to every real base or every height.
+* **Real bases below one:** the selected regular branch is generally
+  complex at noninteger real heights because `λ^h` has `λ<0`. For example,
+  `F_0.5(0.5)≈0.6297862284+0.2178618631i`; forcing its imaginary part to zero
+  is incorrect. This specifies the chosen regular branch, not a
+  nonexistence theorem about every other possible real interpolation.
+* **`Im(b)<0`:** the dispatcher defines the reflected branch by
+  `F_b(h)=conj(F_conj(b)(conj(h)))`.
+* **Cut segment `0<b<e^{−e}`:** the intended experimental convention is
+  continuation from the upper half base-plane. Neither existence of every
+  required boundary limit nor a successful endpoint solve has been
+  established by this audit.
+* **Integer heights:** direct MPFR/MPC tower iteration, not exact symbolic
+  arithmetic in general. Exact representable cases such as `2^^3=16`
+  remain exact; exponent-range overflow/underflow is an error.
 
 ### 1.3 The base-plane geography: Shell–Thron
 
@@ -201,9 +209,9 @@ period-doubling point). The geography drives everything:
 | where `b` lives | dynamics at `L` | natural method |
 |---|---|---|
 | Shell–Thron interior (`\|λ\| < 1`) | attracting | Schröder linearization |
-| Shell–Thron boundary (`\|λ\| = 1`) | parabolic / neutral | hard: Écalle-type; here iε + Richardson |
+| Shell–Thron boundary (`\|λ\| = 1`) | root-of-unity or irrationally neutral | sectorial Fatou coordinates / small-divisor analysis; not generally implemented |
 | outside, real `b > η` | repelling, conjugate FP pair | Kouznetsov Cauchy integral |
-| outside, general complex `b` | repelling, `W₀`/`W₋₁` pair | Kouznetsov, bi-asymptotic variant |
+| outside, general complex `b` | repelling fixed points | experimental Kouznetsov pair selection; no global coverage guarantee |
 | real cut `0 < b < e^{−e}` | repelling with `λ < −1` | ε-continuation walker (this repo's construction) |
 
 ---
@@ -215,7 +223,7 @@ The project is plain Cargo, but `rug` compiles the GNU bignum stack
 
 ### 2.1 Prerequisites
 
-* **Rust** ≥ 1.70 (any recent stable): install via
+* **Rust** stable compatible with `Cargo.lock` (no tested minimum version is declared): install via
   [rustup.rs](https://rustup.rs) —
   `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 * **C toolchain + m4** (for the `gmp-mpfr-sys` build):
@@ -231,8 +239,8 @@ The project is plain Cargo, but `rug` compiles the GNU bignum stack
 $ git clone https://github.com/lukaszgryglicki/claude-tetration
 $ cd claude-tetration
 $ cargo build --release          # first build compiles GMP/MPFR/MPC: ~2-5 min
-$ ./target/release/tet 20 2 0 0.5 0
-1.4587818160364217112
+$ ./target/release/tet --quiet 50 2 0 3 0
+16
 0
 ```
 
@@ -240,7 +248,7 @@ Run the test suite (release mode strongly recommended — the numeric
 tests are heavy):
 
 ```console
-$ cargo test --release           # full suite; ~10-25 min depending on machine
+$ TET_MT=4 cargo test --release --all-targets -- --test-threads=1
 $ cargo test --release --lib     # just the fast unit tests
 ```
 
@@ -261,8 +269,8 @@ $ tet 20 2.718281828459045235 0 0.5 0    # e^^0.5 ≈ 1.6463542337...
 $ tet 20 1.4142135623730950488 0 0.5 0    # √2, inside Shell-Thron
 1.2436216276685218043
 $ tet 20 0 1 0.5 0      # base i
-1.1667009135704745687
-0.73456353698672133009
+1.1667009135704745693
+0.73456353698672132966
 ```
 
 ---
@@ -270,7 +278,7 @@ $ tet 20 0 1 0.5 0      # base i
 ## 3. Command-line usage
 
 ```
-tet <precision_digits> <base_re> <base_im> <height_re> <height_im>
+tet [--quiet|--silent|-q] <precision_digits> <base_re> <base_im> <height_re> <height_im>
 ```
 
 * `precision_digits` — requested decimal precision (positive integer).
@@ -282,19 +290,19 @@ tet <precision_digits> <base_re> <base_im> <height_re> <height_im>
 **Exit codes:** `0` success; `1` honest failure (diagnostic on stderr);
 `2` usage error.
 
-Diagnostics go to stderr and can be tuned with environment variables:
+Detailed algorithm and iteration diagnostics go to stderr **by default**.
+Quiet flags or a truthy `SILENT` suppress progress, never fatal errors.
 
 | variable | effect |
 |---|---|
-| `SILENT=1` | suppress all stderr diagnostics; stdout only |
-| `VERBOSE=1` | per-iteration trace (LM residuals, walker steps, grid setup) |
+| `SILENT=1` | suppress progress diagnostics; fatal errors remain on stderr |
 | `TET_KOUZ_ANDERSON=1` / `TET_KOUZ_PICARD=1` | force alternative Kouznetsov iterators (diagnostics) |
 | `TET_KOUZ_NO_EM=1`, `TET_KOUZ_EM_K=<n>` | Euler–Maclaurin correction A/B switches |
-| `TET_KOUZ_CUT_ANCHOR=<ε₀>`, `TET_KOUZ_CUT_RATIO=<r>` | cut-walker anchor height (default 2.0) and schedule ratio (default 0.72) |
-| `TET_KOUZ_CUT_CKPT=<file>` | cut-walker checkpoint/resume file: every accepted step is saved (atomic tmp+rename, full-precision decimal); on start, a matching checkpoint (same `b`, same digits) resumes the walk from its saved frontier instead of re-anchoring at `b + iε₀` |
+| `TET_KOUZ_CUT_ANCHOR=<ε₀>`, `TET_KOUZ_CUT_RATIO=<r>` | positive anchor (default 2), ratio strictly between 0 and 1 (default 0.72); oversized schedules are rejected |
+| `TET_KOUZ_CUT_CKPT=<file>` | atomic full-precision `TETCKPT2` checkpoints; exact base/precision/geometry matching is required. Corrupt, incompatible `TETCKPT1`, and I/O failures are errors, not silent cold starts |
 | `TET_KOUZ_UNWRAP_DEBUG=1` | branch-unwrap winding diagnostics |
-| `TET_KOUZ_RESID_DUMP=<file>` | dump residual profiles for offline analysis |
-| `TET_MT=<n>` | **opt-in multithreading.** Unset/`0` (default): fully serial, the original code paths, untouched. `1`: parallel across all logical cores. `n ≥ 2`: parallel with exactly `n` threads. Outputs are **bit-identical** to serial mode (see below). |
+| `TET_KOUZ_RESID_DUMP=<prefix>` | full-precision residual profiles under the supplied prefix; collisions and I/O failures are reported |
+| `TET_MT=<n>` | unset/empty/`0`: serial; `1`: available cores; `n ≥ 2`: exactly `n` threads. Invalid settings or an already-initialized conflicting Rayon pool are errors, including for library callers |
 
 **MT mode.** Big-number tetration is dominated by one hot loop: the FFT-based
 Newton–Krylov matvecs inside the Kouznetsov solver (measured ≈ 90 % of a
@@ -309,29 +317,22 @@ results are therefore bit-identical to the default, verified by A/B `diff` on
 Kouznetsov, Schröder and complex-base cases. Speedup is workload-dependent:
 grids of `n = 4096–32768` nodes at modest precision parallelize well; tiny
 grids and pure-Schröder evaluations gain little. Measured on a 16-core box
-(`tet 30 2 0 0.5 0`, a 30-digit Kouznetsov solve, machine under background
+(`tet 30 2 0 0.5 0`, a historical 30-digit Kouznetsov solve, machine under background
 load, values `diff`-identical): serial 732 s → `TET_MT=4` 362 s (2.0×) →
-`TET_MT=16` 167 s (**4.4×**). The iε-Richardson ladder
-(§ 6.4) additionally evaluates its rung solves concurrently even in default
-mode (that parallelism is across independent solves, which does not affect
-any individual solve's arithmetic).
+`TET_MT=16` 167 s (**4.4×**). These timings are not current performance
+guarantees. The retired Richardson ladder no longer launches parallel solves.
 
 Examples:
 
 ```console
-$ tet 20 3000 0 0.5 0                    # large real base
-7.6097169725553975773
-0
-
-$ tet 20 -2 0 0.5 0                      # negative real base — prints an
-0.048401404215115702870                  # honesty warning: ~8 certified
-0.31161889348200255046                   # digits for this hard base (§7)
+$ tet --quiet 10 -2 0 0.4 0.1           # explicit unsupported/residual error,
+                                       # nonzero exit, no numeric stdout
 
 $ SILENT=1 tet 20 1.4142135623730950488 0 0.5 0   # √2, quiet mode
 1.2436216276685218043
 0
 
-$ VERBOSE=1 tet 20 0.04 0 0.5 0          # cut-segment base: ε-walker, slow!
+$ tet 20 0.04 0 0.5 0                   # experimental cut walk; may take hours
 ```
 
 ---
@@ -351,6 +352,12 @@ fn main() -> Result<(), String> {
 }
 ```
 
+The string API, CLI and grid runner include supplied significant decimal
+digits when choosing working precision, without changing requested output
+digits. This prevents a near-one base, fractional height or huge odd integer
+from rounding into a different exact special case before dispatch. Redundant
+padding and exponent text do not inflate that significand count.
+
 Lower-level entry points (`dispatch::tetrate`, per-method `setup_*` /
 `eval_*` pairs that amortize per-base work across many heights) are
 public as well; see the module docs in `src/`.
@@ -359,106 +366,120 @@ public as well; see the module docs in `src/`.
 
 ## 5. Coverage map
 
-State of the (b, h) plane as implemented today, with certified
-accuracy at the standard 20-digit request:
+Selected coverage, not a partition into universally solved classes.
+Every row is subject to branch, domain, convergence and resource limits:
 
 | base class | heights | method | accuracy / status |
 |---|---|---|---|
 | `b = 0`, `b = 1` | integer / all | exact special case | exact |
-| any `b` | integer `h` | direct iteration | exact |
-| Shell–Thron interior (e.g. `√2`, `0.5`, `i`-ish interior) | all complex | Schröder | full requested digits |
-| real `b > η` (2, e, 10, 3000, 1e5, …) | all complex | Kouznetsov (Schwarz-symmetric) | full requested digits |
-| general complex outside ST (`−2`, `i`, `−0.8+0.4i`, …) | all complex | Kouznetsov (bi-asymptotic) or Schröder-at-repelling | full digits for most; hard fringe bases certify fewer digits and **say so** (e.g. `b=−2` currently certifies ~8 digits with an explicit warning); bases whose strip geometry admits no rectangle-Cauchy solution (e.g. `−0.8+0.4i`) **ERR honestly** — see § 5.3 |
-| `Im(b) < 0` | all complex | Schwarz reflection to `Im(b) > 0` | as the reflected class |
-| Shell–Thron **boundary band** (`0.95 ≤ \|λ\| ≤ 1.05`, e.g. `b = η`, `1.4448`) | all complex | continuation → iε Richardson R₄ | **≈ 15–17 digits** (documented ceiling; warns). Complex bases **deep** in the band (`\|λ\| ≳ 0.99`) may honestly ERR — see § 5.3 |
-| real cut segment `0 < b < e^{−e}` | all complex | ε-continuation walker | **research frontier in this repo** — construction complete, walks at record depth; see § 6.7 and `updates.md` |
-| `b = 0` non-integer `h`, negative integer heights `h ≤ −2` | — | honest ERR (mathematically singular) | n/a |
+| nondegenerate `b` | integers `h ≥ −1` within iteration/exponent limits | direct iteration | finite-precision arithmetic; exact special cases |
+| attracting regular cases (`√2`, `0.5`, `i`, `1.3+0.1i`, …) | tested complex heights | Schröder | independent 50/70-digit witnesses; not all-height coverage |
+| real `b > η` | heights within the reconstruction domain | Schwarz-symmetric Kouznetsov | base-2 half-height has an independent 50-digit cross-check |
+| general complex outside ST | case-dependent | experimental Kouznetsov / regular iteration | failures include `−2` and `−0.8+0.4i`; no class-wide accuracy certificate |
+| `Im(b) < 0` | reflected domain | Schwarz convention | same numerical limitations as the reflected case |
+| boundary band `0.95 ≤ \|λ\| ≤ 1.05` | case-dependent | regular iteration, continuation, direct Kouznetsov | b=1.5 has a converging direct route; near-parabolic examples refuse |
+| real cut segment `0 < b < e^{−e}` | case-dependent | regular branch where available; experimental ε-walker otherwise | no verified walker endpoint in this audit |
+| `b=0` outside nonnegative integer heights; nondegenerate `b` at integer `h≤−2` | — | error | base one retains its constant-function convention |
 
 ### 5.1 ✅ Verified
 
-Everything below is re-checked by the test battery and was re-verified
-against the current build; witness values are exact to the shown
-digits:
+Numerically cross-checked, **not interval-certified**:
 
-```
-tet 20 2     0 0.5 0  → 1.4587818160364217112
-tet 20 100000 0 0.5 0 → 12.387261344067895865
-tet 20 3000  0 0.5 0  → 7.6097169725553975773
-tet 20 0 1   0.5 0    → 1.1667009135704745687 + 0.73456353698672133009 i
-tet 20 1.4142135623730950488 0 0.5 0 → 1.2436216276685218043
-tet 20 2.718281828459045235 0 0.5 0  → 1.6463542337511945809
-tet 50 2 0 3 0 → 16 (exact)
-```
+* Six independent regular-iteration references at both 50 and 70 digits:
+  `b=1.2, h=0.4+0.2i`; and `h=0.5` for `b=0.5`, `1.3+0.1i`, high-precision
+  `√2`, `i`, and `0.99·exp(−e)+0.05i`. A separate 260-decimal-digit mpmath
+  forward-orbit/log-unwinding construction stabilized beyond 85 digits at
+  two orbit depths. The CLI components matched their requested rounding.
+  [`tests/phase10_honesty.rs`](tests/phase10_honesty.rs) preserves the
+  references at 1/10/50/70 digits and lower-half-plane checks at 50 digits.
+* For `b=2, h=0.5`, a 50-digit Kouznetsov output differs relatively by
+  `4.90e-51` from the independently constructed fatou.gp reference in
+  [gp-tetration's values.json](https://github.com/Lightrunnerwastaken/gp-tetration/blob/main/research/reference/values.json).
+  The older `1.4587818160364217112` anchor was inaccurate after about 16 digits.
+* Lambert branch identity/conditioning, FFT roundtrips and ST/MT bit identity,
+  residual decisions, checkpoints and numerical tolerances include
+  50/70/1000-digit checks. Primitive tests alone do not establish
+  1000-digit noninteger tetration coverage.
+* Exact base `-1` stays exactly `-1` at every supported positive integer
+  height. The 50/70/1000-digit regressions prevent repeated log/exp roundoff
+  from being amplified at this repelling fixed point.
+* Decimal inputs longer than the requested output precision retain their
+  exact domain/parity decisions, including 1000-digit requests. Regressions
+  cover the string API, actual CLI error/output shape, grid axes, exponent
+  notation and ST/MT identity.
 
-Covered classes: exact special cases; integer heights for any base;
-Shell–Thron interior (Schröder, full digits); real bases `b > η` from
-just past the boundary up to at least `10⁵` (Kouznetsov, full digits);
-`Im(b) < 0` by Schwarz reflection; complex heights across all of the
-above (spot-checked against mpmath and the FE post-check).
+Maintainer-local audit evidence (full logs, independent reference generator
+and snapshots) is retained in `~/tetration-audit-2026-10-04-artifacts/`, including
+`oct-independent-regular.jsonl`, `oct-final-base2-50-check.json` and
+`oct-input-rounding-before.log`/`oct-input-rounding-after.log`. These local files
+are not committed gallery data; the portable reference fixtures are in the tests.
+`oct-input-cli-grid.json` records the actual input-domain/ST-MT checks, and
+`oct-post-input-references.json` rechecks independent 50/70-digit rounding
+after the input-aware precision repair.
+The detailed audit and deferred implementation sequence are in
+`~/tetration-audit-2026-10-04-1.md`; committed-source reproduction evidence
+includes `oct-committed-b146.log` and `oct-committed-source.tar`.
 
 ### 5.2 ⏳ Pending / in progress
 
-* **Cut segment `0 < b < e^{−e}` at exactly `Im b = 0`** — the
-  ε-walker (§ 6.7) is actively descending; four successive walls have
-  been diagnosed and fixed this campaign (record frontier `ε ≈ 0.068`
-  at `b = 0.06`, from `ε ≈ 0.92` at the start; the newest defense —
-  reactive node-tier escalation on near-miss solves — is live in the
-  current walk). The `ε = 0` endpoint is not yet certified. Live
-  status: [`updates.md`](updates.md),
-  [`FAILURE_CASES.md`](FAILURE_CASES.md) § J. Note complex bases
-  arbitrarily close to the cut (`b + iε`, any fixed `ε > 0`) already
-  work as ordinary complex bases.
-* **Hard fringe complex bases** (e.g. `b = −2`, some bases with
-  awkward fixed-point geometry): currently certify fewer digits than
-  requested and print an explicit accuracy warning; improving their
-  conditioning is ongoing.
+The cut-walker endpoint, robust near-parabolic constructions, difficult
+complex-base contours and validated forward-error bounds remain research work.
+No old walk was restarted for the October audit. A small positive imaginary
+part does not guarantee a solvable or accurate near-cut case.
 
 ### 5.3 ❌ Known-bad / missing (by design or documented ceiling)
 
-* **Shell–Thron boundary band** (`0.95 ≤ |λ| ≤ 1.05`): hard ceiling of
-  **≈ 15–17 digits** via iε-Richardson regardless of requested
-  precision; full precision would require Abel/Écalle parabolic
-  iteration (not implemented). The program warns rather than
-  overclaims.
-* **Complex bases deep in the parabolic band** (`|λ| ≳ 0.99`, e.g.
+* **Near-parabolic cases**, including `b=1.4448`: the former fixed-ladder
+  Richardson result had no requested-accuracy contract and is now an error
+  when existing convergent methods fail. The whole routing band is not
+  mathematically parabolic, nor uniformly unsupported.
+  Rebuilding committed revision `26aec7f` also disproved the old `b=1.46`
+  full-precision continuation claim: its first warm step stalls, then the
+  old code returns unchecked extrapolation. t880 now requires honest refusal
+  from both failed solver paths; see [the failure atlas](FAILURE_CASES.md).
+* **Complex bases close to |λ|=1** (`|λ| ≳ 0.99`, e.g.
   `b = 0.0653 + 0.025i` with `|λ| = 0.995`): Schröder correctly
-  refuses (parabolic), the Kouznetsov LM iteration stalls at an O(1)
-  residual, and the iε-Richardson probes land back inside the band.
+  refuses its convergence checks, the Kouznetsov LM iteration stalls at an O(1)
+  residual.
   Since the honesty gate (§ 7) rejects stalled solves, these bases
   **ERR cleanly** instead of returning plausible-looking garbage.
   (Before the gate, one such stalled solve produced values that
   diverged to `∞` under upward iteration while the true orbit is
   bounded — caught during the § 5.4 chart campaign and now a
   regression case.)
-* **Outside-ST bases whose sampling strip contains a zero of `F`**
+* **Outside-ST bases with unresolved contour/branch obstructions**
   (discovered on `b = −0.8 + 0.4i`, `|λ| ≈ 1.15`): the LM solve stalls
   at an O(1) residual that is partly a *phantom* (principal-log
   branch break on the left edge — the two-sided unwrap drops it
   1.577 → 9.5e-4) and partly *genuine* (the remaining 9.5e-4 floor is
-  node-count-invariant and spatially broad: the rectangle Cauchy
-  equation has no solution on this strip, likely because `|F|` dips
-  to ≈ 0.44 near the sample line and `log_b F` crosses a branch cut).
+  node-count-invariant and spatially broad. A zero or branch obstruction
+  in the strip is a diagnosis to investigate, not a nonexistence proof
+  from a finite residual or a sampled minimum of `|F|`).
   **There is no independently verified tetration value at such bases
   yet**: an earlier test-blessed 20-digit value turned out to be a
   discretization artifact — 20/22/25-digit runs each give a
   *completely different* `F(0.5)` while all passing the (recurrence-
   enforced, hence tautological) FE post-check. The honesty gate now
   rejects all of them and the CLI ERRs cleanly; the regression tests
-  assert the refusal. (The refusal is *expensive* — principal solve +
-  two-sided retry + the full iε-Richardson ladder, each probe itself
-  retried — tens of minutes at 20+ digits; honesty over speed.)
+  assert the refusal. Principal and two-sided retries may still be expensive;
+  no unchecked extrapolation follows them.
   Full anatomy: `FAILURE_CASES.md` § A.2.
   Closing this class needs a non-rectangular (Paulsen-style) contour
   that avoids the in-strip zero of `F` — a research item (§ 8.1).
 * **`b = 0` at non-integer heights** — no principal-branch value
   exists: honest ERR.
-* **Negative integer heights `h ≤ −2`** — genuine singularities
-  (`F(−2) = log_b 0 = −∞`): honest ERR.
+* **Negative integer heights `h ≤ −2`** for nondegenerate bases: no finite
+  value consistent with the recurrence through `F(−1)=0`; honest error.
 * **Paulsen–Cowgill conformal-map machinery** — not implemented;
   pathological bases that would need it error out cleanly instead of
   guessing.
 
 ### 5.4 Gallery: `f(x) = b^^x` near the cut, in 3D
+
+**Historical August illustrations, not accuracy certificates.** The existing
+CSVs/SVGs/JPGs were not regenerated in the October audit. They sample finite
+`Im(b)=0.05`, not the real cut or a proven `ε→0` limit. Interpolated line
+segments, apparent circles and error-free sweeps do not prove the mathematics.
 
 What does tetration *look like* for a base just below `e^{−e}`? Since
 `f(x)` is complex even for real `x` there, the natural picture is a
@@ -466,9 +487,7 @@ What does tetration *look like* for a base just below `e^{−e}`? Since
 heights `x ∈ [−30, 120]` (~1000 adaptive points per base, denser in
 the interesting bands) for `b` at 99%, 100% and 101% of `e^{−e}`,
 each evaluated at `b + 0.05i` — the uniform-`iε` preview of the cut
-limit (the exact `Im b = 0` value is what the § 6.7 walker computes;
-at `ε = 0.05` all three bases are ordinary, fully-verified complex
-bases solved by Schröder).
+limit (the § 6.7 walker attempts the endpoint; it has not verified it).
 
 | chart | file |
 |---|---|
@@ -484,13 +503,14 @@ bases solved by Schröder).
 
 The five charts above were first drafts at ~1000 points: enough to
 find the phenomena, far too coarse to *see* them — the period-2 weave
-winds once per `Δx = 2`, so a `0.25` step draws 8-segment polygons
-where the mathematics makes circles. The gallery below re-sweeps all
+winds approximately once per `Δx = 2`, so a `0.25` step leaves conspicuous
+polygonal segments. The gallery below used denser sweeps of all
 three bases at **5× density (~5070 points per base)** and renders
 them with a real turntable camera ([`scripts/plot3d.py`](scripts/plot3d.py)
 v2: orthographic 3D rotation, painter-sorted depth shading, and an
 **isotropic complex plane** — `Re F` and `Im F` share one scale, so
-the spirals project as true circles, not ellipses).
+the picture does not introduce unequal Re/Im scaling; it does not establish
+that the underlying curves are circles).
 
 ![hero: the swirl](docs/charts/tet3d_hero.jpg)
 
@@ -503,7 +523,7 @@ the spirals project as true circles, not ellipses).
 | oblique overlay, all three | [`docs/charts/tet3d_triptych_dense.svg`](docs/charts/tet3d_triptych_dense.svg) |
 | turntable `az = 12°/55°/75°/90°` | [`…az12`](docs/charts/tet3d_b099eme_az12.svg) · [`…az55`](docs/charts/tet3d_b099eme_az55.svg) · [`…az75`](docs/charts/tet3d_b099eme_az75.svg) · [`…az90`](docs/charts/tet3d_b099eme_az90.svg) |
 | high camera (`el = 62°`) | [`docs/charts/tet3d_b099eme_top.svg`](docs/charts/tet3d_b099eme_top.svg) |
-| **the weave end-on** (down the `x` axis: the swirl as true circles) | [`docs/charts/tet3d_b099eme_endon_weave.svg`](docs/charts/tet3d_b099eme_endon_weave.svg) |
+| **the weave end-on** (down the `x` axis) | [`docs/charts/tet3d_b099eme_endon_weave.svg`](docs/charts/tet3d_b099eme_endon_weave.svg) |
 | the weave end-on, three bases overlaid | [`docs/charts/tet3d_triptych_endon_weave.svg`](docs/charts/tet3d_triptych_endon_weave.svg) |
 | the pole forest end-on (nested loop rosette) | [`docs/charts/tet3d_b099eme_endon_forest.svg`](docs/charts/tet3d_b099eme_endon_forest.svg) |
 | weave close-up `x ∈ [2, 40]` | [`docs/charts/tet3d_b099eme_weave_closeup.svg`](docs/charts/tet3d_b099eme_weave_closeup.svg) |
@@ -514,18 +534,18 @@ The end-on views (`az = 0`) look straight down the height axis, so
 the curve collapses onto the complex plane and you see exactly what
 the orbit does there: the **weave is a logarithmic-style spiral**
 hugging the period-2 alternation as it drains into the fixed point,
-and the **pole forest is a nest of widening loops**, one per pole.
+and the **"pole forest" is a nest of widening loops** around singular-height
+breaks. This historical nickname does not classify every singularity as a pole.
 These are the "swirling circles" hiding inside the oblique views.
 
-Findings, all reproducible from the CSVs in
+Historical numerical observations from the CSVs in
 [`docs/charts/data/`](docs/charts/data/) (3 × 1015 + 256 points,
 **zero solver errors**):
 
-* **Pole forest** (`x ≲ −2`): every integer `x ≤ −2` is a genuine
-  pole (the recurrence hits `log_b 0`), and the CLI honestly ERRs
-  exactly there; the sweep dodges integers by `+0.013` and the curve
-  executes a widening loop around each pole (red markers in the
-  charts). Largest excursion `|f| ≈ 1.80` at `x ≈ −1.99`.
+* **Singular-height region** (`x ≲ −2`): integer heights `≤−2` are
+  excluded by the finite-value recurrence contract for these bases.
+  The old sweep displaced samples by `+0.013`; it did not verify the
+  singular points themselves or establish that they were all poles.
 * **2-cycle weave** (`x ≳ 2`): the fixed-point multiplier is
   `λ ≈ −0.98` (nearly parabolic, *negative*), so the orbit converges
   by slowly-damped **period-2 alternation** — a helix that tightens
@@ -546,14 +566,17 @@ Findings, all reproducible from the CSVs in
   the first attempt at that sweep is what exposed the acceptance-gate
   bug described there.
 
-Reproduce with [`scripts/chartgen.sh`](scripts/chartgen.sh) (sweep →
-CSV, 14-way parallel; 4th arg = step multiplier, `0.2` for the dense
-gallery sweeps), [`scripts/plot3d.py`](scripts/plot3d.py) (CSV → SVG;
-stdlib-only orthographic turntable renderer — `--az/--el/--xrange/
---size`; non-finite or `|f| > 50` points break the curve rather than
-skew the scale) and [`scripts/chartgallery.sh`](scripts/chartgallery.sh)
-(renders every view above plus the raster hero JPG via
-`rsvg-convert` + ImageMagick).
+The corrected [`scripts/chartgen.sh`](scripts/chartgen.sh) uses exact
+decimal-derived rational heights, including negative integers, with at most
+four outer workers (one when inner MT is enabled). Its fourth argument is a
+positive step multiplier (`0.2` gives denser sampling). Failed samples remain
+as `ERR` rows with reasons in `<output>.errors.log`; **any failed sample makes
+the command exit nonzero**, including expected singularities.
+[`scripts/plot3d.py`](scripts/plot3d.py) renders CSV to SVG; use
+`--xrange=-30:-3` for negative ranges and `--break-negative-integers` for
+known nondegenerate tetration curves. Gaps are never joined across those
+singular heights. [`scripts/chartgallery.sh`](scripts/chartgallery.sh) enables
+these breaks and uses `rsvg-convert` plus ImageMagick for JPG output.
 
 ---
 
@@ -565,8 +588,8 @@ or port the ideas. Each subsection names the implementing module.
 ### 6.1 Classification: fixed points and λ (`src/regions.rs`, `src/lambertw.rs`)
 
 For `b ∉ {0, 1}` compute `L = −W₀(−ln b)/ln b` and `λ = L·ln b` in
-full working precision (Lambert W by Halley iteration with a
-branch-aware seed, `src/lambertw.rs`). Classify by `|λ|` with a guard
+full working precision (Lambert W by Halley iteration with branch checks and
+extra internal precision near `−1/e`, `src/lambertw.rs`). Classify by `|λ|` with a guard
 band: interior `< 0.95`, boundary band `0.95…1.05`, outside `> 1.05`
 (split into real-positive and general-complex arms). The band exists
 because Schröder's geometric convergence rate is `|λ|` — uselessly slow
@@ -577,8 +600,9 @@ near 1 — and the Kouznetsov contour height blows up like
 
 `b = 1 → 1`; `b = 0` alternates `1, 0, 1, …` on non-negative integers;
 integer heights iterate `b^·` (or `log_b` for negative heights down to
-`h = −1`) in exact big-float arithmetic. These paths bypass all
-analytic machinery, so they are also used as ground truth in tests.
+`h = −1`) in rounded big-float arithmetic. Range failures are errors.
+These paths bypass analytic continuation; independent algebraic identities
+provide stronger tests than comparing two copies of the same tower loop.
 
 ### 6.3 Schröder regular tetration (Shell–Thron interior) (`src/schroder.rs`)
 
@@ -604,22 +628,23 @@ a **σ̃-shift** (iterate the dynamics toward `L` until inside the disk,
 compensating by powers of λ) and an **h-shift** (evaluate at `z + k`,
 then apply `b^·` or `log_b` exactly `k` times). The same machinery,
 run at a **repelling** fixed point with backwards iteration, handles a
-fringe of bases just outside the boundary — with a canonicality guard
-(§ 7) because the repelling-branch solution need not be the canonical
-one.
+fringe of bases just outside the boundary. A real-base branch guard (§ 7)
+rejects the known mismatch between repelling regular iteration and real-base
+Kneser tetration; it is not a general canonicality proof.
 
 ### 6.4 Kouznetsov Cauchy-integral method (outside Shell–Thron) (`src/kouznetsov.rs`)
 
-The workhorse for `|λ| > 1.05`. The canonical `F` is pinned by its
-behaviour on a vertical line: sample `F` at `N` uniform nodes on
+The main alternative outside the regular-iteration region. The intended
+branch is sought through a vertical-line boundary problem: sample `F` at `N` uniform nodes on
 `Re z = 1/2`, `t ∈ [−T, T]`, and refine by Cauchy's integral over the
 rectangle `Re ∈ [−1/2, 3/2]`, `Im ∈ [−T, T]` whose four edges are
 known in terms of the samples themselves:
 
 * right edge: `F(3/2 + it) = b^{F(1/2+it)}` (the FE forward),
 * left edge: `F(−1/2 + it) = log_b F(1/2+it)` (the FE backward, with a
-  **continuously unwrapped** log branch along the curve),
-* top/bottom edges: `F ≡ L_upper` / `L_lower` (the asymptotics).
+  pointwise principal log or an explicitly selected two-sided unwrap),
+* top/bottom edges: limiting fixed points `L_upper` / `L_lower` used as
+  finite-contour boundary approximations, not exact finite-height values.
 
 For real `b > η` the pair is `(L, L̄)` (Schwarz-symmetric, each iterate
 re-symmetrized); for complex bases the pair comes from the `W₀` and
@@ -630,46 +655,48 @@ scaled to keep the analyticity-strip resolution, plus an
 **Euler–Maclaurin boundary correction** for the O(h²) edge error. The
 integral-equation Jacobian is applied via **FFT cross-correlation**
 (`src/fft.rs`, O(N log N) matvecs), and the nonlinear system is solved
-by **Levenberg–Marquardt Newton–Kantorovich** with multi-start
+by **diagonally regularized Newton–Krylov** with multi-start
 retries (Anderson-accelerated Picard available as a diagnostic
-fallback). Converged samples are then normalized: a Newton search
+fallback). It solves `(J+μI)δ=r`, not least-squares Levenberg–Marquardt;
+the historical “LM” log label is retained. Increasing μ is not guaranteed
+gradient descent, and a stall does not establish a discretization error.
+Converged samples are then normalized: a Newton search
 finds the shift δ with `F(δ) = 1`, and heights are evaluated by one
-final Cauchy application plus exact integer FE steps.
+final Cauchy application plus rounded integer FE steps.
 
-Accuracy is certified two ways: the solver's boundary residual (an
-a-posteriori bound on how well the sampled `F` satisfies the FE on the
-contour) and an independent functional-equation spot check at the
-requested height (§ 7).
+The boundary residual and FE check are consistency gates, **not certified
+forward-error bounds**. Error certification would additionally require
+conditioning, discretization/tail, roundoff and branch/uniqueness control.
+The existing Euler–Maclaurin coefficient table has 20 terms; arbitrary
+working precision does not remove this or the contour/node limits.
 
 ### 6.5 Continuation solver
 
-Near-parabolic bases sit outside every cold-start Newton basin. The
-continuation solver walks from a comfortably-solvable base toward the
+Some near-parabolic bases defeat cold starts. The continuation solver
+walks from a comfortably-solvable base toward the
 target along a path in the base plane, warm-starting each Kouznetsov
 solve by Cauchy-resampling the previous solution onto the new grid.
-This is both a rescue for the `|λ| ≈ 1.05…1.10` fringe and the
-skeleton of the cut-base walker below.
+It is intended to help the `|λ| ≈ 1.05…1.10` fringe and underlies the
+cut-base walker below, but does not guarantee convergence.
 
-### 6.6 iε-perturbation Richardson fallback (parabolic band)
+### 6.6 Retired polynomial fallback
 
-Exactly **on** the boundary band for real bases, direct machinery is
-hopeless (`|arg λ| → 0` forces unbounded grids). The dispatcher
-computes `F(b + iε_k, h)` for `ε_k = 0.1 × 2^{−k}`, `k = 0…4` — those
-bases are comfortably outside the parabolic trap — and Richardson-
-extrapolates `ε → 0` through an R₄ table (error orders ε² → ε¹⁰).
-For real heights, Schwarz parity (`Re F` even, `Im F` odd in ε) makes
-the table exact on the real part; for complex heights the parity is
-restored manually via `G(ε) = (F(b+iε, h) + conj(F(b+iε, h̄)))/2`.
-Empirical ceiling: **15–17 digits** near adversarial bases (the
-parabolic Taylor coefficients `a₈, a₁₀…` grow too fast) — documented,
-warned about at runtime, and accepted as the honest state of the art
-short of implementing Écalle/Abel parabolic iteration theory.
+The former five-level iε Richardson table returned answers even when its
+levels disagreed and no requested-accuracy bound existed. It is removed.
+`linear_approx::tetrate_linear` is a deprecated error-only compatibility
+entry point. Numerical seeds, convergent series and quadrature remain part
+of the analytical solvers; a seed or a fixed polynomial substitute is not
+returned as tetration merely because it looks plausible.
+
+At the real routing boundary, continuation is tried before the existing
+direct Kouznetsov method. A failed continuation must not suppress a converging
+direct solve (regression: `b=1.5`). If both fail, their causes are reported.
 
 ### 6.7 The cut-base ε-walker (`0 < b < e^{−e}`)
 
 The most delicate regime, and this repository's original
-contribution. On the cut segment the canonical value is the boundary
-limit from `Im b > 0` (§ 1.2). The germ of the relevant fixed-point
+contribution. On the cut segment the intended branch is a boundary
+limit from `Im b > 0` (§ 1.2), where that limit exists. The germ of the chosen fixed-point
 pair, continued from the anchor `b + 2i` down to the real axis, is
 `(W₀, W₊₁)` — **both in the closed upper half-plane** (the generic
 opposite-half-plane search rightly rejects such a pair, so the walker
@@ -684,9 +711,8 @@ injects it directly). The construction:
    `log_b F` needs a branch that is continuous along the sample curve
    even when it crosses `(−∞, 0]` — which it always does near the cut
    since `Re L_lower < 0`. The unwrap is anchored at both asymptotic
-   ends (this `two_sided` mode is used **only** here; every other base
-   class uses the pointwise principal log, which is the historically
-   correct operator for them).
+   ends. This mode is also available as a retry for ordinary complex-base
+   solves; passing either residual gate does not prove branch uniqueness.
 4. **Homotopy walls and winding jumps.** Between the two Shell–Thron
    crossings of the path (`ε ≈ 1.55 → 0.08` at `b = 0.04`), a **zero
    of F drifts along the sample line**, so the discrete curve
@@ -715,290 +741,141 @@ injects it directly). The construction:
    1-periodic-dressed near-solutions ("ghosts"). Defenses, all
    load-bearing and all documented from walk evidence: winding jumps
    are only allowed on **tight steps** (< 2% of ε); every accepted
-   solve must be **cleanly converged** (uniform residual gate
-   `≤ 10^{−0.4·digits}`, i.e. 1e-8 at 20 digits — decades above
+   candidate must pass an internal residual gate
+   `≤ 10^{−0.4·digits}` (1e-8 at 20 digits — decades above
    observed true-continuation conditioning floors, 18× below the
-   nearest observed wrong-family stall); anything accepted above
-   `10^{−(digits+1)}` prints an honesty warning; a failed step
+   nearest observed wrong-family stall). These are heuristic warm-state
+   filters, not a proof against wrong branches. Internal candidates above
+   `10^{−(digits+1)}` are diagnosed; a failed step
    bisects, and a walk that cannot proceed **fails honestly** rather
    than continuing on a suspect state.
-7. At `ε = 0` the state is normalized and evaluated like any other
-   Kouznetsov state, and the usual FE post-check applies.
+7. The `ε=0` endpoint must meet the full `10^{−(digits+3)}` boundary
+   target, normalize the actual returned reconstruction, and pass the
+   finite/domain/FE checks. Relaxed internal candidates are not answers.
 8. **Checkpoint/resume** (`TET_KOUZ_CUT_CKPT=<file>`). Deep walks are
    multi-hour; a crash or timeout used to lose everything (one 7-hour
    walk died mid-solve at `ε ≈ 1.006`). With a checkpoint file set,
    every accepted step serializes the full continuation state (base,
    digits, ε, both branch args, `t_max`, fixed-point pair, all nodes/
    weights/samples at full precision) atomically; a restart with the
-   same `b` and digits resumes from the saved frontier — the anchor
-   and every wall already crossed are never re-paid. Mismatched or
-   corrupt checkpoints are ignored (cold start), and checkpoint I/O
-   errors never kill a walk.
+   same `b`, digits and working precision resumes from the saved frontier — the anchor
+   and already saved steps are reused. `TETCKPT2` preserves every scalar
+   at full precision. Mismatched/corrupt/old-format checkpoints and I/O
+   failures are explicit errors; only a missing file permits a cold start.
 
-Status: the machinery above carries walks monotonically deeper with
-each fix (record frontier `ε ≈ 0.068` at `b = 0.06`, from `0.92` at
-the start of this campaign; walls diagnosed and fixed so far: winding
+Historical status: August walks reached a recorded frontier
+`ε ≈ 0.068` at `b = 0.06`, from `0.92` at
+the start of that campaign (reported fixes included winding
 jumps at `ε ≈ 0.196`, static deep-pinch boost at `ε ≈ 0.102`,
-reactive near-miss escalation at `ε ≈ 0.068`); live progress, walk
-logs, and the full failure-mode history are in
+reactive near-miss escalation at `ε ≈ 0.068`). Walk
+logs and the failure-mode history are in
 [`updates.md`](updates.md) and
-[`FAILURE_CASES.md`](FAILURE_CASES.md) § J. Values on the cut for
-`Im b = ε` down to the current frontier are computed cleanly today
-(they are ordinary complex bases); the remaining work is the last
-stretch of the `ε → 0` limit itself.
+[`FAILURE_CASES.md`](FAILURE_CASES.md) § J. The October audit did not
+rerun these walks or verify their historical intermediate values or endpoint.
 
 ---
 
 ## 7. Numerical honesty
 
-Design rules enforced throughout — these are what make the outputs
-quotable in a research context:
-
-* **No silent fallbacks.** The linear-`C⁰` approximation is never
-  substituted for a failed analytic method. A method that cannot
-  certify its result returns `Err`; the CLI exits non-zero with the
-  full failure chain on stderr.
-* **Functional-equation post-check.** Returned values are spot-checked
-  against `F(h+1) = b^{F(h)}` (relative tolerance scaled to the
-  requested precision); historic silent-corruption classes (magnitude
-  ~1e+3000 garbage from wrong-branch logs) are structurally caught.
-* **Canonicality guard.** For real base + real height, a non-real
-  Schröder result (legitimate FE solution on a non-canonical repelling
-  branch) is detected by its imaginary part and rejected in favour of
-  the canonical Kouznetsov path — killing a whole class of
-  wrong-but-plausible answers.
-* **Residual gates + honesty warnings.** Iterative solvers report
-  their achieved boundary residual; acceptance thresholds are uniform
-  and documented in-source with the empirical evidence behind each
-  constant; any accepted result short of the full target prints a
-  warning quantifying the certified digits.
-* **Stalled-solve rejection (complex bases).** A final answer is
-  never built from a Kouznetsov LM solve that stalled: the complex
-  -base direct path re-gates the achieved residual at
-  `10^{−digits/3}` (clamped to `[10⁻⁶, 10⁻²]`) *after* the internal
-  relaxed acceptance that walker/continuation internals need for
-  near-miss inspection. A gate-rejected solve is retried once with
-  the anchored two-sided left-edge unwrap (kills *phantom* stalls
-  caused by principal-log branch breaks — observed 1.577 → 9.5e-4 on
-  the same samples); only if both discretizations stall does the path
-  refuse. Found the hard way, twice: a `|λ| = 0.995` base accepted at
-  residual 1.5 produced values that looked plausible for 40 heights
-  and then blew up to `10^{6913}` under upward iteration (§ 5.3); and
-  a test-blessed 20-digit witness value at `b = −0.8+0.4i` turned out
-  to be a discretization artifact — cross-discretization probes each
-  give a different value (`FAILURE_CASES.md` § A.2).
-* **Cross-discretization verification.** Agreement of two runs of the
-  *same* discretization at the same node count is **not**
-  verification (pseudo-verification by shared ancestry); witness
-  values are only trusted when independent probes (different digits →
-  different node counts, or different left-edge unwrap) agree. The FE
-  post-check alone is *tautological* for Cauchy-reconstructed values
-  (the evaluation recurrence enforces it), so it can never bless a
-  value by itself.
-* **Precision above machine, no gratuitous towers.** Everything runs
-  in MPFR/MPC big floats sized from the request (with guard bits), so
-  results are provably beyond f64 — the standard validation level in
-  this repo is ~20 digits (~4× f64's 53 bits), deliberately avoiding
-  100+-digit runs that add hours without adding evidence.
-* **Failure documentation as a first-class artifact.**
-  [`FAILURE_CASES.md`](FAILURE_CASES.md) tracks every known failing
-  4-tuple class, its mathematical diagnosis, and its status
-  (RESOLVED / PARTIAL / open), and doubles as the regression list.
+* **No surrogate answers:** no fixed-ladder Richardson, linear substitute,
+  or limiting fixed point returned for an unchecked finite height.
+* **Finite/domain checks:** NaN/infinity, numerical overflow/underflow and
+  known singular integer heights are errors, including in cached evaluators.
+  Input parsing and direct API precision contracts are checked.
+* **Actual normalization:** the same integer-extended reconstruction used for
+  returned values must satisfy `F(0)=1`; a root of an unrelated raw
+  extrapolant is insufficient. Cached Kouznetsov evaluation checks the base.
+* **Residual contract:** a final Kouznetsov state must meet
+  `10^{−(digits+3)}`. Relaxed walker candidates cannot become successful final
+  answers just by printing an accuracy warning. GMRES checks the actual
+  linear residual, not only its Arnoldi estimate.
+* **FE consistency, not proof:** the evaluator checks a precision-scaled
+  recurrence residual. Kouznetsov normally checks the predecessor so a
+  finite requested value is not rejected merely because its successor
+  overflows. A passed recurrence does not establish accuracy or uniqueness.
+* **Branch guard:** real-base Kneser requests above `e^{1/e}` must not return
+  a repelling regular-iteration branch, even at complex heights. This
+  targeted guard does not certify arbitrary complex-base branch choices.
+* **Arbitrary-precision decisions:** tolerances, magnitudes, comparisons,
+  continuation coordinates and checkpoints use MPFR/MPC precision rather
+  than f64 floors. Counts, indices and wall-clock statistics remain native.
+  Lambert iteration separately accounts for branch-point conditioning.
+* **Independent evidence:** regular-reference checks at 50/70 digits exceed
+  native 128-bit precision; targeted primitive checks reach 1000 digits.
+  Same-family agreement and printed digit count alone are not certification.
+  [`FAILURE_CASES.md`](FAILURE_CASES.md) records the earlier correlated-error
+  failure and the remaining limits.
 
 ## 8. Known limitations
 
-* **Parabolic boundary band** (`0.95 ≤ |λ| ≤ 1.05`): ≈ 15–17 digits
-  via iε-Richardson, independent of requested precision. Full
-  precision there needs Abel/Écalle parabolic-iteration theory
-  (Kouznetsov 2009 § 6) — not implemented. Complex bases *deep* in
-  the band (`|λ| ≳ 0.99`) can defeat the Richardson fallback too and
-  then ERR cleanly (§ 5.3).
-* **Cut segment** `0 < b < e^{−e}`: ε-walker research frontier as
-  described in § 6.7; the `ε = 0` endpoint is not yet certified at
-  production precision. Complex bases arbitrarily near the cut work.
-* **Truly pathological complex bases** whose fixed-point pairs fall in
-  the same half-plane *and* defeat the germ-tracked injection would
-  need Paulsen–Cowgill conformal-map machinery (not implemented);
-  such bases error out cleanly. Related: outside-ST bases whose
-  sampling strip contains a zero of `F` (e.g. `b = −0.8+0.4i`) have
-  **no verified value at all yet** — every discretization stalls or
-  disagrees, and the program refuses rather than guess (§ 5.3,
-  `FAILURE_CASES.md` § A.2).
-* **Negative integer heights `h ≤ −2`** are genuine singularities
-  (`F(−2) = log_b 0`); **`b = 0` at non-integer heights** has no
-  principal-branch value. Both are honest errors by design.
-* The cut-base walker is **slow** (hours: hundreds of warm
-  arbitrary-precision PDE-sized solves), inherently sequential, and
-  currently research-grade rather than production-grade.
+* **Coverage:** some near-parabolic, negative-real, general-complex and
+  cut-base cases still fail. A failed rectangle or seed search is not proof
+  that no alternative mathematical construction exists.
+* **Numerical budgets:** finite iteration, contour, node and coefficient
+  limits remain. For example, direct base-2 setup at 70 digits requests
+  65536 nodes but the direct budget is 32768. Its 1800-second CLI probe
+  stopped during continuation from the `b=2.35` anchor; no 70-digit base-2
+  value was obtained. This is a resource/method limitation, not a theorem
+  requiring parabolic machinery. The 50-digit independent comparison passed.
+* **Height domain:** off-contour values and excessive shifts are refused.
+  There is no finite value at `h=−2` consistent with the nondegenerate
+  recurrence through `F(−1)=0`. Base zero has only its integer convention;
+  base one is the constant-function exception.
+* **Certification:** no interval/ball-arithmetic forward-error enclosure or
+  global uniqueness certificate is produced. High working precision and
+  residual gates are necessary safeguards, not substitutes for those proofs.
+* **Runtime:** continuation and cut walks can take hours; no completion-time
+  guarantee follows from the existence of an algorithmic path.
 
 ### 8.1 How hard would closing each gap be? (feasibility verdicts)
 
-An honest engineering assessment of the three open items above — what
-is achievable with effort, what is blocked, and what is mathematically
-impossible as stated.
+**Further progress is possible; universal finite values are not.** The October
+task assesses these directions without implementing new tetration constructions:
 
-**(a) *"Parabolic boundary band (0.95 ≤ |λ| ≤ 1.05): ≈ 15–17 digits via
-iε-Richardson, independent of requested precision. Full precision there
-needs Abel/Écalle parabolic-iteration theory (Kouznetsov 2009 § 6) —
-not implemented."***
+| Direction | Why it is worth investigating | What must be established |
+|---|---|---|
+| Validated numerics | Residuals and same-family agreement do not bound output error | Outward-rounded enclosures for roots, series/tails, quadrature, normalization and inverse operators; explicit domain/branch conditions |
+| Real-base high-precision methods | The existing 32K direct-node cap already blocks base 2 at 70 digits | Resolution/conditioning estimates and independently checked references, not simply larger caps or looser gates |
+| Parabolic/root-of-unity cases | Sectorial Fatou coordinates exist in classical local theory; at λ=−1 use the second iterate | Truncation bounds, sector matching, inversion and the intended global normalization |
+| Near-parabolic continuation | Existing methods work on some points but become costly or stall | Stable parameter continuation and error control across changing contours |
+| Difficult complex bases | `−0.8+0.4i` and deep-band examples are concrete unresolved witnesses | Contours or merged-fixed-point constructions with controlled zeros, logarithmic branches and uniqueness hypotheses |
+| Cut-base limits | Upper-half-plane continuation supplies an intended branch convention | Stable convergence to the actual ε=0 endpoint, rather than quoting a small nonzero-ε value or a polynomial guess |
 
-Verdict: **implementable in part; mathematically obstructed in part.
-Not implemented at the moment (large, delicate project); the 15–17
-digit fallback is the honest state.** The band decomposes into three
-genuinely different sub-problems:
+Do not conflate all `|λ|≈1` cases. A routing band is not the neutral boundary;
+root-of-unity multipliers and irrationally neutral multipliers pose different
+problems. Small divisors can defeat Schröder linearization. Brjuno-type results
+have hypotheses on the multiplier and germ; the blanket claim that every
+non-Brjuno germ is non-linearizable, or that every tetration construction is
+therefore impossible, is unjustified.
 
-1. *Exactly parabolic real points* — `b = e^{1/e}` (λ = 1) and
-   `b = e^{−e}` (λ = −1). Here the theory is complete (Écalle/Fatou
-   coordinates; Kouznetsov 2009 § 6; the Kouznetsov–Trappmann base-η
-   "exotic" construction): the Abel function has a known asymptotic
-   expansion `α(z) ∼ c/(z−L) + ρ·ln(z−L) + Σ…` and full precision is
-   reachable. This is the *feasible* part: an estimated few weeks of
-   focused work (new asymptotic-series module, sector matching,
-   validated against the published base-η values). Highest-value
-   future work.
-2. *Near-parabolic bases* (`|λ| ≠ 1` but within the band). Not a
-   theory gap but a **cost wall**: the Kouznetsov contour height and
-   the iε ladder cost grow like `1/|arg λ|` resp. `1/ε`, so each
-   additional certified digit costs exponentially more compute. The
-   R₄ ladder at the current settings lands at 15–17 digits; more is
-   purchasable but brutally expensive, and the parabolic Taylor
-   growth (`a₈, a₁₀, …`) caps polynomial extrapolation. Full
-   requested precision here also reduces to implementing (1) and
-   continuing off it.
-3. *Irrationally-neutral boundary points* (`λ = e^{2πiθ}`, θ
-   irrational). Here lies a **genuine mathematical obstruction**,
-   not an implementation gap: by classical complex dynamics
-   (Siegel/Brjuno/Cremer), the fixed point is linearizable only when
-   θ satisfies the Brjuno condition; at Cremer-type points **no
-   analytic linearization exists at all**, small-divisor terms
-   `1/(λⁿ−λ)` are unbounded, and any fixed-point-asymptotics
-   definition of canonical tetration becomes ill-posed. "Full
-   precision on the whole band" is therefore **impossible as
-   stated** — the best any implementation can offer on the boundary
-   curve itself is: full precision at the parabolic points (item 1),
-   conditional high precision at Brjuno points, honest refusal
-   elsewhere.
+The literature also corrects an earlier assessment here: Paulsen–Cowgill
+(2017) concerns **real bases `b>exp(1/e)`** and reports numerical errors below
+`1e-50` with 180 nodes for many bases. Paulsen's **2019 complex-base extension**
+is a separate paper with conditional uniqueness statements. These are not
+merely double-precision references, nor evidence of universal certified
+coverage. The audit verified the publication abstracts; it did not obtain
+the full 2019 theorem text and does not invent its hypotheses.
 
-**Decision (2026-08-23, project owner): descoped — too expensive for
-this campaign.** Documented here in enough detail that a motivated
-implementer (or a future campaign) can pick it up. Roadmap for the
-feasible part (item 1, the exact parabolic points):
+The public [gp-tetration project](https://github.com/Lightrunnerwastaken/gp-tetration)
+provides useful independent-method reference data and a validated-numerics
+research direction. Its July 2026 8r1 report explicitly describes a **local**
+segment certificate near `b≈2.04–2.07`; certified parent inputs, remaining
+segments and global gluing are still required. Two-depth numerical agreement
+is not itself a global error certificate.
 
-* *Step 1 — formal Abel series.* At `b = e^{1/e}`: `L = e`, `λ = 1`,
-  expand `f(L+w) = L + w + a₂w² + a₃w³ + …` (coefficients from
-  `ln b = 1/e`, exact recursion, trivial at arbitrary precision).
-  The Abel equation `α(f(z)) = α(z) + 1` has the classical
-  Écalle/Fatou solution `α(w) = c₋₁/w + ρ·ln w + Σ_{k≥1} c_k wᵏ`
-  with `c₋₁ = −1/a₂`, `ρ = a₃/a₂² − 1` (Milnor, *Complex Dynamics*,
-  § 10; Kouznetsov 2009 § 6). Coefficients by recursion.
-* *Step 2 — beat the divergence.* The series is divergent
-  (Gevrey-1); full precision does **not** need Borel–Laplace
-  summation: use the standard push-in trick
-  `α(w) = α_series(f^{∘N}(w)) − N`, iterating `N ≈ O(digits)` steps
-  deep into the attracting petal until the optimally-truncated tail
-  is below target (error `~e^{−c/|w|}`). All machinery (arbitrary-
-  precision iteration, series evaluation) already exists in this
-  repo.
-* *Step 3 — petals, sewing, normalization.* λ = 1 has a two-petal
-  Leau–Fatou flower: the attracting-petal Abel inverse gives the
-  regular super-exponential from below (`F → e⁻`), the repelling
-  petal the exotic one from above; complex heights need `α⁻¹` off
-  the real axis plus exact FE steps, and the `F(0)=1` shift.
-  Reference values and the four-solution portrait are published
-  (Trappmann–Kouznetsov, base-η super-exponentials) — ideal
-  validation targets.
-* *Step 4 — λ = −1* (`b = e^{−e}`): parabolic for `f∘f`; solve the
-  Abel equation of the second iterate with a half-step twist
-  (`α(f(z)) = α(z) + ½`). Same theory, double bookkeeping. This
-  would also give the cut-segment endpoint *from the left*,
-  cross-validating the ε-walker.
-* *Expected problems:* certified truncation bounds for the
-  asymptotic tail (needs an honest error model, not just heuristics);
-  petal-boundary evaluation for heights near the singular directions;
-  matching the two petals into one Kneser-canonical function
-  (this is where the real research content is — uniqueness of the
-  sewing); performance of the `f^{∘N}` push-in at high digits.
-* *Estimate:* 2–6 weeks full-time. *Research directions:* Écalle
-  resurgence / transseries for rigorous tails; Lanlan–Shishikura-
-  style near-parabolic renormalization to cover the *approach* to
-  the boundary (item 2) uniformly; Brjuno-conditional linearization
-  for item 3 (with an explicit refusal at non-Brjuno θ).
+Newer literature is not automatically a suitable replacement:
+[Nesargi–Roudenko (2025), §8.5](https://arxiv.org/abs/2509.24049)
+explicitly describes its implemented scheme as a local, non-analytic real-axis
+approximation. It does not supply the requested arbitrary-complex canonical
+solver. Johansson's branch-certified Lambert W interval method is a stronger
+starting point for future error bounds; the research handoff records the
+required precision-representation and branch checks.
 
-**(b) *"Truly pathological complex bases whose fixed-point pairs fall
-in the same half-plane and defeat the germ-tracked injection would
-need Paulsen–Cowgill conformal-map machinery (not implemented); such
-bases error out cleanly."***
-
-Verdict: **implementable in principle, not ATM — months-scale project
-with no currently known base that needs it.** Paulsen–Cowgill (2017)
-build the complex-base Kneser map via numerical conformal mapping
-(Riemann-map/theta-series machinery). Porting that to certified
-arbitrary precision (MPC) means implementing a validated numerical
-Riemann mapper — an order of magnitude more infrastructure than any
-single module in this repo, with its own conditioning research. Two
-facts keep it de-prioritized: (i) every concrete base in the test
-battery and every base class exercised so far is already covered by
-the germ-tracked bi-asymptotic Kouznetsov solver — the "defeating"
-class is at present *hypothetical*: no witness base is known to us;
-(ii) the one known systematically-hard family (the real cut segment,
-where both relevant fixed points do sit in the closed upper
-half-plane) has its own dedicated machinery (§ 6.7). If you can
-exhibit a concrete base that defeats the current solver, please post
-it on the [forum thread](https://tetrationforum.org/showthread.php?tid=1826)
-— it would immediately become the priority test case.
-
-**Decision (2026-08-23, project owner): descoped — too expensive for
-this campaign.** For a future implementer, the shape of the work:
-
-* *What P–C actually compute:* a Kneser-style construction for
-  complex `b` — Fatou/Abel coordinates at the two fixed points, the
-  "sickle" region between an orbit and its image, a numerical
-  Riemann map of that sickle onto a strip/annulus, and an iterative
-  sewing step enforcing the functional equation on the seam (in the
-  original paper: polynomial least-squares on boundary
-  correspondence, double precision).
-* *Expected problems:* (i) **certified arbitrary-precision conformal
-  mapping** is the crux — crowding phenomenon makes naive mappers
-  lose digits exponentially in elongated regions, so a
-  Schwarz–Christoffel/Theodorsen-class solver with rigorous error
-  control would have to be built from scratch (nothing suitable
-  exists in the Rust/MPFR ecosystem); (ii) the sewing iteration has
-  no published convergence proof — acceptance would need the same
-  kind of residual-gate honesty used elsewhere in this repo;
-  (iii) published reference values are ~double precision only, so
-  validation targets would first have to be regenerated
-  independently.
-* *Estimate:* months full-time.
-* *Cheaper research directions to try first* (ordered):
-  1. **Base-plane continuation with the existing walker** — the
-     ε-walker (§ 6.7) is a special case of walking `b` along an
-     arbitrary path; a general "walk from a covered base to the
-     suspect base" driver reuses all existing machinery (germ
-     tracking, homotopy jumps, gates) and would likely cover most
-     hypothetical pathological bases at ~days of work, *if a witness
-     is ever found*.
-  2. A merged-fixed-point iteration in the style of sheldonison's
-     `fatou.gp` ([forum thread](https://tetrationforum.org/showthread.php?tid=1017)),
-     which handles complex bases via both fixed points without an
-     explicit Riemann map.
-  3. Full P–C only if 1–2 fail on a concrete witness.
-
-**(c) *"Cut segment 0 < b < e^{−e}: ε-walker research frontier as
-described in § 6.7; the ε = 0 endpoint is not yet certified at
-production precision. Complex bases arbitrarily near the cut work."***
-
-Verdict: **no known obstruction — active work, being finalized now.**
-This is not believed impossible, merely unfinished: three successive
-walls have already been diagnosed and mechanically fixed this campaign
-(winding-band gate → multi-pinch homotopy rescue → adaptive node
-boost), each fix strictly extending the record depth (ε ≈ 0.92 →
-0.196 → 0.102 → walks in flight). The remaining risk is that new wall
-*types* keep appearing as ε → 0 (each costs a diagnosis-fix-rerun
-cycle of hours-to-days), or that walk economics (hundreds of
-arbitrary-precision solves, inherently sequential) make the final
-stretch impractically slow — in which case the honest fallback is a
-certified value at small fixed ε plus a documented extrapolation, as
-in § 6.6. Progress is logged live in [`updates.md`](updates.md).
+Finally, `F(−1)=0` already excludes finite `F(−2)` for a nondegenerate
+exponential map. A realistic completion goal is broad, explicitly branched
+coverage with certified domains and honest refusals, not one finite
+single-valued answer for every pair in `C×C`. No credible completion date
+or proof of exhaustive algorithmic coverage is claimed.
 
 ## 9. Repository layout
 
@@ -1006,8 +883,8 @@ in § 6.6. Progress is logged live in [`updates.md`](updates.md).
 src/
   main.rs            CLI (arg parsing, usage, exit codes)
   lib.rs             tetrate_str: string API, precision mapping
-  dispatch.rs        region routing, fallback chains, canonicality guard,
-                     iε-Richardson, cut-base routing
+  dispatch.rs        region routing, checked fallback chains,
+                     real-base branch guard, cut-base routing
   regions.rs         Shell–Thron classification (|λ| bands)
   lambertw.rs        Lambert W (W₀/W₋₁/W₊₁), Halley iteration
   schroder.rs        Schröder linearization: σ̃ Taylor, reversion, shifts
@@ -1016,27 +893,34 @@ src/
                      cut-base ε-walker (§ 6.7)
   fft.rs             big-float FFT cross-correlation kernels
   cnum.rs            complex-number helpers, parsing/formatting, env flags
-  integer_height.rs  exact integer towers
-  linear_approx.rs   C⁰ reference approximation (never a silent fallback)
-tests/               phase1…phase9: unit → integration → verification
+  integer_height.rs  finite-precision integer towers and exact special cases
+  linear_approx.rs   deprecated error-only compatibility entry point
+tests/               phase1…phase10 plus Python plotting regressions
                      batteries (CLI, regions, Schröder, Kouznetsov,
                      regression witnesses incl. the t860 case)
-FAILURE_CASES.md     living failure atlas + working-baseline table
+FAILURE_CASES.md     current failure contracts + labeled historical observations
 updates.md           dated research log (current campaign status)
 ```
 
 ## 10. Testing
 
 ```console
-$ cargo test --release             # everything (10–25 min)
+$ TET_MT=4 cargo test --release --all-targets -- --test-threads=1
 $ cargo test --release --lib       # fast unit layer (<1 min)
 $ cargo test --release --test phase8_verification   # regression witnesses
+$ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_plotting.py'
+$ cargo test --release --doc
+$ cargo clippy --release --all-targets -- -D warnings
+$ cargo fmt --all -- --check
 ```
 
-The heavy phases re-derive published/independently-computed values
-(`e^^0.5`, base-2/large-base witnesses, complex-base spot checks
-cross-validated against mpmath) and run the FE post-check on every
-returned value. CI-friendly: everything is a standard Cargo test.
+Ignored legacy cases require explicit `--ignored` or `--include-ignored` selection and are not
+included in a default pass. Some retain historical numerical anchors; they
+must not be called independent certificates. The default suite includes
+low/high precision, finite-input/range errors, actual output shape,
+branch-point conditioning, cached-state/domain checks, checkpoint corruption,
+MPFR grid axes, CLI verbosity and ST/MT identity. Numerical reference
+provenance is recorded in the tests and § 5.1.
 
 ## 11. References
 
@@ -1053,9 +937,15 @@ returned value. CI-friendly: everything is a standard Cargo test.
   (1996), 329–359.
 * H. Trappmann, D. Kouznetsov, *Uniqueness of holomorphic Abel
   functions at a complex fixed point pair*, Aequat. Math. **81**
-  (2011), 65–76.
+  (2011), 65–76. [arXiv:1006.3981](https://arxiv.org/abs/1006.3981).
 * W. Paulsen, S. Cowgill, *Solving F(z+1) = b^F(z) in the complex
   plane*, Adv. Comput. Math. **43** (2017), 1261–1282.
+  [DOI:10.1007/s10444-017-9524-1](https://doi.org/10.1007/s10444-017-9524-1)
+  (real bases).
+* W. Paulsen, *Tetration for complex bases* (2019).
+  [DOI:10.1007/s10444-018-9615-7](https://doi.org/10.1007/s10444-018-9615-7).
+* F. Johansson, *Computing the Lambert W function in arbitrary-precision
+  complex interval arithmetic*. [arXiv:1705.03266](https://arxiv.org/abs/1705.03266).
 * The [Tetration Forum](https://tetrationforum.org) — community
   discussions of Kneser's construction, Kouznetsov's method, and the
   cut-segment branch structure that this project implements.

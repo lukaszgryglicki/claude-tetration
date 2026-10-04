@@ -16,8 +16,8 @@
 //!
 //! # Precision
 //! All operations run at the same MPC precision as the rest of the algorithm.
-//! FFT-induced roundoff over `M log₂ M` butterflies adds O(log M) digits of
-//! noise, well inside the standard guard-bit budget for `digits` ≤ 10⁶.
+//! Roundoff depends on transform length and input conditioning; arbitrary
+//! working precision alone is not a returned-value error bound.
 //!
 //! # Twiddle factors
 //! Twiddle roots `ω_M = exp(−2πi/M)` are computed once per call (only one is
@@ -52,7 +52,11 @@ fn fft_serial(a: &mut [Complex], prec: u32, inverse: bool) {
     if n <= 1 {
         return;
     }
-    assert!(n.is_power_of_two(), "fft length must be power of 2 (got {})", n);
+    assert!(
+        n.is_power_of_two(),
+        "fft length must be power of 2 (got {})",
+        n
+    );
 
     // Bit-reverse permutation.
     let mut j = 0usize;
@@ -142,7 +146,11 @@ fn fft_mt(a: &mut [Complex], prec: u32, inverse: bool) {
     if n <= 1 {
         return;
     }
-    assert!(n.is_power_of_two(), "fft length must be power of 2 (got {})", n);
+    assert!(
+        n.is_power_of_two(),
+        "fft length must be power of 2 (got {})",
+        n
+    );
 
     // Bit-reverse permutation (pure swaps; cheap, kept serial).
     let mut j = 0usize;
@@ -183,8 +191,7 @@ fn fft_mt(a: &mut [Complex], prec: u32, inverse: bool) {
                     let sin_t = Float::with_val(prec, theta.sin_ref());
                     let omega_step = Complex::with_val(prec, (cos_t, sin_t));
                     let mut table: Vec<Complex> = Vec::with_capacity(half);
-                    let mut omega =
-                        Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
+                    let mut omega = Complex::with_val(prec, (Float::with_val(prec, 1u32), 0));
                     for _ in 0..half {
                         table.push(omega.clone());
                         omega = Complex::with_val(prec, &omega * &omega_step);
@@ -298,7 +305,11 @@ pub fn precompute_kernel_fft(h: &[Complex], n: usize, prec: u32) -> KernelFft {
     }
     fft(&mut h_pad, prec, false);
 
-    KernelFft { coeffs: h_pad, n, m }
+    KernelFft {
+        coeffs: h_pad,
+        n,
+        m,
+    }
 }
 
 /// Compute `out[k] = Σ_{j=0..n−1} a[j] · h[j − k + (n − 1)]` for `k ∈ 0..n`,
@@ -308,11 +319,7 @@ pub fn precompute_kernel_fft(h: &[Complex], n: usize, prec: u32) -> KernelFft {
 /// reading off the central `n` outputs. The kernel FFT is precomputed; this
 /// call does one length-`m` forward FFT on `a`, a pointwise multiply, and one
 /// inverse FFT.
-pub fn cross_correlate_with_kernel(
-    a: &[Complex],
-    kernel: &KernelFft,
-    prec: u32,
-) -> Vec<Complex> {
+pub fn cross_correlate_with_kernel(a: &[Complex], kernel: &KernelFft, prec: u32) -> Vec<Complex> {
     assert_eq!(a.len(), kernel.n, "input length must match kernel.n");
     let n = kernel.n;
     let m = kernel.m;
@@ -335,8 +342,8 @@ pub fn cross_correlate_with_kernel(
                 *x = Complex::with_val(prec, &*x * k);
             });
     } else {
-        for i in 0..m {
-            a_pad[i] = Complex::with_val(prec, &a_pad[i] * &kernel.coeffs[i]);
+        for (value, coefficient) in a_pad.iter_mut().zip(&kernel.coeffs) {
+            *value = Complex::with_val(prec, &*value * coefficient);
         }
     }
 
@@ -356,11 +363,12 @@ pub fn cross_correlate_with_kernel(
 mod tests {
     use super::*;
 
-    fn approx_eq(a: &Complex, b: &Complex, tol: f64) -> bool {
+    fn approx_eq(a: &Complex, b: &Complex, digits: u64) -> bool {
         let prec = a.prec().0;
+        assert!(crate::cnum::is_finite(a) && crate::cnum::is_finite(b));
         let diff = Complex::with_val(prec, a - b);
-        let abs = Float::with_val(prec, diff.abs_ref()).to_f64();
-        abs < tol
+        let abs = Float::with_val(prec, diff.abs_ref());
+        abs < crate::cnum::epsilon(digits, prec)
     }
 
     #[test]
@@ -368,16 +376,14 @@ mod tests {
         let prec = 128u32;
         let n = 8;
         let mut x: Vec<Complex> = (0..n)
-            .map(|i| {
-                Complex::with_val(prec, (Float::with_val(prec, i as f64), Float::with_val(prec, (i * 2) as f64)))
-            })
+            .map(|i| Complex::with_val(prec, (i, i * 2)))
             .collect();
         let original: Vec<Complex> = x.to_vec();
         fft(&mut x, prec, false);
         fft(&mut x, prec, true);
         for i in 0..n {
             assert!(
-                approx_eq(&x[i], &original[i], 1e-30),
+                approx_eq(&x[i], &original[i], 30),
                 "roundtrip mismatch at i={}",
                 i
             );
@@ -388,10 +394,10 @@ mod tests {
     fn convolution_matches_direct() {
         let prec = 128u32;
         let a: Vec<Complex> = (0..4)
-            .map(|i| Complex::with_val(prec, (Float::with_val(prec, i as f64 + 1.0), 0)))
+            .map(|i| Complex::with_val(prec, (i + 1, 0)))
             .collect();
         let b: Vec<Complex> = (0..3)
-            .map(|i| Complex::with_val(prec, (Float::with_val(prec, (2 * i + 1) as f64), 0)))
+            .map(|i| Complex::with_val(prec, (2 * i + 1, 0)))
             .collect();
 
         let conv = convolve(&a, &b, prec);
@@ -408,7 +414,7 @@ mod tests {
                 }
             }
             assert!(
-                approx_eq(&conv[n], &expected, 1e-25),
+                approx_eq(&conv[n], &expected, 25),
                 "convolution mismatch at n={}",
                 n
             );
@@ -420,33 +426,70 @@ mod tests {
         let prec = 128u32;
         let n = 4usize;
         let a: Vec<Complex> = (0..n)
-            .map(|i| Complex::with_val(prec, (Float::with_val(prec, i as f64 + 1.0), 0)))
+            .map(|i| Complex::with_val(prec, (i + 1, 0)))
             .collect();
         // h has length 2n−1 = 7
         let h: Vec<Complex> = (0..(2 * n - 1))
-            .map(|i| Complex::with_val(prec, (Float::with_val(prec, (i + 1) as f64), Float::with_val(prec, (i as f64) * 0.5))))
+            .map(|i| Complex::with_val(prec, (i + 1, Float::with_val(prec, i) / 2)))
             .collect();
 
         let kernel = precompute_kernel_fft(&h, n, prec);
         let fft_out = cross_correlate_with_kernel(&a, &kernel, prec);
+        assert_eq!(fft_out.len(), n);
 
         // Direct: out[k] = Σ_{j} a[j] · h[j − k + (n−1)]
-        for k in 0..n {
+        for (k, actual) in fft_out.iter().enumerate() {
             let mut expected = Complex::with_val(prec, (0, 0));
-            for j in 0..n {
+            for (j, value) in a.iter().enumerate() {
                 let idx = (j as i64) - (k as i64) + (n as i64) - 1;
                 if idx >= 0 && (idx as usize) < h.len() {
-                    let prod = Complex::with_val(prec, &a[j] * &h[idx as usize]);
+                    let prod = Complex::with_val(prec, value * &h[idx as usize]);
                     expected = Complex::with_val(prec, &expected + &prod);
                 }
             }
             assert!(
-                approx_eq(&fft_out[k], &expected, 1e-25),
+                approx_eq(actual, &expected, 25),
                 "cross-correlation mismatch at k={} (expected {:?}, got {:?})",
                 k,
                 expected,
-                fft_out[k]
+                actual
             );
+        }
+    }
+
+    #[test]
+    fn serial_and_mt_fft_agree_beyond_native_precision() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        for digits in [50, 70, 1000] {
+            let prec = crate::cnum::digits_to_bits(digits);
+            let original: Vec<_> = (0..1024)
+                .map(|i| {
+                    Complex::with_val(
+                        prec,
+                        (
+                            Float::with_val(prec, i + 1) / 7,
+                            Float::with_val(prec, i) / 11,
+                        ),
+                    )
+                })
+                .collect();
+            let mut serial = original.clone();
+            let mut parallel = original.clone();
+            for inverse in [false, true] {
+                fft_serial(&mut serial, prec, inverse);
+                pool.install(|| fft_mt(&mut parallel, prec, inverse));
+                for (a, b) in serial.iter().zip(&parallel) {
+                    assert_eq!(a, b, "{digits} digits, inverse={inverse}");
+                    assert_eq!(a.real().is_sign_negative(), b.real().is_sign_negative());
+                    assert_eq!(a.imag().is_sign_negative(), b.imag().is_sign_negative());
+                }
+            }
+            for (actual, expected) in serial.iter().zip(&original) {
+                assert!(approx_eq(actual, expected, digits));
+            }
         }
     }
 }

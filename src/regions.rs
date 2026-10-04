@@ -23,8 +23,7 @@ pub enum Region {
     BaseZero,
     /// `|λ| < 0.95`. Regular tetration via Schröder's equation works comfortably.
     ShellThronInterior(FixedPointData),
-    /// `0.95 ≤ |λ| ≤ 1.05`. Schröder unreliable; defer to Paulsen-Cowgill (or
-    /// linear approx fallback) — convergence near the parabolic boundary stalls.
+    /// `0.95 ≤ |λ| ≤ 1.05`. Convergence may be slow or fail near neutral multipliers.
     ShellThronBoundary(FixedPointData),
     /// `|λ| > 1.05` and base is real positive (`> 1`, with the special case
     /// `b > e^(1/e)`). Kouznetsov's Cauchy-contour method is the strongest fit.
@@ -35,13 +34,12 @@ pub enum Region {
 }
 
 /// Data attached to every non-special classification: the attracting fixed
-/// point `L` (where `b^L = L`), the multiplier `λ = L · ln b`, and `|λ|` as f64
-/// for fast region tests.
+/// point `L` (where `b^L = L`), the multiplier `λ = L · ln b`, and its magnitude.
 #[derive(Debug, Clone)]
 pub struct FixedPointData {
     pub fixed_point: Complex,
     pub lambda: Complex,
-    pub lambda_abs: f64,
+    pub lambda_abs: Float,
 }
 
 impl Region {
@@ -59,12 +57,15 @@ impl Region {
 
 /// Inner / outer band thresholds for `|λ|`. The narrow band around `|λ| = 1`
 /// avoids Schröder when convergence rate is too slow.
-pub const SHELL_THRON_INTERIOR_THRESHOLD: f64 = 0.95;
-pub const SHELL_THRON_OUTER_THRESHOLD: f64 = 1.05;
+pub const SHELL_THRON_INTERIOR_THRESHOLD: &str = "0.95";
+pub const SHELL_THRON_OUTER_THRESHOLD: &str = "1.05";
 
 /// Classify base `b`. Computes the fixed-point data via Lambert W and labels
 /// the region used by `dispatch::tetrate`.
 pub fn classify(b: &Complex, prec: u32) -> Result<Region, String> {
+    if !cnum::is_finite(b) {
+        return Err("base classification requires a finite base".into());
+    }
     if cnum::is_one(b) {
         return Ok(Region::BaseOne);
     }
@@ -79,20 +80,22 @@ pub fn classify(b: &Complex, prec: u32) -> Result<Region, String> {
     let neg_w = Complex::with_val(prec, -&w);
     let l = Complex::with_val(prec, &neg_w / &ln_b);
     let lambda = Complex::with_val(prec, &l * &ln_b);
-    let lambda_abs_f = Float::with_val(prec, lambda.abs_ref());
-    let lambda_abs = lambda_abs_f.to_f64();
+    let lambda_abs = Float::with_val(prec, lambda.abs_ref());
+    if !cnum::is_finite(&l) || !lambda_abs.is_finite() {
+        return Err("fixed-point computation produced a non-finite value".into());
+    }
 
     let data = FixedPointData {
         fixed_point: l,
         lambda,
-        lambda_abs,
+        lambda_abs: lambda_abs.clone(),
     };
 
     let is_real_positive = b.imag().is_zero() && b.real().is_sign_positive() && !b.real().is_zero();
 
-    if lambda_abs < SHELL_THRON_INTERIOR_THRESHOLD {
+    if lambda_abs < cnum::decimal(SHELL_THRON_INTERIOR_THRESHOLD, prec) {
         Ok(Region::ShellThronInterior(data))
-    } else if lambda_abs <= SHELL_THRON_OUTER_THRESHOLD {
+    } else if lambda_abs <= cnum::decimal(SHELL_THRON_OUTER_THRESHOLD, prec) {
         Ok(Region::ShellThronBoundary(data))
     } else if is_real_positive {
         Ok(Region::OutsideShellThronRealPositive(data))

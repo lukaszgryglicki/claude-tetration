@@ -17,10 +17,7 @@ fn debug_wk_for_negative_two() {
     let ln2 = Float::with_val(prec, Float::with_val(prec, 2).ln_ref());
     let ln_b = Complex::with_val(prec, (ln2, pi));
     let neg_ln_b = Complex::with_val(prec, -&ln_b);
-    eprintln!("-ln(-2) = {:.6}+{:.6}i",
-        Float::with_val(prec, neg_ln_b.real()).to_f64(),
-        Float::with_val(prec, neg_ln_b.imag()).to_f64()
-    );
+    eprintln!("-ln(-2) = {:.6}+{:.6}i", neg_ln_b.real(), neg_ln_b.imag());
     for &k in &[-3i32, -2, -1, 0, 1, 2, 3] {
         match lambertw::wk(&neg_ln_b, k, prec) {
             Ok(w) => {
@@ -28,13 +25,14 @@ fn debug_wk_for_negative_two() {
                 let l = Complex::with_val(prec, &neg_w / &ln_b);
                 let bz_arg = Complex::with_val(prec, &l * &ln_b);
                 let bz = Complex::with_val(prec, bz_arg.exp_ref());
-                let resid = Float::with_val(prec, Complex::with_val(prec, &bz - &l).abs_ref()).to_f64();
-                eprintln!("W_{:>3}: w={:.4}+{:.4}i  L={:.4}+{:.4}i  resid={:.2e}",
+                let resid = Float::with_val(prec, Complex::with_val(prec, &bz - &l).abs_ref());
+                eprintln!(
+                    "W_{:>3}: w={:.4}+{:.4}i  L={:.4}+{:.4}i  resid={:.2e}",
                     k,
-                    Float::with_val(prec, w.real()).to_f64(),
-                    Float::with_val(prec, w.imag()).to_f64(),
-                    Float::with_val(prec, l.real()).to_f64(),
-                    Float::with_val(prec, l.imag()).to_f64(),
+                    w.real(),
+                    w.imag(),
+                    l.real(),
+                    l.imag(),
                     resid
                 );
             }
@@ -45,30 +43,19 @@ fn debug_wk_for_negative_two() {
 
 /// True iff `|w · e^w − z| < 2^{−tol_bits}` (relative to |z| if non-zero).
 fn check_residual(w: &Complex, z: &Complex, prec: u32, tol_bits: u32) -> Result<(), String> {
+    if !cnum::is_finite(w) || !cnum::is_finite(z) {
+        return Err("non-finite Lambert W value or argument".into());
+    }
     let exp_w = Complex::with_val(prec, w.exp_ref());
     let we = Complex::with_val(prec, w * &exp_w);
     let r = Complex::with_val(prec, &we - z);
     let r_abs = Float::with_val(prec, r.abs_ref());
     let z_abs = Float::with_val(prec, z.abs_ref());
-    let bound_exp_abs = -(tol_bits as i32);
-    let r_exp = r_abs.get_exp().unwrap_or(i32::MIN);
-    if r_exp <= bound_exp_abs {
-        return Ok(());
-    }
-    // Try relative bound: |r| / |z| < 2^{-tol_bits}
-    if !z_abs.is_zero() {
-        let rel = Float::with_val(prec, &r_abs / &z_abs);
-        if rel.get_exp().is_none_or(|e| e <= bound_exp_abs) {
-            return Ok(());
-        }
-        Err(format!(
-            "residual exp = {:?}, rel exp = {:?}, want ≤ {}",
-            r_exp,
-            rel.get_exp(),
-            bound_exp_abs
-        ))
+    let tolerance = (Float::with_val(prec, 1) >> tol_bits) * z_abs.max(&Float::with_val(prec, 1));
+    if r_abs.is_finite() && r_abs <= tolerance {
+        Ok(())
     } else {
-        Err(format!("residual exp = {:?}, want ≤ {}", r_exp, bound_exp_abs))
+        Err(format!("Lambert residual {r_abs} exceeds {tolerance}"))
     }
 }
 
@@ -84,9 +71,8 @@ fn t100_w0_real_positive() {
     let w = lambertw::w0(&z, prec).unwrap();
     check_residual(&w, &z, prec, prec - 32).unwrap();
     // Compare real part to known value of Omega constant.
-    let r: f64 = w.real().to_f64();
-    assert!((r - 0.5671432904097838).abs() < 1e-12, "W₀(1) re = {}", r);
-    assert!(w.imag().is_zero() || w.imag().to_f64().abs() < 1e-30);
+    assert!((w.real() - cnum::decimal("0.5671432904097838", prec)).abs() < cnum::epsilon(12, prec));
+    assert!(Float::with_val(prec, w.imag().abs_ref()) < cnum::epsilon(60, prec));
 }
 
 #[test]
@@ -107,7 +93,7 @@ fn t102_w0_neg_inv_e() {
     let z = Complex::with_val(prec, (z_re, Float::with_val(prec, 0)));
     let w = lambertw::w0(&z, prec).unwrap();
     check_residual(&w, &z, prec, prec - 32).unwrap();
-    assert!((w.real().to_f64() + 1.0).abs() < 1e-12, "W₀(-1/e) re = {}", w.real().to_f64());
+    assert!(Float::with_val(prec, w.real() + 1).abs() < cnum::epsilon(12, prec));
 }
 
 #[test]
@@ -118,7 +104,7 @@ fn t103_w0_at_e() {
     let z = Complex::with_val(prec, (e, Float::with_val(prec, 0)));
     let w = lambertw::w0(&z, prec).unwrap();
     check_residual(&w, &z, prec, prec - 32).unwrap();
-    assert!((w.real().to_f64() - 1.0).abs() < 1e-12, "W₀(e) re = {}", w.real().to_f64());
+    assert!(Float::with_val(prec, w.real() - 1).abs() < cnum::epsilon(60, prec));
 }
 
 #[test]
@@ -137,8 +123,8 @@ fn t105_w0_negative_real_below_branch() {
     let w = lambertw::w0(&z, prec).unwrap();
     check_residual(&w, &z, prec, prec - 32).unwrap();
     // W₀(-1) ≈ -0.31813 + 1.33724 i
-    assert!((w.real().to_f64() + 0.31813).abs() < 1e-3);
-    assert!((w.imag().to_f64() - 1.33724).abs() < 1e-3);
+    assert!((w.real() + cnum::decimal("0.31813", prec)).abs() < cnum::epsilon(3, prec));
+    assert!((w.imag() - cnum::decimal("1.33724", prec)).abs() < cnum::epsilon(3, prec));
 }
 
 #[test]
@@ -173,11 +159,12 @@ fn t110_wm1_real() {
     let w = lambertw::wm1(&z, prec).unwrap();
     check_residual(&w, &z, prec, prec - 32).unwrap();
     // W₋₁(-0.1) ≈ -3.5772 (only on real branch)
-    let r = w.real().to_f64();
-    let i = w.imag().to_f64();
-    // Allow small imaginary part due to f64 seed noise; what matters is residual.
-    assert!(r < -1.0, "W₋₁(-0.1) re = {} (expected real < -1)", r);
-    assert!(i.abs() < 1e-3, "W₋₁(-0.1) im = {} (expected ~ 0)", i);
+    assert!(
+        w.real() < &-1,
+        "W₋₁(-0.1) re = {} (expected real < -1)",
+        w.real()
+    );
+    assert!(Float::with_val(prec, w.imag().abs_ref()) < cnum::epsilon(80, prec));
 }
 
 #[test]
@@ -189,7 +176,7 @@ fn t111_wm1_at_neg_inv_e() {
     let z = Complex::with_val(prec, (z_re, Float::with_val(prec, 0)));
     let w = lambertw::wm1(&z, prec).unwrap();
     check_residual(&w, &z, prec, prec - 32).unwrap();
-    assert!((w.real().to_f64() + 1.0).abs() < 1e-10, "W₋₁(-1/e) re = {}", w.real().to_f64());
+    assert!(Float::with_val(prec, w.real() + 1).abs() < cnum::epsilon(10, prec));
 }
 
 #[test]
@@ -214,6 +201,8 @@ fn t120_w0_for_tetration_fixed_point_b_e() {
     let exp_l = Complex::with_val(prec, l.exp_ref());
     let r = Complex::with_val(prec, &exp_l - &l);
     let r_abs = Float::with_val(prec, r.abs_ref());
-    let r_exp = r_abs.get_exp().unwrap_or(i32::MIN);
-    assert!(r_exp <= -((prec as i32) - 32), "fixed-point residual exp = {}", r_exp);
+    assert!(
+        r_abs.is_finite() && r_abs <= cnum::working_epsilon(prec),
+        "fixed-point residual = {r_abs}"
+    );
 }

@@ -1,41 +1,35 @@
 //! Phase-5 verification: tetration for bases outside the Shell-Thron region
 //! (real positive `> e^(1/e)` and general complex).
 //!
-//! Phase-5 status — partial: Schröder-at-repelling-fixed-point handles bases
-//! close to the Shell-Thron boundary (where the σ̃ Taylor series at L still
-//! converges at `w = 1 − L`). For bases farther out (real `e`, `2`, `10`,
-//! etc.), the σ̃ Taylor radius is smaller than `|1 − L|`; Schröder bails and
-//! — per design — the dispatcher errors out cleanly rather than silently
-//! returning a wrong-but-plausible linear-approx number. Full Kneser /
-//! Kouznetsov Cauchy iteration that handles those cases at high precision is
-//! deferred to a later phase.
-//!
-//! Tests below split into:
-//!   * "Schröder applicable" cases: high tolerance via functional equation.
-//!   * "Out-of-reach" cases: dispatch must return Err, not silently produce
-//!     a wrong-but-plausible linear-approx number. Integer heights are still
-//!     handled exactly via the integer_height path.
+//! Covers existing regular/Kouznetsov branches, real-boundary fallback,
+//! large-base range handling and specific honest refusals. Functional-equation
+//! agreement is a consistency check, not independent accuracy certification.
 
 use rug::{Complex, Float};
 
-use tetration::{cnum, dispatch};
+use tetration::{cnum, dispatch, kouznetsov, regions};
 
 fn parse(re: &str, im: &str, prec: u32) -> Complex {
     cnum::parse_complex(re, im, prec).unwrap()
 }
 
-fn matching_digits(a: &Complex, b: &Complex, prec: u32) -> f64 {
+fn matching_digits(a: &Complex, b: &Complex, prec: u32) -> Float {
+    assert!(cnum::is_finite(a) && cnum::is_finite(b));
     let diff = Complex::with_val(prec, a - b);
     let da = Float::with_val(prec, diff.abs_ref());
     if da.is_zero() {
-        return f64::INFINITY;
+        return Float::with_val(prec, rug::float::Special::Infinity);
     }
-    -da.to_f64().log10()
+    -da.log10()
 }
 
 fn check_functional_eq(
-    b_re: &str, b_im: &str, z_re: &str, z_im: &str,
-    digits: u64, expected_match: f64,
+    b_re: &str,
+    b_im: &str,
+    z_re: &str,
+    z_im: &str,
+    digits: u64,
+    expected_match: u64,
 ) {
     let prec = cnum::digits_to_bits(digits);
     let b = parse(b_re, b_im, prec);
@@ -51,7 +45,12 @@ fn check_functional_eq(
     assert!(
         m >= expected_match,
         "b={}+{}i z={}+{}i: matched {} digits (expected ≥ {})",
-        b_re, b_im, z_re, z_im, m, expected_match,
+        b_re,
+        b_im,
+        z_re,
+        z_im,
+        m,
+        expected_match,
     );
 }
 
@@ -78,13 +77,13 @@ fn check_unsupported(b_re: &str, b_im: &str, z_re: &str, z_im: &str, digits: u64
 #[test]
 fn t410_complex_base_just_outside() {
     // b = 1.5 + 0.5i — typically near boundary, Schröder converges.
-    check_functional_eq("1.5", "0.5", "0.5", "0.0", 50, 25.0);
+    check_functional_eq("1.5", "0.5", "0.5", "0.0", 50, 25);
 }
 
 #[test]
 fn t411_imaginary_base_modest() {
     // b = 0.3i: complex but not extreme.
-    check_functional_eq("0", "0.3", "0.5", "0", 40, 20.0);
+    check_functional_eq("0", "0.3", "0.5", "0", 40, 20);
 }
 
 // ---------- Real bases > e^(1/e) (Newton-Kantorovich Kouznetsov) ----
@@ -96,17 +95,17 @@ fn t411_imaginary_base_modest() {
 
 #[test]
 fn t420_real_e_via_kouznetsov() {
-    check_functional_eq("2.71828182845904523536", "0", "0.5", "0", 10, 3.0);
+    check_functional_eq("2.71828182845904523536", "0", "0.5", "0", 10, 3);
 }
 
 #[test]
 fn t421_real_two_via_kouznetsov() {
-    check_functional_eq("2", "0", "0.5", "0", 10, 3.0);
+    check_functional_eq("2", "0", "0.5", "0", 10, 3);
 }
 
 #[test]
 fn t422_real_ten_via_kouznetsov() {
-    check_functional_eq("10", "0", "0.3", "0", 10, 3.0);
+    check_functional_eq("10", "0", "0.3", "0", 10, 3);
 }
 
 // ---------- Slightly-complex bases (Newton-from-conjugate fixed-point) ----
@@ -118,13 +117,13 @@ fn t422_real_ten_via_kouznetsov() {
 #[test]
 fn t425_slightly_complex_base_kouznetsov() {
     // b = 2 + 0.001i: barely off the real axis, should converge cleanly.
-    check_functional_eq("2", "0.001", "0.5", "0", 10, 3.0);
+    check_functional_eq("2", "0.001", "0.5", "0", 10, 3);
 }
 
 #[test]
 fn t426_moderately_complex_base_kouznetsov() {
     // b = 2 + 0.1i: 10% imaginary part. Still on the natural-pair side.
-    check_functional_eq("2", "0.1", "0.5", "0", 10, 3.0);
+    check_functional_eq("2", "0.1", "0.5", "0", 10, 3);
 }
 
 #[test]
@@ -132,7 +131,7 @@ fn t427_slightly_complex_base_complex_height() {
     // Complex base + complex height. Cross-validates that eval_at_height on
     // the converged interpolant satisfies F(h+1) = b^F(h) when h itself
     // is off the real axis.
-    check_functional_eq("2", "0.1", "0.5", "0.5", 10, 3.0);
+    check_functional_eq("2", "0.1", "0.5", "0.5", 10, 3);
 }
 
 #[test]
@@ -140,23 +139,40 @@ fn t428_boundary_band_real_via_kouznetsov() {
     // b=1.5 sits in the parabolic boundary band (|λ|≈1.033) where Schröder is
     // unreliable but Newton-Kantorovich Kouznetsov still converges because
     // |arg(λ)| is far from 0. Routes through ShellThronBoundary → Kouznetsov.
-    check_functional_eq("1.5", "0", "0.5", "0", 10, 3.0);
+    let digits = 10;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("1.5", "0", prec);
+    let h = parse("0.5", "0", prec);
+    let regions::Region::ShellThronBoundary(fp) = regions::classify(&b, prec).unwrap() else {
+        panic!("expected boundary band");
+    };
+    let state = kouznetsov::setup_kouznetsov(&b, &fp, prec, digits)
+        .expect("existing direct solver must converge at b=1.5");
+    let direct = kouznetsov::eval_kouznetsov(&state, &b, &h).unwrap();
+    let dispatched = dispatch::tetrate(&b, &h, prec, digits)
+        .expect("a failed continuation must not skip a converging direct method");
+    assert!(matching_digits(&dispatched, &direct, prec) >= digits);
+    let next = kouznetsov::eval_kouznetsov(&state, &b, &Complex::with_val(prec, &h + 1)).unwrap();
+    assert!(matching_digits(&next, &cnum::pow_complex(&b, &dispatched, prec), prec) >= digits);
 }
 
 // ---------- Cases that have no working algorithm (must error out) ----
 
 #[test]
 fn t423_negative_real_via_wk_search() {
-    // Negative real base b=-2: Newton-from-conjugate finds both fixed points
-    // in the same half-plane (W₀(-ln(-2)) = -W₀(-ln(2)+iπ) and its conjugate
-    // both have positive imaginary part). The fallback W_k search across
-    // k∈±[1..5] picks W_1, which gives L_1 ≈ -0.902-0.172i in the lower
-    // half-plane — a valid opposite-half-plane partner. The resulting
-    // tetration is non-canonical (not strict Kneser) but satisfies F(0)=1
-    // and F(z+1)=b^F(z). Verified at low digits because the Cauchy
-    // reconstruction with non-conjugate partners hits a discretization
-    // floor at ~1e-4 to 1e-6 that doesn't shrink with N.
-    check_functional_eq("-2", "0", "0.4", "0.1", 10, 3.0);
+    let digits = 10;
+    let prec = cnum::digits_to_bits(digits);
+    let error = dispatch::tetrate(
+        &parse("-2", "0", prec),
+        &parse("0.4", "0.1", prec),
+        prec,
+        digits,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("unsupported case") && error.contains("boundary residual"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -164,7 +180,7 @@ fn t424_imaginary_supported_via_sigma_shift() {
     // b = i has |λ| ≈ 0.89, so it's actually inside Shell-Thron — but |1−L|
     // is outside the σ̃ Taylor disk at L. The σ̃-shift mechanism rescues
     // this case via the functional equation. Verify F(z+1) ≈ b^F(z).
-    check_functional_eq("0", "1", "0.5", "0", 30, 20.0);
+    check_functional_eq("0", "1", "0.5", "0", 30, 20);
 }
 
 // ---------- Large real bases (regression for the smooth target_mid cap) ----
@@ -181,14 +197,14 @@ fn t424_imaginary_supported_via_sigma_shift() {
 #[test]
 fn t440_large_base_b100_functional_eq() {
     // F_100(0.5) ≈ 4.213104547 per FAILURE_CASES §E
-    check_functional_eq("100", "0", "0.5", "0", 10, 3.0);
+    check_functional_eq("100", "0", "0.5", "0", 10, 3);
 }
 
 #[test]
 fn t441_large_base_b1000_functional_eq() {
     // F_1000(0.5) ≈ 6.391336395 per FAILURE_CASES §E. Largest base in the
     // verified table; defends the cap-clamp at the high end (cap=0.7).
-    check_functional_eq("1000", "0", "0.5", "0", 10, 3.0);
+    check_functional_eq("1000", "0", "0.5", "0", 10, 3);
 }
 
 #[test]
@@ -200,9 +216,9 @@ fn t442_large_base_b50_value_check() {
     let b = parse("50", "0", prec);
     let h = parse("0.5", "0", prec);
     let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
-    let f_re = Float::with_val(prec, f.real()).to_f64();
+    let f_re = f.real();
     assert!(
-        (f_re - 3.6480).abs() < 1e-3,
+        Float::with_val(prec, f_re - cnum::decimal("3.6480", prec)).abs() < cnum::epsilon(3, prec),
         "F_50(0.5) = {} but expected ≈ 3.6480 (FAILURE_CASES §E)",
         f_re
     );
@@ -220,6 +236,6 @@ fn t430_integer_endpoint_exact() {
     let h_int = parse("1", "0", prec);
     let f = dispatch::tetrate(&b, &h_int, prec, digits).unwrap();
     let diff = Complex::with_val(prec, &f - &b);
-    let da = Float::with_val(prec, diff.abs_ref()).to_f64();
-    assert!(da < 1e-25, "F_e(1) − e differs by {}", da);
+    let da = Float::with_val(prec, diff.abs_ref());
+    assert!(da < cnum::epsilon(25, prec), "F_e(1) − e differs by {}", da);
 }

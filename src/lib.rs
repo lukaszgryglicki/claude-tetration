@@ -9,11 +9,11 @@
 pub mod cnum;
 pub mod dispatch;
 pub mod fft;
-pub mod mt;
 pub mod integer_height;
 pub mod kouznetsov;
 pub mod lambertw;
 pub mod linear_approx;
+pub mod mt;
 pub mod regions;
 pub mod schroder;
 
@@ -30,22 +30,12 @@ pub fn tetrate_str(
     let digits: u64 = prec_str
         .parse()
         .map_err(|_| format!("invalid precision: {:?}", prec_str))?;
-    if digits == 0 {
-        return Err("precision must be a positive integer".into());
-    }
-    // Reject precisions that would overflow MPC's 32-bit prec_t (≈1.3 billion
-    // digits) before calling `digits_to_bits` (which would panic). Anything
-    // beyond ~10⁷ digits is also impractical: MPFR allocations dominate.
-    const MAX_DIGITS: u64 = 1_000_000_000;
-    if digits > MAX_DIGITS {
-        return Err(format!(
-            "precision {} digits exceeds maximum {} (MPC representable range)",
-            digits, MAX_DIGITS
-        ));
-    }
-    let prec = cnum::digits_to_bits(digits);
+    let prec = cnum::checked_input_precision(digits, &[base_re, base_im, height_re, height_im])?;
     let b = cnum::parse_complex(base_re, base_im, prec)?;
     let h = cnum::parse_complex(height_re, height_im, prec)?;
     let result = dispatch::tetrate(&b, &h, prec, digits)?;
+    if !cnum::is_finite(&result) {
+        return Err("tetration returned a non-finite result".into());
+    }
     Ok(cnum::format_complex(&result, digits as usize))
 }

@@ -3,73 +3,54 @@
 Classes of currently-unsupported / failing inputs, organized by failure mode.
 Each row is a 4-tuple `b_re b_im h_re h_im` — feed directly to `tet <prec>` for testing.
 
+**October 2026 audit:** old August grids, timing tables and relaxed-gate
+successes below are historical observations, not present-day accuracy
+certificates. Unchecked Richardson, fixed-point substitution and low-accuracy
+successful fallbacks are retired. Final Kouznetsov evaluation requires the
+full `10^-(digits+3)` boundary target; even that is not a forward-error proof.
+Current independent numerical witnesses and their limits are in README §5.1
+and `tests/phase10_honesty.rs`.
+
 Legend:
 - **ERR** — exits cleanly with non-zero status and a diagnostic on stderr; no result printed.
-- **HANG** — does not complete within 90 s at precision 50; algorithm spins / fails to produce output.
+- **HANG** — historical 90-second budget exceeded; not proof of a deadlock or mathematical impossibility.
 - **WRONG** — historically produced garbage (e.g. magnitudes ~1e+3000); now generally captured as ERR after the two-tier residual gate, but listed because correctness is still unsolved.
 
 ---
 
-## A. Shell-Thron parabolic boundary band  (|λ| ≈ 1)   — **PARTIAL: low-precision iε fallback**
+## A. Shell-Thron boundary band (|λ| ≈ 1) — **PARTIAL; unchecked fallback removed**
 
-Schröder regular tetration converges too slowly here (logarithmic rate);
+Schröder regular tetration can converge geometrically too slowly near the boundary;
 Newton-Kantorovich Kouznetsov falls into a pathological scalability trap:
 `|arg(λ)|` is tiny (e.g. 0.1411 rad for b=1.45), so the strip must extend to
-`t_max ≈ π/|arg(λ)| ≈ 457`, requiring `n_nodes=65536`. Each LM matvec takes
+`t_max ≈ (digits+8)·ln(10)/|arg(λ)| ≈ 457` at 20 digits, requiring `n_nodes=65536`. Each LM matvec took
 ~19s; convergence on this grid takes hours.
 
-**Fallback** (`dispatch.rs:try_iperturbation_extrapolation`) — when both the
-direct and continuation Kouznetsov solvers refuse for parabolic-cap reasons,
-the dispatcher pivots: it computes the perturbed values
-`F(b+ε_k·i, h)` for `ε_k ∈ {0.1, 0.05, 0.025, 0.0125, 0.00625}` (which take
-the OutsideShellThronGeneral / Kouznetsov path successfully because |arg(λ)|
-there is no longer ≈ 0; even ε=0.00625 gives |λ|≈0.899 — well-interior),
-and combines them in a Romberg-style table:
+The former five-level iε Richardson table is **removed**. Its levels could
+disagree around `1e-12` while it returned arbitrarily many digits, and an FE
+residual around `1e-16` was not a forward-error certificate. The current real
+boundary route tries continuation and then the existing direct Kouznetsov
+method. The direct method genuinely works at `b=1.5`; its formerly skipped
+fallback is a routing regression covered by t428. If neither method works,
+the result is an explicit error, not a polynomial substitute.
 
-```
-R₁(ε) = (4·F(ε/2) − F(ε))/3        cancels ε²  → O(ε⁴)
-R₂(ε) = (16·R₁(ε/2) − R₁(ε))/15    cancels ε⁴  → O(ε⁶)
-R₃(ε) = (64·R₂(ε/2) − R₂(ε))/63    cancels ε⁶  → O(ε⁸)
-R₄(ε) = (256·R₃(ε/2) − R₃(ε))/255  cancels ε⁸  → O(ε¹⁰)
-```
-
-For real h, Schwarz reflection makes Re(F(b+iε)) even in ε and Im(F)
-odd in ε; the Richardson table works directly on the real part and the
-imaginary residue collapses to zero. For complex h the parity breaks, so
-the fallback symmetrises manually:
-`G(ε) := (F(b+iε, h) + conj(F(b+iε, conj(h))))/2`
-which restores ε-evenness at the cost of doubling the per-ε work
-(10 tetrate calls instead of 5).
-
-Theoretical R₄ residual at ε_min=0.00625 is O(ε¹⁰) ≈ 9e-23, but in practice
-higher-order Taylor coefficients a₁₀, a₁₂… in `F(b+iε)` grow rapidly near
-the parabolic boundary and limit empirical accuracy to **~15–17 digits**
-regardless of requested precision. Functional-equation self-check
-`F(h+1) − b^F(h)` gives:
-
-  - b=η (worst case):   relative error 6.2e-17  → ~16 digits
-  - b=1.4448:            relative error 1.3e-15  → ~15 digits
-
-At b=1.4448 the empirical R₃ vs R₄ disagreement (~1e-12) reveals that
-a₈ at this base is large (~10³), consistent with the parabolic-fixed-
-point coefficient blow-up. Beyond ~17 digits at adversarial bases would
-need a proper Abel/Écalle parabolic-iteration theory (or Kouznetsov's
-2009 Abel-function construction).
-The CLI prints a stderr warning. For research-grade precision in this band
-a proper Abel/Écalle parabolic-iteration theory (or Kouznetsov's 2009
-Abel-function construction, Math. Comp. §6) is still needed.
+Rebuilding committed revision `26aec7f` reproduced the `b=1.46,h=0.5`
+continuation failure at its first warm step (residual about `0.0964`).
+That code then returned unchecked Richardson output
+`1.2638346006665197568`, not the old t880 reference
+`1.2638346032868236084`. The supposed full-precision continuation regression
+was already invalid; t880 now requires explicit refusal from both existing
+solver paths, rather than accepting that surrogate.
 
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
-| 1.4446678610097661337 | 0 | 0.5 | 0 | OK (~16 digits via iε R₄) | 1.25715307505417... + 0i |
-| 1.444667861009766 | 0 | 0.5 | 0 | OK (~16 digits via iε R₄) | 1.25715... + 0i (t710) |
-| 1.4447 | 0 | 0.5 | 0 | OK (~15 digits via iε R₄) | 1.25717... + 0i |
-| 1.4448 | 0 | 0.5 | 0 | OK (~15 digits via iε R₄) | 1.25721102559202735... + 0i |
-| 1.4447 | 0 | 0.5 | 0.5 | OK (~15 digits via iε R₄ complex-h) | 1.29015 + 0.21136i |
-| 1.45 | 0 | 0.5 | 0 | OK | continuation solver succeeds at |λ|=1.003 |
-| 1.46 | 0 | 0.5 | 0 | OK | continuation solver succeeds (1.2638346… at full prec, ~5 min) |
-| 1.43 | 0 | 0.5 | 0 | OK | Schröder works at this distance |
-| 1.44 | 0 | 0.5 | 0 | OK | Schröder converged (|λ|=0.873, post-validation rel=6.4e-29) |
+| 1.444667861009766 | 0 | 0.5 | 0 | ERR | obsolete Richardson answer rejected (t710/t871) |
+| 1.4448 | 0 | 0.5 | 0 | ERR | explicit refusal at 20/50/70 digits (t870) |
+| 1.4447 | 0 | 0.5 | 0.5 | ERR | no complex-height surrogate (t872) |
+| 1.5 | 0 | 0.5 | 0 | numerical success | existing direct method, 10-digit regression |
+| 1.46 | 0 | 0.5 | 0 | ERR | continuation and direct solve stall at 20 digits (t880); old success claim retracted |
+| 1.45 | 0 | 0.5 | 0 | historical only | old continuation claims not independent accuracy evidence |
+| 1.43 / 1.44 | 0 | 0.5 | 0 | historical only | old regular-iteration observations, not current certificates |
 
 ### A.1 Complex bases deep in the band — silent garbage, now gated (RESOLVED as honest ERR)
 
@@ -86,18 +67,16 @@ up in height blew up to `10^{6913}` by `h = 50` and `inf` at 51, while the
 true orbit is bounded (integer-height cross-check `F(48) = 0.1353 − 0.0070i`;
 independent 10- vs 15-digit runs disagreed *completely*, the smoking gun).
 
-Fix: `setup_kouznetsov` now re-gates the final residual for non-Schwarz
-bases at `10^{−digits/3}` clamped to `[1e-6, 1e-2]` (the internal relaxed
-gate remains for walker/continuation near-miss inspection, which judge
-residuals themselves). Rejection falls through to iε-Richardson; for bases
-this deep even the Richardson probes land back in the band, and the CLI
-then ERRs with the full failure chain — the honest outcome. Richardson
-still succeeds for the *real-base* band (probes escape perpendicular to
-the boundary; see table above), so coverage there is unchanged.
+The original fix used `10^{−digits/3}` clamped to `[1e-6,1e-2]`. The October
+audit replaced that final-answer gate with `10^{−(digits+3)}` and removed
+Richardson fallback. Relaxed states may still be inspected internally, but
+`eval_kouznetsov` rejects them as answers. Cross-precision disagreement is
+decisive numerical evidence; comparing an integer orbit with a nearby
+noninteger height is only a diagnostic, not an accuracy certificate.
 
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
-| 0.0653281554868594 | 0.025 | 48.013 | 0 | was: RC=0 garbage (−4.31+7.57i @10dig, −20.10+11.87i @15dig) | now: honest ERR (residual 1.455 vs gate 4.6e-4) |
+| 0.0653281554868594 | 0.025 | 48.013 | 0 | was: RC=0 garbage (−4.31+7.57i @10dig, −20.10+11.87i @15dig) | ERR; normalization/full requested boundary target required |
 | 0.0653281554868594 | 0.05 | any swept | 0 | OK (Schröder, |λ|=0.978) | 1015-point sweep, zero errors |
 
 ### A.2 The t860 "canonical value" was a discretization artifact (pseudo-verification uncovered)
@@ -124,7 +103,7 @@ the agreement was a discretization fingerprint, not verification
 (pseudo-verification by shared ancestry). There is currently **no**
 independently verified value of tetration at this base.
 
-Two structural facts uncovered en route:
+Two historical numerical observations:
 
 1. **Phantom residual component.** The left-edge integrand `log_b F` built
    with the pointwise *principal* log mis-branches for this base and pins the
@@ -133,38 +112,38 @@ Two structural facts uncovered en route:
    remaining 9.5e-4 is scale-invariant in node count (9.496e-4 @ n=4096,
    9.503e-4 @ n=8192) and spatially broad (median 5.1e-4 across all 4094
    interior nodes, peak at t ≈ −3.1) — a genuine continuous-level
-   obstruction, not discretization noise. The strip geometry chosen by the
+   obstruction candidate, not a proof excluding discretization error. The strip geometry chosen by the
    W_k search (`k = −1`, `L_upper = 0.30+0.30i`, `L_lower = 2.26−0.41i`)
-   admits no solution of the rectangle Cauchy equation at this tolerance:
-   likely F has a zero/branch-point inside the strip (`|F|` dips to 0.44 at
-   t ≈ +44 on the sample line) so the left edge `log_b F` crosses a cut.
+   did not yield a converged solution at this tolerance. A zero/branch-point
+   is one possible diagnosis, but a sampled `|F|≈0.44` and a persistent
+   residual do not prove an in-strip zero or nonexistence of a solution.
 2. **Solver response.** `setup_kouznetsov` now retries a gate-rejected solve
    with the two-sided unwrap before refusing (kills phantom-only stalls at
-   zero risk: the retry must independently pass the gate). For b = −0.8+0.4i
+   the retry must also pass the gate). For b = −0.8+0.4i
    both attempts stall → honest ERR listing both residuals.
 
-t860/t852 were rewritten to honesty semantics: `Ok ⇒` symmetry/FE verified
-to ≥15 digits, `Err ⇒` must be the parabolic-band-stall/unsupported error
-(and the conjugate base must refuse symmetrically). Producing the old
-"canonical" number would now be a *bug*. Genuine coverage of such bases
-needs either a Paulsen-style non-rectangular contour that avoids the
-in-strip zero of F, or a two-fixed-point merged expansion — both research
-items (see README § 8).
+t860 now requires explicit refusal of the known unverified case and its
+conjugate; independently supported cases must succeed. t852 likewise
+distinguishes supported unit-circle directions from a known refusal.
+Neither accepts an arbitrary error or a plausible symmetric value as proof
+of correctness. Alternative contours and merged-fixed-point methods are
+research directions, not established repairs for a proven in-strip zero.
 
 ---
 
-## B. Negative real bases  (b ∈ ℝ, b < 0)   — **RESOLVED**
+## B. Negative real bases (b ∈ ℝ, b < 0) — **NOT generally verified**
 
-All negative real bases route to Newton-Kantorovich Kouznetsov and
-converge. They just need longer timeouts than real-positive bases:
+October regression: at `b=-2, h=0.4+0.1i`, 10-digit direct attempts stall
+around `1e-9`, above the `1e-13` boundary target, and must return an error.
+The old three-digit FE agreement was not a ten-digit result.
+
+Historical relaxed-gate timings, **not current success guarantees**:
 - b ∈ [-1.6, -0.4]: 82–137s at 20 digits
 - b ∈ [-3.6, -2.0]: 38–540s at 20 digits
 - b ≈ -0.5, -0.99, -1: similar to neighbours (confirmed entering LM with valid W_k pair)
 
-The 19^4 old grid (step=0.4) showed all of {-0.4, -0.8, -1.2, -1.6, -2.0, -2.4, -2.8,
--3.2, -3.6} work with ok=360 and 0 errors. The FAILURE_CASES.md entries were based
-on an older 90s timeout before the Newton-Kantorovich solver was tuned; they no longer
-represent failures.
+The old grid's zero-error counts and "entered LM" observations did not
+independently establish returned accuracy or successful convergence.
 
 | b_re | b_im | h_re | h_im | mode | time |
 |---|---|---|---|---|---|
@@ -176,13 +155,14 @@ represent failures.
 
 ---
 
-## C. Pure-imaginary bases  (b = i·y, y ≠ 0)   — **RESOLVED**
+## C. Pure-imaginary bases (b = i·y, y ≠ 0) — **PARTIAL numerical coverage**
 
-All pure-imaginary bases are covered:
+Base `i` now has independent 50/70-digit regular-iteration witnesses.
+The following broader August observations were not revalidated as a class:
 - `y > 0`, `|y| ≤ 1.3` → Schröder (Shell-Thron interior, fast).
 - `y > 0`, `|y| ≥ 1.4` → Newton-Kouznetsov. Converges, just **slow**
   (3–6 min at 20 digits). Initial "HANG" diagnosis was a short-timeout
-  artifact; the LM does converge to the correct Kneser solution.
+  artifact in those runs; convergence alone does not identify the canonical solution.
   The old 19^4 grid confirmed: b=(0,2i) ok in 288s, b=(0,3.2i) in 316s,
   b=(0,3.6i) in 293s, all 360 heights, 0 errors.
 - `y < 0` → **Schwarz reflection** to `b=0+|y|i` (same as y>0 path).
@@ -199,16 +179,16 @@ All pure-imaginary bases are covered:
 
 ---
 
-## D. Complex bases far from real axis  — **RESOLVED** (Im(b)≥0; Im(b)<0 covered by Schwarz)
+## D. Complex bases far from real axis — **historical observations, not class-wide coverage**
 
 `b = a + bi` with large `|Im(b)|` relative to `|Re(b)|`. The Newton-
-Kouznetsov path converges quadratically for Im(b)≥0 cases once past the
+Kouznetsov path historically showed quadratic convergence in selected Im(b)≥0 cases once past the
 initial linear-descent phase (≥3-min at 20 digits). For Im(b)<0, the
 **Schwarz reflection** `F_b(h) = conj(F_{b̄}(h̄))` reduces to Im(b)>0.
 
 **Fix** (`dispatch.rs`): at entry, when Im(b)<0, dispatch via conjugate
 base and conjugate height, then conjugate the result. This is an exact
-mathematical identity for the canonical Kneser tetration, not an approximation.
+branch convention used by the dispatcher; it does not validate the upper-half-plane answer.
 
 | b_re | b_im | h_re | h_im | mode |
 |---|---|---|---|---|
@@ -221,7 +201,12 @@ mathematical identity for the canonical Kneser tetration, not an approximation.
 
 ---
 
-## E. Large positive real bases  (b ≫ e^(1/e))   — **RESOLVED**
+## E. Large positive real bases (b ≫ e^(1/e)) — **selected regressions**
+
+October: finite `F_100(1.5)` and `F_1000(1.5)` were wrongly rejected because
+their auxiliary successors overflowed. The FE check now uses a predecessor
+where possible, preserving finite requested values. The 10-digit regressions
+pass; the historical values below are not independent 20-digit certificates.
 
 Previously the LM/GMRES solver got stuck for large `|ln b|` because the
 initial guess `target_mid = √b` sat far from the converged Kneser
@@ -244,10 +229,20 @@ descent phase grows with b before Newton kicks in).
 
 ---
 
-## F. Real base b = 2 (the canonical case the user flagged)   — **RESOLVED**
+## F. Real base b = 2 — **independent 50-digit witness; explicit higher-precision limit**
 
-`b = 2` sits in the `|λ| ≈ 1.23` regime. Every probed `h` (real, complex,
-positive, negative, integer, non-integer) now converges. Same fix as
+At `h=0.5`, the October 50-digit result
+`1.4587818160364217006839716610385871352966066053309` differs relatively by
+`4.90e-51` from the independent fatou.gp reference. The old
+`1.4587818160364217112` anchor below is inaccurate after about 16 digits.
+
+At 70 digits direct setup requests 65536 nodes, above its 32768 budget.
+The 1800-second CLI run timed out during continuation from the `b=2.35`
+anchor, not after reaching `b=2`. No 70-digit base-2 accuracy claim follows.
+Node-budget failure is not mathematical nonexistence or proof that Abel
+theory is needed; t965 checks that distinction at 70/1000 digits.
+
+Historical observations: `b=2` sits in the `|λ|≈1.23` regime. Same old seed fix as
 Class E: smooth target_mid cap + LM max_iters=80. Previously rejected
 as HANG because the 90s probe timeout caught it mid-descent — actual
 convergence completes in ~110-180s at 20 digits.
@@ -266,9 +261,12 @@ convergence completes in ~110-180s at 20 digits.
 
 ## G. Negative integer heights (well-defined ill-cases)
 
-Mathematically undefined past `h = -1`: `F(-1) = 0`, `F(-2) = log_b(0)`.
+For nondegenerate bases, the selected recurrence is undefined past `h=-1`:
+`F(-1)=0`, `F(-2)=log_b(0)`. Base one is the constant-function exception.
 Currently errors cleanly — kept here so the implementing AI does **not**
-attempt to silently extend.
+attempt to silently extend. Cached evaluators enforce the same domain:
+otherwise roundoff in `F(-1)` can turn `log(0)` into a plausible finite value
+(reproduced for cached `b=0.5,h=-2`; fixed in the October audit).
 
 | b_re | b_im | h_re | h_im | mode |
 |---|---|---|---|---|
@@ -297,14 +295,15 @@ the 0/1 alternation). Currently ERRs — keep that contract.
 
 ---
 
-## I. Silent-corruption cases — **NOW CAUGHT BY FUNCTIONAL-EQUATION POST-CHECK**
+## I. Silent-corruption cases — **consistency checks, not accuracy proofs**
 
 Schröder's `tetrate_schroder` was producing wrong numbers without warning
 when the σ̃ Taylor series's heuristic `safe_radius` exceeded its true radius
 of convergence (this happens for real bases just below η, where `|λ| → 1`).
 
 Resolved: every Schröder result is now post-validated via
-`|F(h+1) − b^F(h)| / max(|F(h+1)|, 1) < 1e-6`. Failure → clean error.
+`|F(h+1) − b^F(h)| / max(|F(h+1)|,1)` against a working-precision MPFR
+tolerance, not a fixed `1e-6` floor. Failure is an error; passing is not proof.
 
 ### I.1 Schröder near-η — now ERR (was WRONG)
 
@@ -330,8 +329,7 @@ Schröder's σ̃-shift can collapse to F(z)=L (the trivial fixed-point
 solution): `b^L=L` makes the functional-equation check pass trivially,
 so a separate anchor check `F(0)=1` is required to detect this.
 Resolved at `schroder.rs:tetrate_schroder` — every result is now
-anchor-validated via `|F(0) − 1| < 1e-6` before functional-equation
-post-validation.
+anchor-validated with a working-precision tolerance before FE validation.
 
 ---
 
@@ -341,16 +339,17 @@ post-validation.
 (any real base strictly between 0 and η_low = e^{-e} ≈ 0.0659880358…).
 
 **Mathematical status.** On this segment the real fixed point of `b^z` is
-repelling with λ real < −1 (period-doubling regime): **no real-analytic
-Kneser tetration exists**. The canonical value is *defined* here as the
-boundary limit `lim_{ε→0⁺} F(b+iε, h)` — the analytic continuation from the
+repelling with λ real < −1 (period-doubling regime). Pinch/zero diagnoses
+below are historical numerical hypotheses, not certified zeros or a global
+solvability argument. The intended experimental
+branch is the boundary limit `lim_{ε→0⁺} F(b+iε, h)`, where it exists — continuation from the
 upper half b-plane, consistent with the Schwarz-reflection convention this
-program uses for `Im(b) < 0`. It is genuinely **complex for non-integer real
-heights**. Any fallback that forces a real result (e.g. the Schwarz-folded
-iε-Richardson used on the parabolic band) is *invalid* here; the dispatcher
-routes every cut base to the ε-continuation walker from both regions that
+program uses for `Im(b)<0`. The selected regular branches are generally
+complex at noninteger real heights; forcing reality is not justified.
+After regular iteration fails, both dispatch regions that
 can contain one (`OutsideShellThronRealPositive` and `ShellThronBoundary`,
-see `dispatch.rs:tetrate_cut_base`).
+see `dispatch.rs:tetrate_cut_base`) route to the walker. This audit establishes
+neither equivalence of all selected branches with that limit nor a walker endpoint.
 
 **Why direct solves fail.** At the real base the germ-tracked fixed-point
 pair is (W₀, W₊₁) — *both* in the closed upper half-plane (the generic
@@ -364,8 +363,7 @@ warm-started LM solves, tracking the (W₀, W₊₁) germ. Machinery grown over
 ten walk campaigns at b = 0.04:
 
 * **Two-sided anchored log-unwrap** (`unwrapped_ln_samples`, `two_sided =
-  true` — cut walker ONLY; every other base class uses the pointwise
-  principal log, see section below): keeps the left-edge integrand
+  true` — also used by ordinary complex-base retries): tracks the left-edge integrand
   continuous when the sample curve crosses `(−∞, 0]`, which it always does
   near the cut (`L_low` has `Re < 0`).
 * **Shell-Thron crossing wall** (ε ≈ 1.55 → ≈ 1.0 at b = 0.04): the walk
@@ -412,9 +410,9 @@ ten walk campaigns at b = 0.04:
   (1.5 %) steps — immediately jump-eligible, ~1 solve per band step instead
   of fail → bisect cascades.
 
-**Verified working baseline** (20 digits): `b = −0.8+0.4i` (general complex,
-regression witness for the two_sided split) →
-`0.70282898263600754292 + 0.82145795139882997129i`.
+**Retracted baseline:** the former `b=−0.8+0.4i` value
+`0.70282898263600754292+0.82145795139882997129i` was a discretization
+artifact, not a working baseline. See A.2.
 
 **Honest limits / open items:**
 
@@ -422,15 +420,17 @@ regression witness for the two_sided split) →
   (b = 0.04). Shallow bases (0.05, 0.06) cross a thinner wall.
 * At `b = 0.04 + 2i` with complex heights, an older reference value
   (`0.1772+0.4972i` for h = 0.04+2i-related grids) proved **grid-dependent
-  and invalid**; only FE-validated values are quotable.
+  and invalid**; FE agreement alone cannot validate a replacement value.
 * If every attempt at a band step fails the gate, the walk fails honestly
   ("bisection floor reached") rather than continuing on a suspect state.
 
 ---
 
-## Working baseline (for reference / regression checks)
+## Historical comparison list (not a present-day pass contract)
 
-These currently succeed and should remain green.
+Use the independently sourced fixtures in phase10 and explicit refusal
+contracts instead. This list preserves historical observations, not
+certified digits or current success for every row.
 
 | b_re | b_im | h_re | h_im | result |
 |---|---|---|---|---|
@@ -445,29 +445,15 @@ These currently succeed and should remain green.
 | 2 | 0 | 0.5 | 0 | 1.4587818160364217112 |
 | 100000 | 0 | 0.5 | 0 | 12.387261344067895865 |
 | 3000 | 0 | 0.5 | 0 | 7.6097169725553975773 |
-| -2 | 0 | 0.5 | 0 | 0.0484014042…+0.3116188934…i |
-| -0.8 | 0.4 | 0.5 | 0 | 0.70282898263600754292+0.82145795139882997129i (relaxed-gate best-effort; accuracy-warning expected) |
+| -2 | 0 | 0.5 | 0 | old low-accuracy output is not a verified reference |
+| -0.8 | 0.4 | 0.5 | 0 | old value retracted; explicit refusal required |
 
 ---
 
-## Priority ranking for the implementing AI
+## Research priorities after the correctness audit
 
-1. **I.1 (Schröder near-η silent corruption)** — produces wrong numbers
-   without warning across `b ∈ [1.440, 1.443]` (and likely a wider band at
-   higher precision). Either tighten dispatcher to `|λ| < 0.85` *or* add
-   functional-equation post-check `|F(z+1) − b^F(z)| < ε` and error on
-   failure. **This is the only silent-correctness bug — fix first.**
-2. **F (b = 2 non-integer h)** — user explicitly cited this; canonical "outside
-   Shell-Thron, real base just past η" failure. Fix here typically generalizes
-   to E (large real bases).
-3. **E (large real bases)** — same algorithm class as F but stresses initial
-   guess / contour height scaling. Includes I.2 (`b=50` returning inf).
-4. **A (Shell-Thron boundary band)** — mathematically the hardest; needs
-   parabolic-iteration theory (Écalle, Abel function), not just better solver
-   tuning. Possibly accept "unsupported" forever and document.
-5. **C (pure imaginary bases)** — small magnitudes already work, so this is a
-   matter of generalizing the working `b=0+0.5i` path.
-6. **D (general complex far from real)** — needs the Riemann mapping /
-   Schwarz-Christoffel conformal map originally proposed for the Paulsen path.
-7. **B (negative real bases)** — needs careful W_k branch selection; lower
-   priority because the function is multi-valued and convention-dependent.
+Investigate validated error/conditioning bounds, high-precision real-base
+methods, sectorial parabolic constructions, and controlled complex-base
+contours/limits. Preserve independent references and explicit branch/domain
+contracts. README §8.1 separates promising directions from proven coverage;
+none of these new constructions was implemented by this audit.

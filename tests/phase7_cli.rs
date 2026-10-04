@@ -44,10 +44,20 @@ fn t701_wrong_arg_count_exit_code_2() {
 fn t702_integer_height_two_to_three() {
     // 2^^3 = 2^(2^2) = 2^4 = 16.
     let out = run(&["50", "2", "0", "3", "0"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let (re, im) = parse_two_lines(&out.stdout);
     assert!(re.starts_with("16"), "expected 16.*, got {}", re);
-    assert_eq!(im.trim_start_matches('-').trim_start_matches('0').trim_start_matches('.').trim_start_matches('0'), "");
+    assert_eq!(
+        im.trim_start_matches('-')
+            .trim_start_matches('0')
+            .trim_start_matches('.')
+            .trim_start_matches('0'),
+        ""
+    );
 }
 
 #[test]
@@ -94,7 +104,11 @@ fn t707_schroder_path_cli() {
     // F_{√2}(0.5) ≈ 1.24362... (cross-check with Phase 4 tests).
     assert!(re.starts_with("1.243"), "got {}", re);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!stderr.contains("warning"), "unexpected warning: {}", stderr);
+    assert!(
+        !stderr.contains("warning"),
+        "unexpected warning: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -126,8 +140,16 @@ fn t709_debug_diagnostics() {
         .expect("spawn");
     assert!(out_verbose.status.success());
     let stderr = String::from_utf8_lossy(&out_verbose.stderr);
-    assert!(stderr.contains("tet:"), "expected default verbose output, got: {}", stderr);
-    assert!(stderr.contains("region = "), "expected region in verbose output, got: {}", stderr);
+    assert!(
+        stderr.contains("tet:"),
+        "expected default verbose output, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("region = "),
+        "expected region in verbose output, got: {}",
+        stderr
+    );
 
     let out_silent = Command::new(binary_path())
         .args(["20", "1.4142135623730950488", "0", "0.5", "0"])
@@ -144,41 +166,65 @@ fn t709_debug_diagnostics() {
 }
 
 #[test]
-fn t710_boundary_band_iperturbation_fallback() {
-    // Base on the parabolic Shell-Thron boundary band (|λ| ≈ 1) — Schröder is
-    // unreliable there and direct/continuation Kouznetsov hit the parabolic
-    // n_nodes cap. The dispatcher falls back to an iε-perturbation Richardson
-    // extrapolation: it tetrates at b+0.1i and b+0.05i (which take the
-    // OutsideShellThronGeneral / Kouznetsov path successfully) and combines
-    // them as (4·F(ε/2) − F(ε))/3 to cancel the O(ε²) leading error of the
-    // even part, with the odd imaginary part collapsing to zero. Practical
-    // reach is roughly 6 digits, far short of the requested precision but
-    // enough for the CLI to deliver a real-valued answer instead of failing.
-    // b ≈ η = e^(1/e) ≈ 1.4446679 is the canonical parabolic point.
+fn t710_boundary_band_refuses_unvalidated_extrapolation() {
     let out = run(&["20", "1.444667861009766", "0", "0.5", "0"]);
-    assert!(out.status.success(), "expected success, got exit={:?}, stderr={}",
-            out.status.code(), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "an unsupported request must not emit surrogate values"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("iε-perturbation") || stderr.contains("parabolic-boundary fallback"),
-        "expected iε-perturbation warning, stderr: {}",
-        stderr
-    );
-    // Output should be a real tetration value near 1.257 (the empirical
-    // e^^(0.5) limit value at b=η).
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 2, "expected re/im output, got: {}", stdout);
-    let re: f64 = lines[0].parse().expect("re parse");
-    let im: f64 = lines[1].parse().expect("im parse");
-    assert!(
-        (re - 1.257).abs() < 0.01,
-        "expected Re ≈ 1.257, got {}",
-        re
-    );
-    assert!(
-        im.abs() < 1e-10,
-        "expected Im ≈ 0 (Schwarz cancellation), got {}",
-        im
-    );
+    assert!(stderr.contains("unsupported case"), "{stderr}");
+}
+
+#[test]
+fn t711_long_decimal_inputs_preserve_exact_domains() {
+    for digits in [1, 10, 50, 70, 1000] {
+        let zeros = "0".repeat(digits + 100);
+        let precision = digits.to_string();
+        let near_one = format!("1.{zeros}1");
+        let odd = format!("1{zeros}1");
+        let fractional = format!("2.{zeros}1");
+        for (base, height, valid) in [
+            (near_one.as_str(), "-1", true),
+            ("0", odd.as_str(), true),
+            ("0", fractional.as_str(), false),
+        ] {
+            let mut serial_stdout = None;
+            for parallel in [false, true] {
+                let mut command = Command::new(binary_path());
+                command.args(["--quiet", &precision, base, "0", height, "0"]);
+                if parallel {
+                    command.env("TET_MT", "4").env("RAYON_NUM_THREADS", "4");
+                } else {
+                    command.env_remove("TET_MT").env_remove("RAYON_NUM_THREADS");
+                }
+                let out = command.output().expect("spawn");
+                if valid {
+                    assert!(out.status.success(), "{out:?}");
+                    assert_eq!(out.stdout, b"0\n0\n");
+                    assert!(out.stderr.is_empty(), "{out:?}");
+                } else {
+                    assert_eq!(out.status.code(), Some(1), "{out:?}");
+                    assert!(out.stdout.is_empty(), "{out:?}");
+                    assert!(
+                        String::from_utf8_lossy(&out.stderr).contains(
+                            "tetration of 0 is only defined for non-negative integer heights"
+                        ),
+                        "{out:?}"
+                    );
+                }
+                if let Some(serial) = &serial_stdout {
+                    assert_eq!(&out.stdout, serial);
+                } else {
+                    serial_stdout = Some(out.stdout);
+                }
+            }
+        }
+    }
 }

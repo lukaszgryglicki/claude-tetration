@@ -2,7 +2,7 @@ use std::env;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-Usage: tet <precision_digits> <base_re> <base_im> <height_re> <height_im>
+Usage: tet [--quiet|--silent|-q] <precision_digits> <base_re> <base_im> <height_re> <height_im>
 
   Computes complex tetration F_b(h), where F_b(0) = 1 and F_b(z+1) = b^F_b(z).
 
@@ -16,9 +16,9 @@ Output (on stdout):
 
 Diagnostics:
   Algorithm choice and per-iteration diagnostics print to stderr by
-  default. Set SILENT=1 (or t/true/y/yes/on) in the environment to
-  suppress all stderr output and produce only the final result on
-  stdout.
+  default. Use --quiet, --silent or -q, or set SILENT=1 (also
+  t/true/y/yes/on), to suppress progress diagnostics. Fatal errors
+  still print to stderr and exit with nonzero status.
 
 Examples:
   tet 50 2 0 3 0          # 2^^3 = 16, 50 digits
@@ -27,11 +27,13 @@ Examples:
 ";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().collect();
-
-    // Opt-in MT mode: builds a fixed-size rayon pool when TET_MT >= 2.
-    // With TET_MT unset/0/1 this is a no-op.
-    tetration::mt::init_pool();
+    let mut args: Vec<String> = env::args().collect();
+    let quiet = args
+        .iter()
+        .skip(1)
+        .any(|arg| matches!(arg.as_str(), "--quiet" | "--silent" | "-q"));
+    args.retain(|arg| !matches!(arg.as_str(), "--quiet" | "--silent" | "-q"));
+    tetration::cnum::set_quiet(quiet);
 
     if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
         print!("{}", USAGE);

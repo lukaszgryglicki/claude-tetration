@@ -17,13 +17,12 @@
 //!   b_re  b_im  h_re  h_im  status  result_re  result_im  elapsed_secs  error
 //!
 //! status ∈ {ok, undef, error}.
-//!   * `ok`      — algorithm produced a value at requested precision.
+//!   * `ok`      — algorithm returned a finite value after its numerical checks,
+//!     not an independent precision or uniqueness certificate.
 //!   * `undef`   — cell lies in a mathematically-undefined domain
 //!     (b=0 with non-integer height; h ≤ −2 integer where
 //!     F(h) would require log_b(0)). Not an algorithm failure.
-//!   * `error`   — algorithm failed to produce a value despite the cell
-//!     being well-defined; the error column carries the
-//!     one-line reason.
+//!   * `error`   — this implementation failed; existence is not inferred.
 //!
 //! Progress (stderr): one line per base summarizing OK / ERROR counts and
 //! per-base wall time.
@@ -34,55 +33,76 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rayon::prelude::*;
-use rug::{Complex, Float};
-use tetration::{cnum, dispatch, integer_height, kouznetsov, regions, schroder};
+use rug::{ops::Pow, Complex, Float, Integer, Rational};
+use tetration::{cnum, dispatch, kouznetsov, regions, schroder};
+
+const MAX_GRID_CELLS: usize = 1_000_000;
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!(
-            "usage: grid_runner <digits> [step] [b_re_lo b_re_hi b_im_lo b_im_hi h_re_lo h_re_hi h_im_lo h_im_hi]"
-        );
-        std::process::exit(2);
+    if let Err(error) = run() {
+        eprintln!("error: {error}");
+        std::process::exit(1);
     }
+}
 
-    let digits: u64 = args[1].parse().expect("digits must be a positive integer");
-    let step: f64 = if args.len() >= 3 { args[2].parse().expect("bad step") } else { 0.4 };
-    let parse_or = |idx: usize, default: f64| -> f64 {
-        if args.len() > idx { args[idx].parse().unwrap_or(default) } else { default }
-    };
-    let b_re_lo = parse_or(3, -3.6);
-    let b_re_hi = parse_or(4, 3.6);
-    let b_im_lo = parse_or(5, -3.6);
-    let b_im_hi = parse_or(6, 3.6);
-    let h_re_lo = parse_or(7, -3.6);
-    let h_re_hi = parse_or(8, 3.6);
-    let h_im_lo = parse_or(9, -3.6);
-    let h_im_hi = parse_or(10, 3.6);
-
-    let prec = cnum::digits_to_bits(digits);
-    let b_re_axis = build_axis(b_re_lo, b_re_hi, step);
-    let b_im_axis = build_axis(b_im_lo, b_im_hi, step);
-    let h_re_axis = build_axis(h_re_lo, h_re_hi, step);
-    let h_im_axis = build_axis(h_im_lo, h_im_hi, step);
-    let n_dec = axis_decimals(step);
-
-    let total_bases = b_re_axis.len() * b_im_axis.len();
-    let total_heights = h_re_axis.len() * h_im_axis.len();
-    let total_cells = total_bases * total_heights;
-
-    eprintln!(
-        "grid_runner: digits={}, step={}, bases={}×{}={}, heights={}×{}={}, total={} cells",
+fn run() -> Result<(), String> {
+    let mut args: Vec<String> = env::args().collect();
+    let quiet = args
+        .iter()
+        .skip(1)
+        .any(|s| matches!(s.as_str(), "--quiet" | "--silent" | "-q"));
+    args.retain(|s| !matches!(s.as_str(), "--quiet" | "--silent" | "-q"));
+    cnum::set_quiet(quiet);
+    if !(2..=11).contains(&args.len()) {
+        return Err("usage: grid_runner [--quiet] <digits> [step] [b_re_lo b_re_hi b_im_lo b_im_hi h_re_lo h_re_hi h_im_lo h_im_hi]".into());
+    }
+    let digits = args[1]
+        .parse::<u64>()
+        .map_err(|e| format!("invalid digits: {e}"))?;
+    let prec = cnum::checked_input_precision(
         digits,
-        step,
-        b_re_axis.len(),
-        b_im_axis.len(),
-        total_bases,
-        h_re_axis.len(),
-        h_im_axis.len(),
-        total_heights,
-        total_cells
-    );
+        &args[2..].iter().map(String::as_str).collect::<Vec<_>>(),
+    )?;
+    tetration::mt::init_pool()?;
+    let arg =
+        |idx: usize, default: &'static str| args.get(idx).map(String::as_str).unwrap_or(default);
+    let step = arg(2, "0.4");
+    let b_re_axis = build_axis(arg(3, "-3.6"), arg(4, "3.6"), step, prec)?;
+    let b_im_axis = build_axis(arg(5, "-3.6"), arg(6, "3.6"), step, prec)?;
+    let h_re_axis = build_axis(arg(7, "-3.6"), arg(8, "3.6"), step, prec)?;
+    let h_im_axis = build_axis(arg(9, "-3.6"), arg(10, "3.6"), step, prec)?;
+    let total_bases = b_re_axis
+        .len()
+        .checked_mul(b_im_axis.len())
+        .ok_or("grid size overflow")?;
+    let total_heights = h_re_axis
+        .len()
+        .checked_mul(h_im_axis.len())
+        .ok_or("grid size overflow")?;
+    let total_cells = total_bases
+        .checked_mul(total_heights)
+        .ok_or("grid size overflow")?;
+    if total_cells > MAX_GRID_CELLS {
+        return Err(format!(
+            "grid exceeds the {MAX_GRID_CELLS}-cell resource limit"
+        ));
+    }
+    let integer_heights_only = h_im_axis.iter().all(|v| v.value.is_zero())
+        && h_re_axis.iter().all(|v| v.value.is_integer());
+    if cnum::verbose() {
+        eprintln!(
+            "grid_runner: digits={}, step={}, bases={}×{}={}, heights={}×{}={}, total={} cells",
+            digits,
+            step,
+            b_re_axis.len(),
+            b_im_axis.len(),
+            total_bases,
+            h_re_axis.len(),
+            h_im_axis.len(),
+            total_heights,
+            total_cells
+        );
+    }
 
     // Per-base buffers are pushed through a Mutex-guarded shared stdout sink;
     // we hold the lock only briefly per base, not per cell.
@@ -94,16 +114,15 @@ fn main() {
             g,
             "b_re\tb_im\th_re\th_im\tstatus\tresult_re\tresult_im\telapsed_secs\terror"
         )
-        .ok();
-        g.flush().ok();
+        .map_err(|e| format!("write grid header: {e}"))?;
+        g.flush().map_err(|e| format!("flush grid header: {e}"))?;
     }
 
     // Build the full base list so rayon can distribute across cores. Each
     // base is independent — its cache is per-base — so we parallelize the
     // OUTER loop and process each base's heights serially in the worker.
-    let bases: Vec<(f64, f64)> = b_re_axis
-        .iter()
-        .flat_map(|&r| b_im_axis.iter().map(move |&i| (r, i)))
+    let bases: Vec<(usize, usize)> = (0..b_re_axis.len())
+        .flat_map(|r| (0..b_im_axis.len()).map(move |i| (r, i)))
         .collect();
 
     let total_ok = Arc::new(Mutex::new(0usize));
@@ -112,32 +131,39 @@ fn main() {
     let bases_done = Arc::new(Mutex::new(0usize));
     let grid_start = Instant::now();
 
-    bases.par_iter().for_each(|&(b_re, b_im)| {
-        let b = Complex::with_val(prec, (Float::with_val(prec, b_re), Float::with_val(prec, b_im)));
-        let b_re_s = fmt_axis(b_re, n_dec);
-        let b_im_s = fmt_axis(b_im, n_dec);
+    let process_base = |&(re_idx, im_idx): &(usize, usize)| -> Result<(), String> {
+        let b_re = &b_re_axis[re_idx];
+        let b_im = &b_im_axis[im_idx];
+        let b = Complex::with_val(prec, (&b_re.value, &b_im.value));
+        let b_re_s = &b_re.text;
+        let b_im_s = &b_im.text;
         let base_t0 = Instant::now();
-        let cache = build_cache(&b, prec, digits);
+        let cache = if integer_heights_only {
+            BaseCache::DispatchFallback
+        } else {
+            build_cache(&b, prec, digits)
+        };
         let mut base_ok: usize = 0;
         let mut base_undef: usize = 0;
         let mut base_err: usize = 0;
         // Buffer this base's rows; flush once at the end so output stays grouped.
         let mut buf: Vec<u8> = Vec::with_capacity(h_re_axis.len() * h_im_axis.len() * 80);
-        for &h_re in &h_re_axis {
-            let h_re_s = fmt_axis(h_re, n_dec);
-            for &h_im in &h_im_axis {
-                let h_im_s = fmt_axis(h_im, n_dec);
-                let h = Complex::with_val(prec, (Float::with_val(prec, h_re), Float::with_val(prec, h_im)));
+        for h_re in &h_re_axis {
+            let h_re_s = &h_re.text;
+            for h_im in &h_im_axis {
+                let h_im_s = &h_im.text;
+                let h = Complex::with_val(prec, (&h_re.value, &h_im.value));
                 // Domain pre-check — these are not algorithm failures, they
                 // are mathematically-undefined cells. Tag them with status
                 // `undef` so they don't pollute the algorithm-error count.
                 if let Some(reason) = domain_undefined(&b, &h) {
                     use std::io::Write as _;
-                    let _ = writeln!(
+                    writeln!(
                         &mut buf,
                         "{}\t{}\t{}\t{}\tundef\t\t\t0.0000\t{}",
                         b_re_s, b_im_s, h_re_s, h_im_s, reason
-                    );
+                    )
+                    .map_err(|e| format!("buffer grid row: {e}"))?;
                     base_undef += 1;
                     continue;
                 }
@@ -148,21 +174,23 @@ fn main() {
                     Ok(v) => {
                         let (re_str, im_str) = cnum::format_complex(&v, digits as usize);
                         use std::io::Write as _;
-                        let _ = writeln!(
+                        writeln!(
                             &mut buf,
                             "{}\t{}\t{}\t{}\tok\t{}\t{}\t{:.4}\t",
                             b_re_s, b_im_s, h_re_s, h_im_s, re_str, im_str, elapsed
-                        );
+                        )
+                        .map_err(|e| format!("buffer grid row: {e}"))?;
                         base_ok += 1;
                     }
                     Err(why) => {
                         let one = first_line(&why);
                         use std::io::Write as _;
-                        let _ = writeln!(
+                        writeln!(
                             &mut buf,
                             "{}\t{}\t{}\t{}\terror\t\t\t{:.4}\t{}",
                             b_re_s, b_im_s, h_re_s, h_im_s, elapsed, one
-                        );
+                        )
+                        .map_err(|e| format!("buffer grid row: {e}"))?;
                         base_err += 1;
                     }
                 }
@@ -174,8 +202,9 @@ fn main() {
             let _guard = out_mutex.lock().unwrap();
             let stdout = io::stdout();
             let mut g = stdout.lock();
-            g.write_all(&buf).ok();
-            g.flush().ok();
+            g.write_all(&buf)
+                .map_err(|e| format!("write grid rows: {e}"))?;
+            g.flush().map_err(|e| format!("flush grid rows: {e}"))?;
         }
         {
             let mut t_ok = total_ok.lock().unwrap();
@@ -201,31 +230,46 @@ fn main() {
             *total_undef.lock().unwrap(),
             *total_err.lock().unwrap(),
         );
-        eprintln!(
+        if cnum::verbose() {
+            eprintln!(
             "[{}/{}] b=({:>+6},{:>+6}i)  cache={:<10} ok={} undef={} err={}  base_t={:.1}s  wall={:.0}s  ok_so_far={} undef_so_far={} err_so_far={}",
             done, total_bases, b_re_s, b_im_s, cache.kind_label(),
             base_ok, base_undef, base_err, base_elapsed, total_elapsed,
             snap_ok, snap_undef, snap_err,
         );
-    });
+        }
+        Ok(())
+    };
+    if tetration::mt::mt_enabled() {
+        bases.par_iter().try_for_each(process_base)?;
+    } else {
+        bases.iter().try_for_each(process_base)?;
+    }
 
     let final_ok = *total_ok.lock().unwrap();
     let final_undef = *total_undef.lock().unwrap();
     let final_err = *total_err.lock().unwrap();
     let defined = total_cells - final_undef;
-    eprintln!(
-        "DONE: {} cells in {:.0}s — ok={} undef={} err={} ({:.2}% ok of {} defined)",
-        total_cells,
-        grid_start.elapsed().as_secs_f64(),
-        final_ok,
-        final_undef,
-        final_err,
-        if defined == 0 { 100.0 } else { 100.0 * (final_ok as f64) / (defined as f64) },
-        defined,
-    );
-    if final_err > 0 {
-        std::process::exit(1);
+    if cnum::verbose() {
+        eprintln!(
+            "DONE: {} cells in {:.0}s — ok={} undef={} err={} ({:.2}% ok of {} defined)",
+            total_cells,
+            grid_start.elapsed().as_secs_f64(),
+            final_ok,
+            final_undef,
+            final_err,
+            if defined == 0 {
+                100.0
+            } else {
+                100.0 * (final_ok as f64) / (defined as f64)
+            },
+            defined,
+        );
     }
+    if final_err > 0 {
+        return Err(format!("{final_err} grid cells could not be computed"));
+    }
+    Ok(())
 }
 
 /// Pre-flight check for cells that are mathematically undefined regardless of
@@ -239,60 +283,111 @@ fn main() {
 ///      = log_b(1) = 0. At n=2: F(−2) = log_b(F(−1)) = log_b(0) = −∞.
 ///      Beyond −1, the iterated logarithm chains through log(0), undefined.
 fn domain_undefined(b: &Complex, h: &Complex) -> Option<&'static str> {
-    if cnum::is_zero(b) {
-        // b=0 only defined for non-negative integer h.
-        match cnum::as_integer(h) {
-            Some(n) if n >= 0 => None,
-            _ => Some("b=0: tetration only defined for non-negative integer heights"),
-        }
-    } else if let Some(n) = cnum::as_integer(h) {
-        if n <= -2 {
-            Some("integer height ≤ −2: requires log_b(0) chain, undefined")
-        } else {
-            None
-        }
+    let integer = h.imag().is_zero() && h.real().is_integer();
+    if cnum::is_one(b) {
+        None
+    } else if cnum::is_zero(b) && !(integer && *h.real() >= 0) {
+        Some("b=0: tetration only defined for non-negative integer heights")
+    } else if !cnum::is_zero(b) && integer && *h.real() <= -2 {
+        Some("integer height <= -2: requires log_b(0), undefined")
     } else {
         None
     }
 }
 
-fn build_axis(lo: f64, hi: f64, step: f64) -> Vec<f64> {
-    let mut v = Vec::new();
-    let n = ((hi - lo) / step).round() as i64 + 1;
-    for i in 0..n {
-        // Build via i*step + lo so each axis value is a single multiplication
-        // away from clean. Then snap to step-multiple to wash away the FP
-        // accumulation drift that produces e.g. 2.0000000000000004 from
-        // -3.6 + 14*0.4.
-        let raw = lo + (i as f64) * step;
-        let snapped = (raw / step).round() * step;
-        v.push(if snapped.abs() < 1e-12 { 0.0 } else { snapped });
-    }
-    v
+struct AxisValue {
+    value: Float,
+    text: String,
 }
 
-/// Number of decimal places needed to faithfully display values on a `step`-
-/// spaced axis. step=0.4 → 1 decimal; step=0.04 → 2; step=1 → 0.
-fn axis_decimals(step: f64) -> usize {
-    if step >= 1.0 {
-        0
-    } else {
-        ((-step.log10()).ceil() as usize).min(10)
+fn scaled_decimal(text: &str) -> Result<(Integer, i64), String> {
+    let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
+    let exponent = exponent
+        .parse::<i64>()
+        .map_err(|e| format!("invalid axis exponent {text:?}: {e}"))?;
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let coefficient = format!("{whole}{fraction}");
+    let unsigned = coefficient.strip_prefix(['+', '-']).unwrap_or(&coefficient);
+    if unsigned.is_empty() || !unsigned.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("invalid decimal axis value {text:?}"));
     }
+    let scale = i64::try_from(fraction.len())
+        .map_err(|_| "axis decimal is too long")?
+        .checked_sub(exponent)
+        .ok_or("axis scale overflow")?;
+    if scale.unsigned_abs() > 1_000_000 {
+        return Err("axis decimal scale exceeds the 1000000-place resource limit".into());
+    }
+    let coefficient = Integer::from_str_radix(&coefficient, 10)
+        .map_err(|e| format!("invalid axis value {text:?}: {e}"))?;
+    Ok((coefficient, scale))
 }
 
-/// Format an axis value as a clean decimal string (no `2.4000000000000004`
-/// FP noise). Padding to `n_decimals` then trimming trailing zeros gives
-/// "2.4" / "0" / "-3" cleanly.
-fn fmt_axis(v: f64, n_decimals: usize) -> String {
-    let s = format!("{:.*}", n_decimals + 2, v);
-    // Trim trailing zeros, then a trailing decimal point if exposed.
-    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    if trimmed.is_empty() || trimmed == "-" {
-        "0".to_string()
-    } else {
-        trimmed.to_string()
+fn format_scaled(coefficient: &Integer, scale: usize) -> String {
+    if coefficient.is_zero() {
+        return "0".into();
     }
+    let digits = coefficient.clone().abs().to_string();
+    let mut text = if scale == 0 {
+        digits
+    } else if digits.len() <= scale {
+        format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
+    } else {
+        let split = digits.len() - scale;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    };
+    if scale != 0 {
+        text = text.trim_end_matches('0').trim_end_matches('.').to_owned();
+    }
+    if coefficient < &0 {
+        text.insert(0, '-');
+    }
+    text
+}
+
+fn build_axis(lo: &str, hi: &str, step: &str, prec: u32) -> Result<Vec<AxisValue>, String> {
+    let (lo, lo_scale) = scaled_decimal(lo)?;
+    let (hi, hi_scale) = scaled_decimal(hi)?;
+    let (step, step_scale) = scaled_decimal(step)?;
+    let scale = lo_scale.max(hi_scale).max(step_scale).max(0);
+    let lo = lo * Integer::from(10).pow((scale - lo_scale) as u32);
+    let hi = hi * Integer::from(10).pow((scale - hi_scale) as u32);
+    let step = step * Integer::from(10).pow((scale - step_scale) as u32);
+    if step <= 0 || hi < lo {
+        return Err("grid axes require a positive step and lo <= hi".into());
+    }
+    let coordinate_bits = lo.significant_bits().max(hi.significant_bits());
+    let count = ((hi - &lo) / &step + 1u32)
+        .to_usize()
+        .filter(|&n| n <= MAX_GRID_CELLS)
+        .ok_or("axis exceeds the grid resource limit")?;
+    if count
+        .checked_mul(
+            scale as usize
+                + coordinate_bits as usize
+                + (prec as usize).div_ceil(64) * 8
+                + std::mem::size_of::<AxisValue>()
+                + 32,
+        )
+        .is_none_or(|bytes| bytes > 128 * 1024 * 1024)
+    {
+        return Err("axis coordinate storage exceeds the 128 MiB resource budget".into());
+    }
+    let denominator = Integer::from(10).pow(scale as u32);
+    let mut axis = Vec::with_capacity(count);
+    for i in 0..count {
+        let coefficient = lo.clone() + &step * i;
+        let text = format_scaled(&coefficient, scale as usize);
+        let value = Float::with_val(
+            prec,
+            Rational::from((coefficient.clone(), denominator.clone())),
+        );
+        if !value.is_finite() || (value.is_zero() && !coefficient.is_zero()) {
+            return Err("grid coordinate exceeds MPFR's exponent range".into());
+        }
+        axis.push(AxisValue { value, text });
+    }
+    Ok(axis)
 }
 
 fn first_line(s: &str) -> String {
@@ -343,42 +438,30 @@ fn build_cache(b: &Complex, prec: u32, digits: u64) -> BaseCache {
     if cnum::is_zero(b) || cnum::is_one(b) {
         return BaseCache::SpecialBase;
     }
+    if b.imag().is_sign_negative() && !b.imag().is_zero() {
+        return BaseCache::DispatchFallback;
+    }
     let region = match regions::classify(b, prec) {
         Ok(r) => r,
         Err(_) => return BaseCache::DispatchFallback,
     };
     match &region {
         regions::Region::BaseZero | regions::Region::BaseOne => BaseCache::SpecialBase,
-        regions::Region::ShellThronInterior(d) => {
-            // Cache the σ̃ Taylor build so all heights in this base reuse it.
-            // If setup fails (e.g. σ̃-shift orbit hits a singularity), every
-            // cell would error with the same message; skip per-cell retry by
-            // using SetupError directly.
-            match schroder::setup_schroder(b, d, prec) {
-                Ok(state) => BaseCache::SchroderCached(state),
-                Err(e) => BaseCache::SetupError(format!("Schröder setup failed: {}", e)),
-            }
-        }
-        regions::Region::ShellThronBoundary(d)
-        | regions::Region::OutsideShellThronRealPositive(d)
-        | regions::Region::OutsideShellThronGeneral(d) => {
-            // ALWAYS try to set up Kouznetsov state for non-interior bases.
-            // The earlier "probe Schröder at h=0.5 and use dispatch per cell"
-            // strategy was unreliable: Schröder works for h near the fixed
-            // point but fails for far h (where |s1·λ^h| exceeds the σ̃ Taylor
-            // safe radius and the integer-shift mechanism saturates). Caching
-            // Kouznetsov state up front means every height in the grid is
-            // evaluated by the same cheap `eval_kouznetsov` call.
-            //
-            // If Kouznetsov setup fails for this base (degenerate fixed point
-            // pair, parabolic |arg(λ)|≈0, etc.), fall through to dispatch
-            // per cell as best-effort: dispatch will try Schröder first which
-            // may still cover some heights cleanly.
+        regions::Region::ShellThronInterior(d) => match schroder::setup_schroder(b, d, prec) {
+            Ok(state) => BaseCache::SchroderCached(state),
+            Err(e) => BaseCache::SetupErrorFallback(format!("Schröder setup failed: {}", e)),
+        },
+        regions::Region::OutsideShellThronRealPositive(d)
+            if b.imag().is_zero() && *b.real() > cnum::eta_upper(prec) =>
+        {
             match kouznetsov::setup_kouznetsov(b, d, prec, digits) {
                 Ok(state) => BaseCache::KouznetsovCached(state),
                 Err(e) => BaseCache::SetupErrorFallback(format!("kouznetsov setup failed: {}", e)),
             }
         }
+        // These routes have height-dependent fallbacks, continuation, or
+        // reflection rules; do not substitute a different cached family.
+        _ => BaseCache::DispatchFallback,
     }
 }
 
@@ -389,16 +472,167 @@ fn eval_cell(
     prec: u32,
     digits: u64,
 ) -> Result<Complex, String> {
-    // Integer heights short-circuit to direct iteration regardless of cache.
-    if let Some(n) = cnum::as_integer(h) {
-        return integer_height::tetrate_integer(b, n, prec);
+    if h.imag().is_zero() && h.real().is_integer() {
+        return dispatch::tetrate(b, h, prec, digits);
     }
-    match cache {
-        BaseCache::SpecialBase
-        | BaseCache::DispatchFallback
-        | BaseCache::SetupErrorFallback(_) => dispatch::tetrate(b, h, prec, digits),
+    let cached = match cache {
+        BaseCache::SpecialBase | BaseCache::DispatchFallback | BaseCache::SetupErrorFallback(_) => {
+            return dispatch::tetrate(b, h, prec, digits)
+        }
         BaseCache::SchroderCached(state) => schroder::eval_schroder(state, h),
         BaseCache::KouznetsovCached(state) => kouznetsov::eval_kouznetsov(state, b, h),
         BaseCache::SetupError(e) => Err(e.clone()),
+    };
+    match cached {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if cnum::verbose() {
+                eprintln!("grid cached evaluation failed; trying dispatcher: {error}");
+            }
+            dispatch::tetrate(b, h, prec, digits)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn axes_preserve_requested_origin_zeros_and_bounds() {
+        let prec = cnum::digits_to_bits(70);
+        let fixed = build_axis(
+            "0.050000000000000000000000000000000000000000000000000000000001",
+            "0.050000000000000000000000000000000000000000000000000000000001",
+            "0.4",
+            prec,
+        )
+        .unwrap();
+        assert_eq!(fixed.len(), 1);
+        assert_eq!(
+            fixed[0].text,
+            "0.050000000000000000000000000000000000000000000000000000000001"
+        );
+        assert_eq!(fixed[0].value, cnum::decimal(&fixed[0].text, prec));
+        let axis = build_axis("-0.3", "0.35", "0.1", prec).unwrap();
+        assert_eq!(
+            axis.iter().map(|v| v.text.as_str()).collect::<Vec<_>>(),
+            ["-0.3", "-0.2", "-0.1", "0", "0.1", "0.2", "0.3"]
+        );
+        assert!(axis[3].value.is_zero());
+        let tiny = build_axis("-1e-1000", "-1e-1000", "1", prec).unwrap();
+        assert_eq!(tiny[0].value, cnum::decimal("-1e-1000", prec));
+        assert_eq!(
+            cnum::parse_float(&tiny[0].text, prec).unwrap(),
+            tiny[0].value
+        );
+        assert_eq!(build_axis("+.5", "2.5e-0", "1e+0", prec).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn input_precision_preserves_axis_domains_and_parity() {
+        for digits in [1, 10, 50, 70, 1000] {
+            let zeros = "0".repeat((digits + 100) as usize);
+            let base = format!("1.{zeros}1");
+            let odd = format!("1{zeros}1");
+            let fractional = format!("2.{zeros}1");
+            let prec =
+                cnum::checked_input_precision(digits, &[&base, &odd, &fractional, "1"]).unwrap();
+            let base_axis = build_axis(&base, &base, "1", prec).unwrap();
+            let odd_axis = build_axis(&odd, &odd, "1", prec).unwrap();
+            let fractional_axis = build_axis(&fractional, &fractional, "1", prec).unwrap();
+            assert_eq!(base_axis[0].text, base);
+            assert_eq!(odd_axis[0].text, odd);
+            assert_eq!(fractional_axis[0].text, fractional);
+            let b = Complex::with_val(prec, (&base_axis[0].value, 0));
+            let h = Complex::with_val(prec, (&odd_axis[0].value, 0));
+            assert_eq!(
+                eval_cell(
+                    &BaseCache::DispatchFallback,
+                    &b,
+                    &Complex::with_val(prec, -1),
+                    prec,
+                    digits,
+                )
+                .unwrap(),
+                cnum::zero(prec)
+            );
+            assert_eq!(
+                eval_cell(&BaseCache::SpecialBase, &cnum::zero(prec), &h, prec, digits).unwrap(),
+                cnum::zero(prec)
+            );
+            let h = Complex::with_val(prec, (&fractional_axis[0].value, 0));
+            assert_eq!(
+                domain_undefined(&cnum::zero(prec), &h),
+                Some("b=0: tetration only defined for non-negative integer heights")
+            );
+        }
+    }
+
+    #[test]
+    fn axes_reject_invalid_and_unbounded_requests() {
+        let prec = cnum::digits_to_bits(50);
+        for (lo, hi, step) in [
+            ("0", "1", "0"),
+            ("0", "1", "-0.1"),
+            ("NaN", "1", "0.1"),
+            ("0", "inf", "0.1"),
+            ("1", "0", "0.1"),
+            ("0", "1", "bad"),
+            ("0", "1", "1e-1000"),
+            ("0", "1.2.3", "1"),
+            ("0", "1", "1e-9223372036854775808"),
+            ("0", "1e10000", "1e9995"),
+        ] {
+            assert!(build_axis(lo, hi, step, prec).is_err(), "{lo} {hi} {step}");
+        }
+        assert!(build_axis("0", "0", "1", u32::MAX).is_err());
+    }
+
+    #[test]
+    fn cached_and_degenerate_routes_match_dispatch() {
+        let digits = 50;
+        let prec = cnum::digits_to_bits(digits);
+        let h = cnum::parse_complex("0.4", "0.2", prec).unwrap();
+        let b = cnum::parse_complex("1.2", "0", prec).unwrap();
+        let cache = build_cache(&b, prec, digits);
+        assert_eq!(
+            eval_cell(&cache, &b, &h, prec, digits).unwrap(),
+            dispatch::tetrate(&b, &h, prec, digits).unwrap()
+        );
+        for (re, im) in [("1.2", "-0.1"), ("1.5", "0"), ("-2", "0"), ("0.05", "0")] {
+            let base = cnum::parse_complex(re, im, prec).unwrap();
+            assert!(matches!(
+                build_cache(&base, prec, digits),
+                BaseCache::DispatchFallback
+            ));
+        }
+        let negative = cnum::parse_complex("-1e1000", "0", prec).unwrap();
+        assert!(domain_undefined(&cnum::one(prec), &negative).is_none());
+        assert!(domain_undefined(&Complex::with_val(prec, 2), &negative).is_some());
+        assert_eq!(
+            eval_cell(
+                &BaseCache::SpecialBase,
+                &cnum::one(prec),
+                &negative,
+                prec,
+                digits
+            )
+            .unwrap(),
+            cnum::one(prec)
+        );
+        let even = cnum::parse_complex("1e60", "0", prec).unwrap();
+        assert!(domain_undefined(&cnum::zero(prec), &even).is_none());
+        assert_eq!(
+            eval_cell(
+                &BaseCache::SpecialBase,
+                &cnum::zero(prec),
+                &even,
+                prec,
+                digits
+            )
+            .unwrap(),
+            cnum::one(prec)
+        );
     }
 }

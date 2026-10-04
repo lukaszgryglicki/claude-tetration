@@ -11,7 +11,7 @@
 # for the raster hero (skipped with a note if missing).
 set -eu
 cd "$(dirname "$0")/.."
-P="python3 scripts/plot3d.py"
+P="python3 scripts/plot3d.py --break-negative-integers"
 D=docs/charts/data
 O=docs/charts
 
@@ -28,7 +28,7 @@ SUBALL='f(x) = b^^x at b + 0.05i, b/e^-e ∈ {0.99, 1.00, 1.01} — real heights
 $P --az 35 --el 18 $O/tet3d_b099eme_dense.svg \
   'Tetration below the cut: b = 0.99·e^-e' "$SUB99" "$C99:$L99"
 $P --az 35 --el 18 $O/tet3d_b100eme_dense.svg \
-  'Tetration at the boundary: b = e^-e' \
+  'Tetration with Re b = e^-e' \
   'f(x) = b^^x, b = e^-e + 0.05i, real heights x ∈ [-30, 120]' "$C100:$L100"
 $P --az 35 --el 18 $O/tet3d_b101eme_dense.svg \
   'Tetration just above e^-e: b = 1.01·e^-e' \
@@ -52,30 +52,31 @@ $P --az 0 --el 0 --xrange 2:120 $O/tet3d_triptych_endon_weave.svg \
   'The weave end-on, three bases' \
   'x ∈ [2, 120] down the x axis; the three spirals land on different fixed points' \
   "$C99:$L99" "$C100:$L100" "$C101:$L101"
-$P --az 0 --el 0 --xrange -30:-3 $O/tet3d_b099eme_endon_forest.svg \
-  'The pole forest, end-on: b = 0.99·e^-e' \
-  'x ∈ [-30, -3] down the x axis — nested pole loops' "$C99:$L99"
+$P --az 0 --el 0 --xrange=-30:-3 $O/tet3d_b099eme_endon_forest.svg \
+  'Negative-height singularities, end-on: Re b = 0.99·e^-e' \
+  'x ∈ [-30, -3] down the x axis — breaks at singular integer heights' "$C99:$L99"
 
 # ---- region close-ups (oblique)
 $P --az 30 --el 14 --xrange 2:40 $O/tet3d_b099eme_weave_closeup.svg \
   'Weave close-up: x ∈ [2, 40]' "$SUB99" "$C99:$L99"
-$P --az 42 --el 24 --xrange -9:0 $O/tet3d_b099eme_forest_closeup.svg \
-  'Pole-forest close-up: x ∈ [-9, 0]' "$SUB99" "$C99:$L99"
-$P --az 25 --el 12 --xrange -3:12 --dot-ends $O/tet3d_b099eme_seam.svg \
+$P --az 42 --el 24 --xrange=-9:0 $O/tet3d_b099eme_forest_closeup.svg \
+  'Singularity-region close-up: x ∈ [-9, 0]' "$SUB99" "$C99:$L99"
+$P --az 25 --el 12 --xrange=-3:12 --dot-ends $O/tet3d_b099eme_seam.svg \
   'The seam: x ∈ [-3, 12]' "$SUB99" "$C99:$L99"
 
 # ---- raster hero for sharing (FB): near-axial vortex view, high res
 if command -v rsvg-convert >/dev/null 2>&1; then
-  $P --az 14 --el 10 --xrange -4.5:120 --size 3000x1875 $O/tet3d_hero.svg \
+  $P --az 14 --el 10 --xrange=-4.5:120 --size 3000x1875 $O/tet3d_hero.svg \
     'Complex tetration f(x) = b^^x near the base boundary e^-e' \
     'complex base b = 0.99·e^-e + 0.05i, real heights x ∈ [-4.5, 120] — curve (x, Re F, Im F) seen nearly down the height axis: the period-2 spiral drains into the fixed point' \
     "$C99:$L99"
-  rsvg-convert -w 3000 $O/tet3d_hero.svg -o /tmp/tet3d_hero.png
+  TMP_HERO=$(mktemp)
+  trap 'rm -f "$TMP_HERO"' EXIT
+  rsvg-convert -w 3000 $O/tet3d_hero.svg -o "$TMP_HERO"
   if command -v magick >/dev/null 2>&1; then
-    magick /tmp/tet3d_hero.png -quality 94 $O/tet3d_hero.jpg
-    rm -f /tmp/tet3d_hero.png
+    magick "$TMP_HERO" -quality 94 $O/tet3d_hero.jpg
   else
-    mv /tmp/tet3d_hero.png $O/tet3d_hero.png
+    mv "$TMP_HERO" $O/tet3d_hero.png
   fi
 else
   echo "note: rsvg-convert missing — raster hero skipped"

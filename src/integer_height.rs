@@ -1,23 +1,36 @@
 //! Direct iteration for integer heights.
 //!
 //! For non-negative `n`: `F_b(0) = 1`, `F_b(n+1) = b^F_b(n)`.
-//! For `n = -1`: `F_b(-1) = 0` (the unique value that gives `F_b(0) = b^0 = 1`).
+//! For `n = -1`: `F_b(-1) = 0` by the principal backward-iteration convention.
 //! For `n ≤ -2`: undefined for general `b` (would require `log_b(0)` and beyond);
-//! we error out — see plan.
+//! degenerate bases have the separate conventions below.
 
 use rug::Complex;
 
 use crate::cnum;
 
-/// Maximum integer height we'll iterate to before refusing. The tower grows so
-/// fast that the result is astronomical past ~6, but precision-bounded so we
-/// allow up to a few thousand levels for users who want to see growth at high
-/// precision (each level costs one `b^x` which is one ln + one exp).
+/// Resource limit for direct iteration; individual steps can also exceed
+/// MPFR's exponent range.
 pub const MAX_INTEGER_HEIGHT: i64 = 100_000;
 
-/// Compute `F_b(n)` for integer `n` by direct iteration. Errors for `n ≤ -2`
-/// (undefined in general) and for `|n|` larger than `MAX_INTEGER_HEIGHT`.
+/// Compute `F_b(n)` by direct iteration. Nondegenerate bases refuse `n ≤ -2`
+/// and positive heights above `MAX_INTEGER_HEIGHT`.
 pub fn tetrate_integer(b: &Complex, n: i64, prec: u32) -> Result<Complex, String> {
+    if !cnum::is_finite(b) {
+        return Err("tetration base must be finite".into());
+    }
+    if cnum::is_one(b) {
+        return Ok(cnum::one(prec));
+    }
+    if cnum::is_zero(b) {
+        return if n < 0 {
+            Err("base zero is defined only for non-negative integer heights".into())
+        } else if n % 2 == 0 {
+            Ok(cnum::one(prec))
+        } else {
+            Ok(cnum::zero(prec))
+        };
+    }
     if n == 0 {
         return Ok(cnum::one(prec));
     }
@@ -36,9 +49,15 @@ pub fn tetrate_integer(b: &Complex, n: i64, prec: u32) -> Result<Complex, String
             n, MAX_INTEGER_HEIGHT
         ));
     }
-    let mut acc = cnum::one(prec);
-    for _ in 0..n {
-        acc = cnum::pow_complex(b, &acc, prec);
+    if b.imag().is_zero() && *b.real() == -1 {
+        return Ok(Complex::with_val(prec, b));
+    }
+    let ln_b = Complex::with_val(prec, b.ln_ref());
+    let mut acc = Complex::with_val(prec, b);
+    for level in 2..=n {
+        let argument = Complex::with_val(prec, &ln_b * &acc);
+        acc = cnum::checked_exp(&argument, prec)
+            .map_err(|e| format!("integer tower at height {}: {}", level, e))?;
     }
     Ok(acc)
 }

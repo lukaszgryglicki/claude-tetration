@@ -6,7 +6,7 @@
 //!   site takes its original serial branch, byte-for-byte the same code path
 //!   that shipped before MT mode existed. Nothing about the default build's
 //!   numerical behavior changes.
-//! * `1` — MT mode on, using rayon's default global pool (all logical cores).
+//! * `1` — MT mode on, using all available logical cores.
 //! * `n ≥ 2` — MT mode on with a global rayon pool of exactly `n` threads.
 //!
 //! # Bit-identical guarantee
@@ -22,39 +22,73 @@
 
 use std::sync::OnceLock;
 
-/// Parsed TET_MT setting: `None` = off, `Some(0)` = on with default pool,
-/// `Some(n)` = on with n threads.
-fn mt_setting() -> Option<usize> {
-    static SETTING: OnceLock<Option<usize>> = OnceLock::new();
-    *SETTING.get_or_init(|| {
-        let raw = std::env::var("TET_MT").ok()?;
+/// Frozen at first use, including parse errors.
+fn mt_setting() -> &'static Result<Option<usize>, String> {
+    static SETTING: OnceLock<Result<Option<usize>, String>> = OnceLock::new();
+    SETTING.get_or_init(|| {
+        let raw = match std::env::var("TET_MT") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return Ok(None),
+            Err(e) => return Err(format!("TET_MT: {e}")),
+        };
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return None;
+            return Ok(None);
         }
-        match trimmed.parse::<usize>() {
-            Ok(0) => None,
-            Ok(1) => Some(0),
-            Ok(n) => Some(n),
-            Err(_) => None,
+        let n = trimmed
+            .parse::<usize>()
+            .map_err(|e| format!("TET_MT: {e}"))?;
+        if n > rayon::max_num_threads() {
+            return Err(format!("TET_MT={n} exceeds Rayon's thread-count limit"));
         }
+        Ok(match n {
+            0 => None,
+            1 => Some(
+                std::thread::available_parallelism()
+                    .map_err(|e| format!("cannot determine the available thread count: {e}"))?
+                    .get(),
+            ),
+            n => Some(n),
+        })
     })
 }
 
 /// True iff MT mode is enabled (`TET_MT` = 1 or ≥ 2).
+/// Infallible low-level APIs panic on configuration errors; fallible entry
+/// points call `init_pool` first and return those errors to their callers.
 pub fn mt_enabled() -> bool {
-    mt_setting().is_some()
+    init_pool().expect("invalid tetration multithreading configuration");
+    mt_setting()
+        .as_ref()
+        .expect("validated MT setting")
+        .is_some()
 }
 
-/// Install the requested global rayon pool size. Call once at startup,
-/// before any rayon work. With `TET_MT` unset/0/1 this does nothing (the
-/// pre-existing rayon call sites keep using the default pool exactly as
-/// before). Errors (pool already built) are ignored — the default pool is a
-/// safe fallback.
-pub fn init_pool() {
-    if let Some(n) = mt_setting() {
-        if n >= 2 {
-            let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
-        }
-    }
+/// Initialize once for CLI and library callers, before any parallel work.
+/// An existing Rayon pool is an explicit conflict, not a silent thread-count
+/// override. Serial mode never initializes a pool.
+pub fn init_pool() -> Result<(), String> {
+    static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
+    INITIALIZED
+        .get_or_init(|| {
+            if let Some(n) = mt_setting().as_ref().map_err(Clone::clone)? {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(*n)
+                    .build_global()
+                    .map_err(|e| {
+                        format!("cannot initialize the requested tetration Rayon pool: {e}")
+                    })?;
+                let actual = rayon::current_num_threads();
+                if actual != *n {
+                    return Err(format!(
+                        "requested {n} MT threads, but Rayon initialized {actual}"
+                    ));
+                }
+                if crate::cnum::verbose() {
+                    eprintln!("tet: MT mode initialized with {actual} threads");
+                }
+            }
+            Ok(())
+        })
+        .clone()
 }

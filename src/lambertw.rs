@@ -127,7 +127,7 @@ fn halley_refine(w: &mut Complex, z: &Complex, prec: u64, target_prec: u64) -> R
     let mut checkpoint = w.clone();
     let mut iter = Integer::new();
     loop {
-        let exp_w = Complex::with_val_64(prec, w.exp_ref());
+        let exp_w = cnum::checked_exp(w, prec)?;
         let f = Complex::with_val_64(prec, Complex::with_val_64(prec, &*w * &exp_w) - z);
         if !cnum::is_finite(&f) {
             return Err(format!("Halley non-finite residual at iteration {iter}"));
@@ -193,7 +193,7 @@ fn verify_branch(
     let tolerance = Float::with_val_64(prec, cnum::working_epsilon(target_prec));
     let residual = Complex::with_val_64(
         prec,
-        Complex::with_val_64(prec, w * Complex::with_val_64(prec, w.exp_ref())) - z,
+        Complex::with_val_64(prec, w * cnum::checked_exp(w, prec)?) - z,
     );
     if !cnum::is_finite(&residual)
         || cnum::abs(&residual, prec) > Float::with_val_64(prec, &tolerance * cnum::abs(z, prec))

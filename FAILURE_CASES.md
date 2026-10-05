@@ -229,18 +229,42 @@ descent phase grows with b before Newton kicks in).
 
 ---
 
-## F. Real base b = 2 — **independent 50-digit witness; explicit higher-precision limit**
+## F. Real base b = 2 — **independent 50-digit witness; high-precision resource costs**
 
 At `h=0.5`, the October 50-digit result
 `1.4587818160364217006839716610385871352966066053309` differs relatively by
 `4.90e-51` from the independent fatou.gp reference. The old
 `1.4587818160364217112` anchor below is inaccurate after about 16 digits.
 
-At 70 digits direct setup requests 65536 nodes, above its 32768 budget.
-The 1800-second CLI run timed out during continuation from the `b=2.35`
-anchor, not after reaching `b=2`. No 70-digit base-2 accuracy claim follows.
-Node-budget failure is not mathematical nonexistence or proof that Abel
-theory is needed; t965 checks that distinction at 70/1000 digits.
+The earlier 70-digit setup requested 65536 nodes, exceeding its former 32768
+budget. Its 1800-second CLI run timed out during continuation from the
+`b=2.35` anchor, not after reaching `b=2`; no 70-digit base-2 accuracy claim
+follows. Fixed node budgets are now removed. Sizing regressions give 524288
+nodes at 200 digits and 16777216 at 1500 digits, not completed-solve evidence.
+Such resource/convergence failures are not nonexistence theorems; t965 now
+checks genuinely unaddressable near-parabolic geometry without a fixed cap.
+
+An exact-dyadic 40/60-digit comparison at `h=5.375` found only 28.87 matching
+digits despite zero recurrence residuals; the `h=0.375` control rounded
+correctly. Five exponentiations amplified the reconstruction error.
+`limits-range-baseline-comparison.json` in the resource-audit archive retains
+the failed evidence. Height-conditioned internal refinement passes the
+40-digit regression, including the final-source rerun after the geometry
+correction (`limits-post-geometry-conditioning-40.json`). Its real outputs
+round to the retained higher-precision fixture; the relative imaginary
+component at `h=5.375` is `2.35e-58`, below `1e-40`. This is cross-precision
+regression evidence, not independent canonicality verification.
+
+The old precision-only EM order also failed an exact constant-Cauchy identity:
+at the 130-digit geometry, a near-endpoint error of `5.17e-104` exceeded the
+`1e-133` target. Spacing/scale-aware asymptotic order selection reduces that
+error to `7.00e-146` (`limits-geometry-library.log`). Fresh full-construction
+validation now includes actual `2^^0.5` matching corroborated external data at
+118 and 130 digits. Actual `2^^5.1` outputs from both constructions round
+identically at 110 significant digits, with empirical relative agreement of
+118.35 digits (`limits-post-geometry-high-comparison.json`). These numerical
+cross-checks, unlike a quadrature test alone, directly check returned digits;
+they are still not global forward-error or canonicality certificates.
 
 Historical observations: `b=2` sits in the `|λ|≈1.23` regime. Same old seed fix as
 Class E: smooth target_mid cap + LM max_iters=80. Previously rejected
@@ -389,7 +413,7 @@ ten walk campaigns at b = 0.04:
   triggers bisection.
 * **Adaptive node boost**: when the previous curve's deepest pinch has
   |F|min < 0.12 the next solve doubles its node count; below 0.05 it
-  quadruples (n=16384, still ≤ N_MAX_PRACTICAL). A zero within ~0.1
+  quadruples (historically n=16384). A zero within ~0.1
   of the line makes the left-edge integrand ln F near-singular; at the
   standard density the trapezoidal floor then lands at the gate scale
   (observed: clean convergence flooring at 1.022e-8, b=0.06, ε≈0.102 —
@@ -404,8 +428,9 @@ ten walk campaigns at b = 0.04:
   combo was rejected as it skated the gate. Now a rejected solve whose
   residual is a *near-miss* (finite, ≤ 10³ × the clean gate — the
   signature of a resolution floor; ghost stalls sit at O(0.1–1)) is
-  retried once at doubled node tier (up to 8× = 32768 nodes) before
-  the walker moves on to bisection.
+  retried at successively doubled node tiers while the near-miss criteria
+  hold. The former one-retry/8× budget is removed; addressability and
+  numerical/branch checks remain.
 * **Wall-band pacing**: after any rescue, the next ≤ 5 targets are fine
   (1.5 %) steps — immediately jump-eligible, ~1 solve per band step instead
   of fail → bisect cascades.

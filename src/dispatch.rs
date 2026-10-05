@@ -114,7 +114,7 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
         return Ok(cnum::one(prec));
     }
     if cnum::is_zero(b) {
-        return tetrate_base_zero(h, prec);
+        return tetrate_base_zero(h, prec, digits);
     }
 
     // ---- Integer heights: direct iteration regardless of region ----
@@ -123,7 +123,7 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
             "integer height n={}",
             cnum::DisplayFloat(h.real())
         ));
-        return integer_height::tetrate_integer_height(b, h.real(), prec);
+        return integer_height::tetrate_integer_height(b, h.real(), prec, digits);
     }
 
     // ---- Schwarz reflection for Im(b) < 0 ----
@@ -172,7 +172,7 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
             // safe_radius estimate is too large near the parabolic boundary). In
             // those cases the anchor check in setup_schroder catches the failure.
             // Try the existing Kouznetsov construction if regular iteration fails.
-            match schroder::tetrate_schroder(b, h, d, prec) {
+            match schroder::tetrate_schroder_at_digits(b, h, d, prec, digits) {
                 Ok(v) => return Ok(v),
                 Err(e) => dprint(&format!(
                     "Schröder failed in Shell-Thron interior ({}); falling back to Kouznetsov",
@@ -202,7 +202,7 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
             // For complex bases on the boundary, |arg(λ)| can already be large,
             // so direct Kouznetsov often works; we keep the original order.
             if regular_base {
-                match schroder::tetrate_schroder(b, h, d, prec) {
+                match schroder::tetrate_schroder_at_digits(b, h, d, prec, digits) {
                     Ok(v) if schroder_result_is_canonical(b, h, &v, prec) => {
                         dprint("Schröder succeeded at boundary band");
                         return Ok(v);
@@ -270,7 +270,7 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
         }
         regions::Region::OutsideShellThronRealPositive(d) => {
             if regular_base {
-                match schroder::tetrate_schroder(b, h, d, prec) {
+                match schroder::tetrate_schroder_at_digits(b, h, d, prec, digits) {
                     Ok(v) if schroder_result_is_canonical(b, h, &v, prec) => {
                         dprint("Schröder succeeded at repelling fixed point");
                         return Ok(v);
@@ -348,7 +348,7 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
             // half-plane, in which case Kouznetsov errors out cleanly —
             // this is a limitation of the implemented contour, not a
             // nonexistence theorem or proof that one particular method is needed.
-            let schroder_err = match schroder::tetrate_schroder(b, h, d, prec) {
+            let schroder_err = match schroder::tetrate_schroder_at_digits(b, h, d, prec, digits) {
                 Ok(v) => {
                     dprint("Schröder succeeded at repelling fixed point");
                     return Ok(v);
@@ -407,7 +407,7 @@ fn try_continuation(
 ///   * `0^^n` for positive integer `n`: `n` even → 1, `n` odd → 0
 ///     (because `0^0 = 1` and `0^k = 0` for `k > 0`).
 ///   * Negative integer / non-integer height: undefined.
-fn tetrate_base_zero(h: &Complex, prec: u64) -> Result<Complex, String> {
+fn tetrate_base_zero(h: &Complex, prec: u64, digits: u64) -> Result<Complex, String> {
     if !h.imag().is_zero() || !h.real().is_integer() {
         return Err("tetration of 0 is only defined for non-negative integer heights".into());
     }
@@ -417,5 +417,5 @@ fn tetrate_base_zero(h: &Complex, prec: u64) -> Result<Complex, String> {
             cnum::DisplayFloat(h.real())
         ));
     }
-    integer_height::tetrate_integer_height(&cnum::zero(prec), h.real(), prec)
+    integer_height::tetrate_integer_height(&cnum::zero(prec), h.real(), prec, digits)
 }

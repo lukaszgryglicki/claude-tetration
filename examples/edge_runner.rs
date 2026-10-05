@@ -270,8 +270,10 @@ fn eval_cell(
         BaseCache::SpecialBase | BaseCache::DispatchFallback | BaseCache::SetupErrorFallback => {
             return dispatch::tetrate(b, h, prec, digits)
         }
-        BaseCache::SchroderCached(state) => schroder::eval_schroder(state, h),
-        BaseCache::KouznetsovCached(state) => kouznetsov::eval_kouznetsov(state, b, h),
+        BaseCache::SchroderCached(state) => schroder::eval_schroder_at_digits(state, h, digits),
+        BaseCache::KouznetsovCached(state) => {
+            kouznetsov::eval_kouznetsov_at_digits(state, b, h, digits)
+        }
     };
     match cached {
         Ok(value) => Ok(value),

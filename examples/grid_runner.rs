@@ -165,7 +165,26 @@ fn run() -> Result<(), String> {
                     continue;
                 }
                 let cell_t0 = Instant::now();
-                let result = eval_cell(&cache, &b, &h, prec, digits);
+                let result = eval_cell(&cache, &b, &h, prec, digits).and_then(|value| {
+                    let next_prec = value.real().prec_64().max(value.imag().prec_64());
+                    if next_prec > prec
+                        && (cnum::parse_complex(b_re_s, b_im_s, next_prec)? != b
+                            || cnum::parse_complex(h_re_s, h_im_s, next_prec)? != h)
+                    {
+                        if cnum::verbose() {
+                            eprintln!("grid: reparsing decimal coordinates at {next_prec} bits after precision refinement");
+                        }
+                        let (re, im) = tetration::tetrate_str(
+                            &digits.to_string(),
+                            b_re_s,
+                            b_im_s,
+                            h_re_s,
+                            h_im_s,
+                        )?;
+                        return cnum::parse_complex(&re, &im, next_prec);
+                    }
+                    Ok(value)
+                });
                 let elapsed = cell_t0.elapsed().as_secs_f64();
                 match result {
                     Ok(v) => {
@@ -495,8 +514,10 @@ fn eval_cell(
         BaseCache::SpecialBase | BaseCache::DispatchFallback | BaseCache::SetupErrorFallback(_) => {
             return dispatch::tetrate(b, h, prec, digits)
         }
-        BaseCache::SchroderCached(state) => schroder::eval_schroder(state, h),
-        BaseCache::KouznetsovCached(state) => kouznetsov::eval_kouznetsov(state, b, h),
+        BaseCache::SchroderCached(state) => schroder::eval_schroder_at_digits(state, h, digits),
+        BaseCache::KouznetsovCached(state) => {
+            kouznetsov::eval_kouznetsov_at_digits(state, b, h, digits)
+        }
         BaseCache::SetupError(e) => Err(e.clone()),
     };
     match cached {

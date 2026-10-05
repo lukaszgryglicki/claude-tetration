@@ -8,10 +8,47 @@ claims archived below.
 
 ## Correctness changes
 
+- Fixed computational budgets are removed: node grids, series/EM orders,
+  iteration counts, height shifts, continuation/refinement and chart runtimes
+  are no longer stopped by small application ceilings. Native addressability,
+  actual memory, exponent range and numerical/branch checks still apply.
+  `TET_KOUZ_PATIENT` no longer changes stopping behavior.
 - Numerical tolerances, residuals, branch/region tests, normalization,
   continuation endpoints and checkpoint data use MPFR/MPC precision.
-  Native counts, indices and timing remain native. Precision requests that
-  cannot represent their tolerances in MPFR's exponent range are rejected.
+  Unbounded counters and exact coefficients use GMP Integer/Rational.
+  Bounded indexes, library precision/exponent metadata and display/timing
+  statistics remain native. Rug's 64-bit precision APIs and the widest
+  supported per-thread MPFR exponent range replace artificial precision caps.
+  Unrepresentable tolerances/intermediates cannot become zero-valued success.
+- π, e, logarithms and derived boundaries are computed at working precision.
+  Exact-rational Bernoulli generation replaces the 20-entry EM table.
+  Significand/exponent formatting bypasses Rug 1.30's exponent-sized allocation
+  bug, including verbose diagnostics and streamed checkpoints.
+- The checked exponential uses outward-rounded, binary-scaled MPFR bounds.
+  This fixes MPC 1.4.1's infinite refinement on a single underflowed component,
+  unnecessary precision proportional to tiny input exponents, and premature
+  magnitude overflow despite representable components. Ordinary results match
+  MPC bit-for-bit; native-edge witnesses use independently rescaled references.
+  These primitive rounding bounds do not certify an entire tetration solve.
+- Integer, Schroder and Kouznetsov evaluations now refine internal accuracy
+  against a fixed output-digit goal. This repairs demonstrated precision loss
+  in large towers, tiny near-singular outputs and large imaginary phases,
+  including only 28.87 matching digits for a 40/60-digit `2^^5.375` baseline
+  despite zero recurrence residuals. Refinement preserves the fixed-point
+  pair/log sheet and does not discard imaginary components. Decimal inputs
+  are reparsed when increased working precision changes their values.
+- Contour sizing uses the slower of both fixed-point tails. EM order now follows
+  spacing, scale and precision, stopping at optimal asymptotic truncation rather
+  than a fixed budget. A 130-digit constant-Cauchy regression improves from
+  `5.17e-104` error to `7.00e-146`, below its `1e-133` target. The former
+  precision-only order could not supply the requested quadrature accuracy.
+  Local conditioning/quadrature witnesses are not global error certificates;
+  the corrected-source 40-digit large-height regression now passes. The final
+  regression ledger has 203 passes and three user-cancelled, unverified cases
+  (`t423`, `t870`, `t872`), not a fully passing 206-case suite. Actual `2^^0.5`
+  outputs match external references at 118/130 digits, and `2^^5.1` agrees at
+  its 110-digit goal across those construction precisions; full evidence is in
+  `limits-post-geometry-high-comparison.json` in the resource-audit archive.
 - String/CLI and grid working precision also preserves supplied significant
   decimal digits, without changing output precision. A long near-one base,
   noninteger height or huge odd height must not silently become a different
@@ -22,7 +59,8 @@ claims archived below.
   as dispatch; roundoff in `F(-1)` must not manufacture finite `F(-2)`.
   Positive integer towers of exact base `-1` remain exactly `-1`; repeated
   log/exp roundoff previously grew to about `3e-21` at height 100 despite a
-  50-digit request. Domain and height-budget limits are unchanged.
+  50-digit request. Domain conventions remain; huge integral heights and parity
+  no longer require exponent-sized integer conversion or a fixed height budget.
 - Lambert W retains the existing seeds/Halley method, with corrected
   logarithm-branch identity and internal guard precision near `-1/e`.
   Requested stopping precision is separate from internal working precision.
@@ -31,12 +69,17 @@ claims archived below.
   not substituted for a finite off-contour height.
 - Kouznetsov checks the actual normalized evaluator, cached base identity,
   finite operators, actual GMRES residual and the full
-  `10^-(digits+3)` boundary target. Backward FE validation avoids rejecting a
+  `10^-(digits+3)` boundary target. Complex candidates pass that target before
+  normalization, so an unusable state cannot spend millions of Newton steps
+  before its inevitable refusal or prevent the existing two-sided retry.
+  Backward FE validation avoids rejecting a
   finite requested value merely because its unnecessary successor overflows.
 - Real-boundary dispatch tries the existing direct solver after failed
   continuation: `b=1.5` genuinely succeeds by this previously skipped route.
-  Node budgets are reported as resource limits, not mathematical
+  Geometry/addressability and convergence failures are not mathematical
   nonexistence or proof that a particular future theory is required.
+  Real bases above `e^(1/e)` skip the regular family that the existing
+  canonicality guard would reject regardless of the work spent calculating it.
 - Cauchy reconstruction replaces linear continuation resampling; target-base
   fixed points remain warm seeds outside the old contour, never final answers.
   Resampling can be very expensive at large grids.
@@ -56,14 +99,23 @@ orbit/log-unwinding references, stabilized at two orbit depths. Actual CLI
 rounding agrees at 50 and 70 digits. Durable regressions cover those references
 at 1/10/50/70 digits, lower-half-plane cases, and 1000-digit primitives,
 near-branch Lambert W, tolerances, kernels and checkpoint roundtrips.
+Resource regressions exercise native exponent endpoints, >32768-node
+checkpoints, >2000-step schedules, >1M-coordinate axes and >8 GMRES restarts.
+Independent constant identities agree in returned digits at 70/1000/10000
+digits; actual `10^^3` output retains 100000 significant digits with decimal
+exponent 10000000000. The `e^^3` witness now computes e at working precision
+instead of using a short decimal literal.
 
 For `b=2,h=0.5`, the 50-digit result
 `1.4587818160364217006839716610385871352966066053309` differs relatively by
 `4.90e-51` from the independent fatou.gp reference. The old
 `1.4587818160364217112` anchor was inaccurate after about 16 digits.
-At 70 digits the direct solver requests 65536 nodes, above its 32768 cap;
-the bounded CLI run timed out during continuation from `b=2.35`, **before
-reaching `b=2`**. No 70-digit base-2 value was validated.
+The earlier 70-digit direct setup requested 65536 nodes, above the former
+32768 cap; its bounded CLI run timed out during continuation from `b=2.35`,
+**before reaching `b=2`**. That log validates no 70-digit base-2 value.
+The cap is now removed. Required grids of 524288 nodes at 200 digits and
+16777216 at 1500 digits are verified by sizing tests without allocating
+those grids; this is not evidence of completed high-precision solves.
 
 An isolated rebuild of committed revision `26aec7f` also stalls at the first
 `b=1.46` continuation step, then returns unchecked Richardson output that

@@ -38,7 +38,7 @@ use crate::{
     lambertw,
     regions::FixedPointData,
 };
-use cnum::{DisplayComplex, DisplayFloat};
+use cnum::{log_magnitude, DisplayComplex, DisplayFloat};
 
 /// Compute `F_b(h)` via Newton-Kantorovich Cauchy iteration on the
 /// Kouznetsov-style rectangle. Works for general complex bases `b` outside
@@ -97,8 +97,8 @@ pub fn tetrate_kouznetsov(
 
 /// Compute the per-base Kouznetsov state. This is the expensive step: it
 /// runs the Newton-Kantorovich Cauchy iteration to convergence and then
-/// finds the normalization shift δ. After this returns, evaluating F at
-/// any height is cheap (`eval_kouznetsov`).
+/// finds the normalization shift δ. Most heights reuse this state;
+/// ill-conditioned shifts may require a more accurate reconstruction.
 pub fn setup_kouznetsov(
     b: &Complex,
     fp: &FixedPointData,
@@ -214,8 +214,15 @@ pub fn setup_kouznetsov(
                 let re_k = l_k.real().clone();
                 // Verify L_k is genuinely a fixed point of b^z = z (Halley
                 // can converge to a nearby branch for poor seeds).
-                let bz =
-                    Complex::with_val_64(prec, Complex::with_val_64(prec, &l_k * &ln_b).exp_ref());
+                let bz = match cnum::checked_exp(&Complex::with_val_64(prec, &l_k * &ln_b), prec) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if debug_wk {
+                            eprintln!("kouz wk search: W_{k} fixed-point check failed: {error}");
+                        }
+                        continue;
+                    }
+                };
                 let resid =
                     Float::with_val_64(prec, Complex::with_val_64(prec, &bz - &l_k).abs_ref());
                 let opposite = im_k.is_sign_negative() != im_plus.is_sign_negative()
@@ -267,7 +274,7 @@ pub fn setup_kouznetsov(
             (l_plus, l_minus)
         }
     };
-    let state = setup_kouznetsov_core(
+    let mut state = setup_kouznetsov_core(
         b,
         l_upper,
         l_lower,
@@ -276,7 +283,7 @@ pub fn setup_kouznetsov(
         use_schwarz,
         None,
         false,
-        false,
+        !use_schwarz,
         false,
         1,
     )?;
@@ -307,12 +314,12 @@ pub fn setup_kouznetsov(
                 use_schwarz,
                 None,
                 false,
-                false,
+                true,
                 true,
                 1,
             );
             match retry {
-                Ok(r) if r.residual.is_finite() && r.residual <= band_gate => return Ok(r),
+                Ok(r) if r.residual.is_finite() && r.residual <= band_gate => state = r,
                 Ok(r) => {
                     return Err(format!(
                         "Kouznetsov complex-base solve stalled: boundary residual {:.3e} \
@@ -337,6 +344,27 @@ pub fn setup_kouznetsov(
                 }
             }
         }
+        state.shift = find_normalization_shift(
+            &state.samples,
+            &state.nodes,
+            &state.weights,
+            &state.t_max,
+            &state.l_upper,
+            &state.l_lower,
+            &state.ln_b,
+            prec,
+            digits,
+            use_schwarz,
+            state.two_sided,
+        )?;
+        state.normalized = true;
+        if cnum::verbose() {
+            eprintln!(
+                "kouz normalization shift δ = {:.6e} + {:.6e}i (such that F(δ)=1)",
+                DisplayFloat(state.shift.real()),
+                DisplayFloat(state.shift.imag()),
+            );
+        }
     }
     Ok(state)
 }
@@ -352,9 +380,8 @@ type WarmGuess<'a> = dyn Fn(&Float) -> Result<Complex, String> + Sync + 'a;
 /// fixed points in the closed upper half-plane, which the generic
 /// opposite-half-plane search would reject) can inject the pair directly.
 ///
-/// `skip_norm` skips the F(δ)=1 normalization search (~40 s per solve) and
-/// stores δ = 0; only valid for states used as continuation warm sources,
-/// never for states whose heights are evaluated directly.
+/// `skip_norm` stores δ = 0 for continuation warm sources or candidates awaiting
+/// the final boundary gate. Such states must be normalized before evaluation.
 ///
 /// `node_boost` multiplies the automatic node count (power-of-2 preserving).
 /// The cut-base walker passes 2 when the previous curve has a deep pinch
@@ -393,17 +420,8 @@ fn setup_kouznetsov_core(
     let lambda_upper = Complex::with_val_64(prec, &ln_b * &l_upper);
     let lambda_lower = Complex::with_val_64(prec, &ln_b * &l_lower);
 
-    // Decay rate of F → fixed point: ~ exp(-T·|arg(λ̄)|). Pick T so the tail
-    // beyond ±T is below 10^{-(digits+8)}. Historically sized from λ_upper
-    // alone (Schwarz-conjugate pairs have equal rates, and the empirical
-    // Newton basins of all previously working bases were mapped with that
-    // sizing); the cut-base pair (W₀, W₊₁) is genuinely asymmetric and the
-    // smaller rate is binding there.
-    let arg_lambda = if two_sided {
-        arg_abs(&lambda_upper, prec).min(&arg_abs(&lambda_lower, prec))
-    } else {
-        arg_abs(&lambda_upper, prec)
-    };
+    // Both fixed-point tails must meet the precision budget, on either log sheet.
+    let arg_lambda = slowest_decay_rate(&lambda_upper, &lambda_lower, prec);
     let t_max = contour_height(digits, &arg_lambda, prec)?;
 
     // Trapezoidal node count: scales with both `digits` and `t_max`, with the
@@ -685,9 +703,8 @@ fn setup_kouznetsov_core(
     })
 }
 
-/// Evaluate `F_b(h)` from a precomputed `KouznetsovState`. Cheap (one Cauchy
-/// integral plus integer-shifting via b^· / log_b iterations); reuses the
-/// expensive samples and normalization shift from `setup_kouznetsov`.
+/// Evaluate from cached samples, refining internal accuracy when height
+/// conditioning consumes the requested-digit margin.
 ///
 /// The functional-equation residual is a consistency check, not an independent
 /// error bound: both sides use the same reconstruction and recurrence.
@@ -696,6 +713,124 @@ pub fn eval_kouznetsov(
     b: &Complex,
     h: &Complex,
 ) -> Result<Complex, String> {
+    eval_kouznetsov_at_digits(state, b, h, state.digits)
+}
+
+/// Reuse a validated state with a fixed, possibly lower, output-digit goal.
+pub fn eval_kouznetsov_at_digits(
+    state: &KouznetsovState,
+    b: &Complex,
+    h: &Complex,
+    requested_digits: u64,
+) -> Result<Complex, String> {
+    cnum::checked_digits_to_bits(requested_digits)?;
+    let mut refined = None;
+    loop {
+        let current = refined.as_ref().unwrap_or(state);
+        let (value, log_amplification) = eval_kouznetsov_once(current, b, h)?;
+        let Some(digits) =
+            height_precision_digits(requested_digits, current.digits, &log_amplification)?
+        else {
+            return Ok(value);
+        };
+        if cnum::verbose() {
+            eprintln!(
+                "kouz height conditioning: refining from {} to {digits} internal digits for {} output digits",
+                current.digits, requested_digits
+            );
+        }
+        refined = Some(refine_kouznetsov_precision(current, b, digits)?);
+    }
+}
+
+fn height_precision_digits(
+    requested: u64,
+    current: u64,
+    log_amplification: &Float,
+) -> Result<Option<u64>, String> {
+    let prec = log_amplification.prec_64();
+    if log_amplification.is_infinite() && log_amplification.is_sign_positive() {
+        let next = current
+            .checked_mul(2)
+            .ok_or("unresolved numerical zero at the supported precision limit")?
+            .max(requested);
+        cnum::checked_digits_to_bits(next)?;
+        return Ok(Some(next));
+    }
+    let lost = (log_amplification.clone() / Float::with_val_64(prec, 10).ln()).ceil();
+    if !lost.is_finite() || lost < 0 || lost > u64::MAX {
+        return Err("height conditioning requires more than MPFR's native precision".into());
+    }
+    let lost = lost
+        .to_integer()
+        .and_then(|value| value.to_u64())
+        .ok_or("height conditioning exceeds the supported precision count")?;
+    let required = requested
+        .checked_add(lost)
+        .ok_or("height conditioning exceeds the supported precision count")?;
+    if required <= current.saturating_add(3) {
+        return Ok(None);
+    }
+    cnum::checked_digits_to_bits(required)?;
+    Ok(Some(required))
+}
+
+fn refine_kouznetsov_precision(
+    state: &KouznetsovState,
+    b: &Complex,
+    digits: u64,
+) -> Result<KouznetsovState, String> {
+    let prec = cnum::checked_digits_to_bits(digits)?.max(state.prec);
+    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let l_upper = newton_fixed_point(&ln_b, &Complex::with_val_64(prec, &state.l_upper), prec)?;
+    let l_lower = newton_fixed_point(&ln_b, &Complex::with_val_64(prec, &state.l_lower), prec)?;
+    let use_schwarz = is_real_positive(b)
+        && state.l_upper == Complex::with_val_64(state.prec, state.l_lower.conj_ref());
+    let old_nodes = pick_node_count(state.digits, &state.t_max, state.prec)?;
+    let node_boost = state.samples.len().div_ceil(old_nodes).max(1);
+    let mut refined = setup_kouznetsov_core(
+        b,
+        l_upper,
+        l_lower,
+        prec,
+        digits,
+        use_schwarz,
+        None,
+        false,
+        true,
+        state.two_sided,
+        node_boost,
+    )?;
+    let target = cnum::epsilon(digits.saturating_add(3), prec);
+    if !refined.residual.is_finite() || refined.residual > target {
+        return Err(format!(
+            "Kouznetsov precision refinement boundary residual {} exceeds target {}",
+            DisplayFloat(&refined.residual),
+            DisplayFloat(&target)
+        ));
+    }
+    refined.shift = find_normalization_shift(
+        &refined.samples,
+        &refined.nodes,
+        &refined.weights,
+        &refined.t_max,
+        &refined.l_upper,
+        &refined.l_lower,
+        &refined.ln_b,
+        prec,
+        digits,
+        use_schwarz,
+        refined.two_sided,
+    )?;
+    refined.normalized = true;
+    Ok(refined)
+}
+
+fn eval_kouznetsov_once(
+    state: &KouznetsovState,
+    b: &Complex,
+    h: &Complex,
+) -> Result<(Complex, Float), String> {
     cnum::init_mpfr();
     let prec = state.prec;
     if !cnum::is_finite(b) || !cnum::is_finite(h) || !state.normalized {
@@ -733,8 +868,11 @@ pub fn eval_kouznetsov(
             DisplayFloat(h.real())
         ));
     }
+    if h.imag().is_zero() && *h.real() == -1 {
+        return Ok((cnum::zero(prec), Float::new_64(prec)));
+    }
     let h_shifted = Complex::with_val_64(prec, h + &state.shift);
-    let f_h = eval_at_height(
+    let (f_h, log_amplification) = eval_at_height_with_conditioning(
         &h_shifted,
         &state.samples,
         &state.nodes,
@@ -787,7 +925,7 @@ pub fn eval_kouznetsov(
             if forward { "forward" } else { "backward" }
         );
     }
-    Ok(f_h)
+    Ok((f_h, log_amplification))
 }
 
 /// Normalize the same integer-extended reconstruction used for returned values.
@@ -1036,7 +1174,11 @@ fn is_real_positive(b: &Complex) -> bool {
 ///
 /// f(z)  = b^z - z
 /// f'(z) = b^z · ln_b - 1
-fn newton_fixed_point(ln_b: &Complex, seed: &Complex, prec: u64) -> Result<Complex, String> {
+pub(crate) fn newton_fixed_point(
+    ln_b: &Complex,
+    seed: &Complex,
+    prec: u64,
+) -> Result<Complex, String> {
     let one = Complex::with_val_64(prec, (1, 0));
     // Target |f| < 2^-(prec - 16); leave a small guard so the loop terminates.
     let target_tol = Float::with_val_64(prec, 1)
@@ -1076,6 +1218,10 @@ fn newton_fixed_point(ln_b: &Complex, seed: &Complex, prec: u64) -> Result<Compl
 
 fn arg_abs(z: &Complex, prec: u64) -> Float {
     Float::with_val_64(prec, z.arg_ref()).abs()
+}
+
+fn slowest_decay_rate(upper: &Complex, lower: &Complex, prec: u64) -> Float {
+    arg_abs(upper, prec).min(&arg_abs(lower, prec))
 }
 
 fn contour_height(digits: u64, arg_lambda: &Float, prec: u64) -> Result<Float, String> {
@@ -1209,12 +1355,8 @@ fn build_trapezoidal_weights(t_max: &Float, n: usize, prec: u64) -> Vec<Float> {
 // The correction simplifies to
 //   corr = −i · Σ_k |B_{2k}|/(2k) · h^{2k}
 //                · [L_+ /(c+iT)^{2k} − L_− /(c−iT)^{2k}].
-// Each EM term gains roughly `(h/T)²` over the previous, so K ≈ 7–10 lifts
-// the floor from O(h²) ≈ 10⁻⁶ to well below 10⁻⁵⁰ at our typical h/T.
-//
-// EM is asymptotic, not convergent — Bernoulli numbers grow factorially —
-// but the optimal truncation `K_opt ≈ T·π/h` is in the thousands for our
-// regime, so K=10 is far inside the safe range.
+// Near contour ends the denominator is O(1), not O(T). Spacing and the
+// evaluation strip's clearance determine the useful asymptotic order.
 // =====================================================================
 
 fn em_coefficients(n_terms: usize) -> Result<Arc<Vec<Rational>>, String> {
@@ -1249,34 +1391,60 @@ fn em_coefficients(n_terms: usize) -> Result<Arc<Vec<Rational>>, String> {
     Ok(Arc::clone(&cache.coefficients))
 }
 
-/// Pick how many EM terms to compute, starting at K=12 because:
-///
-/// * The closed-form derivative formula evaluates `1/(c±iT−z₀)^{2k}` —
-///   when `z₀` sits near a boundary node `T_k ≈ ±T`, that denominator can
-///   shrink to `O(1)` instead of `O(T)`, so EM terms decay much slower
-///   than the naive `(h/T)^{2k}` argument suggests.
-/// * The cost is O(K · N) per call (one closed-form evaluation per row),
-///   negligible against the O(N²) FFT matvec.
-/// * Empirically on `b=2, digits=30, N=8264, T=80`: K=6 stalls Newton at
-///   ~6e-28 while K=12 reaches 5e-36, eight orders of magnitude better,
-///   for ~zero extra CPU.
-///
-/// `TET_KOUZ_NO_EM=1` returns 0 (skip EM entirely) for A/B testing;
-/// `TET_KOUZ_EM_K=<n>` overrides for diagnostics.
-///
-/// Auto-pick: each additional EM term reduces the boundary-floor residual by
-/// ~2.5 decades (empirical at b=2, h ≈ 10^{-2}). K=12 reaches ~10^{-48} for
-/// digits=50; we need digits+3 of headroom, so scale K with digits beyond 30.
-fn em_n_terms(prec: u64) -> Result<usize, String> {
+/// Choose a spacing-aware EM order before its asymptotic remainder estimate grows.
+/// The estimate covers horizontal clearance >= 1/2 throughout the evaluation strip.
+fn em_n_terms(
+    prec: u64,
+    spacing: &Float,
+    l_upper: &Complex,
+    l_lower: &Complex,
+) -> Result<usize, String> {
     if std::env::var_os("TET_KOUZ_NO_EM").is_some() {
         return Ok(0);
     }
-    let digits = u128::from(prec) * 30_103 / 100_000;
-    let default = usize::try_from(12 + digits.saturating_sub(30) / 5)
-        .map_err(|_| "Euler-Maclaurin order exceeds addressable memory")?;
-    let n = cnum::env_usize("TET_KOUZ_EM_K", default)?;
+    if std::env::var_os("TET_KOUZ_EM_K").is_some() {
+        let n = cnum::env_usize("TET_KOUZ_EM_K", 0)?;
+        cnum::check_complex_storage(n as u128, prec)
+            .map_err(|e| format!("Euler-Maclaurin order (TET_KOUZ_EM_K): {e}"))?;
+        return Ok(n);
+    }
+    if !spacing.is_finite()
+        || *spacing <= 0
+        || !cnum::is_finite(l_upper)
+        || !cnum::is_finite(l_lower)
+    {
+        return Err("Euler-Maclaurin order requires positive spacing and finite boundaries".into());
+    }
+    let log_step = (spacing.clone().ln() - Float::with_val_64(prec, Constant::Pi).ln()) * 2;
+    let log_scale = log_magnitude(l_upper, prec)
+        .max(&log_magnitude(l_lower, prec))
+        .max(&Float::new_64(prec));
+    // Constant-kernel estimate: 8*max(1, |L±|)*(2k)!*(h/pi)^(2k).
+    let mut log_bound = log_scale + Float::with_val_64(prec, 16).ln() + &log_step;
+    let log_target = cnum::working_epsilon(prec).ln();
+    let mut n = 1usize;
+    while log_bound > log_target {
+        let two_n = Integer::from(n) * 2;
+        let log_ratio = Float::with_val_64(prec, Integer::from(&two_n + 1)).ln()
+            + Float::with_val_64(prec, Integer::from(&two_n + 2)).ln()
+            + &log_step;
+        if log_ratio >= 0 {
+            if cnum::verbose() {
+                eprintln!(
+                    "kouz EM: working-precision target is below this grid's optimal remainder estimate; \
+                     using K={n}, log estimate {} versus log target {}",
+                    DisplayFloat(&log_bound), DisplayFloat(&log_target)
+                );
+            }
+            break;
+        }
+        log_bound += log_ratio;
+        n = n
+            .checked_add(1)
+            .ok_or("Euler-Maclaurin order exceeds addressable memory")?;
+    }
     cnum::check_complex_storage(n as u128, prec)
-        .map_err(|e| format!("Euler-Maclaurin order (TET_KOUZ_EM_K): {e}"))?;
+        .map_err(|e| format!("Euler-Maclaurin order: {e}"))?;
     Ok(n)
 }
 
@@ -1399,10 +1567,7 @@ fn initial_guess_with_target(
     let half = cnum::decimal("0.5", prec);
     let one = Float::with_val_64(prec, 1u32);
     let rate = Float::with_val_64(prec, arg_lambda);
-    let sqrt_b = {
-        let half_c = Complex::with_val_64(prec, (half.clone(), 0));
-        cnum::pow_complex(b, &half_c, prec)
-    };
+    let sqrt_b = Complex::with_val_64(prec, b.sqrt_ref());
     // Cap on |target_mid|. Empirically, the converged F̃[mid] = F̃(0+0i) for
     // the natural Kneser solution sits in [0.6, 1.4] across the profiled real-
     // positive bases (b=2 → 1.25, b=5 → 0.73, b=10 → 1.10, b=50 → 0.69,
@@ -1666,7 +1831,7 @@ fn cauchy_eval(
     } else {
         Float::with_val_64(prec, 1u32)
     };
-    let n_terms = em_n_terms(prec)?;
+    let n_terms = em_n_terms(prec, &h, l_upper, l_lower)?;
     let em_h_powers = build_em_h_powers(&h, n_terms, prec)?;
     let (corr_r, corr_l) =
         compute_em_correction_z0(z0, t_max, l_upper, l_lower, &em_h_powers, prec);
@@ -2700,6 +2865,25 @@ fn eval_at_height(
     prec: u64,
     two_sided: bool,
 ) -> Result<Complex, String> {
+    eval_at_height_with_conditioning(
+        h, samples, nodes, weights, t_max, l_upper, l_lower, ln_b, prec, two_sided,
+    )
+    .map(|(value, _)| value)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn eval_at_height_with_conditioning(
+    h: &Complex,
+    samples: &[Complex],
+    nodes: &[Float],
+    weights: &[Float],
+    t_max: &Float,
+    l_upper: &Complex,
+    l_lower: &Complex,
+    ln_b: &Complex,
+    prec: u64,
+    two_sided: bool,
+) -> Result<(Complex, Float), String> {
     if !cnum::is_finite(h) || !t_max.is_finite() || *t_max <= 0 {
         return Err("Cauchy evaluation requires finite height and positive contour size".into());
     }
@@ -2717,6 +2901,8 @@ fn eval_at_height(
     let forward = shift > 0;
     let shifts = shift.abs();
     let mut step = Integer::new();
+    let mut log_amplification = Float::new_64(prec);
+    let log_ln_b = log_magnitude(ln_b, prec);
     while shifts > step {
         if cnum::verbose() && (step == 0 || step.is_divisible_u(1024)) {
             eprintln!(
@@ -2725,12 +2911,16 @@ fn eval_at_height(
             );
         }
         if forward {
+            let amplification = log_magnitude(&f, prec).max(&Float::new_64(prec)) + &log_ln_b;
+            log_amplification += amplification.max(&Float::new_64(prec));
             let exp_arg = Complex::with_val_64(prec, ln_b * &f);
             f = cnum::checked_exp(&exp_arg, prec)?;
         } else {
             if !cnum::is_finite(&f) || cnum::is_zero(&f) {
                 return Err("Cauchy logarithmic shift reached a zero or non-finite value".into());
             }
+            let amplification = -log_magnitude(&f, prec).min(&Float::new_64(prec)) - &log_ln_b;
+            log_amplification += amplification.max(&Float::new_64(prec));
             let ln_f = Complex::with_val_64(prec, f.ln_ref());
             f = Complex::with_val_64(prec, &ln_f / ln_b);
         }
@@ -2739,7 +2929,8 @@ fn eval_at_height(
     if !cnum::is_finite(&f) {
         return Err("Cauchy evaluation produced a non-finite value".into());
     }
-    Ok(f)
+    log_amplification -= log_magnitude(&f, prec).min(&Float::new_64(prec));
+    Ok((f, log_amplification))
 }
 
 // =====================================================================
@@ -2864,7 +3055,6 @@ pub(crate) fn build_cauchy_kernels(
     if n < 2 || !t_max.is_finite() || *t_max <= 0 || nodes.iter().any(|t| !t.is_finite()) {
         return Err("Cauchy kernels require finite nonempty geometry".into());
     }
-    let n_terms = em_n_terms(prec)?;
     let one_re = Float::with_val_64(prec, 1u32);
     let neg_one_re = Float::with_val_64(prec, -1i32);
     let one_c = Complex::with_val_64(prec, (one_re.clone(), Float::new_64(prec)));
@@ -2873,6 +3063,7 @@ pub(crate) fn build_cauchy_kernels(
     } else {
         Float::with_val_64(prec, 1u32)
     };
+    let n_terms = em_n_terms(prec, &delta, l_upper, l_lower)?;
     let max_offset = Integer::from(n - 1);
     let mut h_r: Vec<Complex> = Vec::with_capacity(2 * n - 1);
     let mut h_l: Vec<Complex> = Vec::with_capacity(2 * n - 1);
@@ -4044,7 +4235,7 @@ pub fn setup_kouznetsov_cut_base(
 
     let mut solves = Integer::new();
     let mut rescue_pattern: Option<Vec<i32>> = None;
-    let mut steps_since_rescue: u32 = u32::MAX;
+    let mut steps_since_rescue = Integer::from(7);
     while let Some(eps_next) = queue.pop_front() {
         solves += 1;
 
@@ -4483,9 +4674,9 @@ pub fn setup_kouznetsov_cut_base(
                 // wins mean the winding zero has moved off the sample line;
                 // fall back to the geometric schedule already in the queue.
                 if won_jump {
-                    steps_since_rescue = 0;
+                    steps_since_rescue = Integer::new();
                 } else {
-                    steps_since_rescue = steps_since_rescue.saturating_add(1);
+                    steps_since_rescue += 1;
                 }
                 if steps_since_rescue <= 5 && eps_cur > cnum::decimal("1e-3", prec) {
                     let fine = Float::with_val_64(prec, &eps_cur * cnum::decimal("0.985", prec));
@@ -4530,6 +4721,110 @@ mod tests {
     use super::*;
 
     #[test]
+    fn initial_guess_preserves_tiny_complex_base_components() {
+        for digits in [50, 70, 1000] {
+            let prec = cnum::digits_to_bits(digits);
+            let reference_prec = prec + 128;
+            let (min, _) = cnum::exponent_range();
+            let tiny = Float::with_val_64(prec, 1) >> usize::try_from((1 - min) / 2).unwrap();
+            let base = Complex::with_val_64(prec, (2, &tiny));
+            let samples = initial_guess_with_target(
+                &[Float::new_64(prec)],
+                &base,
+                &Complex::with_val_64(prec, (1, 1)),
+                &Complex::with_val_64(prec, (1, -1)),
+                &Float::with_val_64(prec, 1),
+                prec,
+                None,
+            );
+            let root = Float::with_val_64(reference_prec, 2).sqrt();
+            let expected_imaginary = Float::with_val_64(
+                prec,
+                Float::with_val_64(reference_prec, &tiny)
+                    / Float::with_val_64(reference_prec, &root * 2u32),
+            );
+            assert!(
+                samples[0].real() == &Float::with_val_64(prec, root)
+                    && samples[0].imag() == &expected_imaginary
+                    && !samples[0].imag().is_zero(),
+                "initial guess lost the tiny component at {digits} digits"
+            );
+        }
+    }
+
+    #[test]
+    fn cauchy_quadrature_resolves_constants_at_high_precision_near_boundaries() {
+        let mut failures = Vec::new();
+        for digits in [110, 130] {
+            let prec = cnum::digits_to_bits(digits);
+            let base = Complex::with_val_64(prec, 2);
+            let crate::regions::Region::OutsideShellThronRealPositive(fp) =
+                crate::regions::classify(&base, prec).unwrap()
+            else {
+                panic!("base-2 geometry");
+            };
+            let t_max = contour_height(digits, &arg_abs(&fp.lambda, prec), prec).unwrap();
+            let n = pick_node_count(digits, &t_max, prec).unwrap();
+            let nodes = build_uniform_nodes(&t_max, n, prec);
+            let weights = build_trapezoidal_weights(&t_max, n, prec);
+            let constant = Complex::with_val_64(prec, 2);
+            let samples = vec![constant.clone(); n];
+            let ln_base = Complex::with_val_64(prec, Float::with_val_64(prec, 2).ln() / 2);
+            let target = cnum::epsilon(digits + 3, prec);
+            for (real, imaginary) in [
+                ("0.5", Float::new_64(prec)),
+                ("0.5", nodes[n - 2].clone()),
+                ("0", nodes[n - 2].clone()),
+            ] {
+                let height = Complex::with_val_64(prec, (cnum::decimal(real, prec), &imaginary));
+                let actual = cauchy_eval(
+                    &height, &samples, &nodes, &weights, &t_max, &constant, &constant, &ln_base,
+                    prec, false,
+                )
+                .unwrap();
+                let error = cnum::abs(&Complex::with_val_64(prec, actual - &constant), prec);
+                eprintln!(
+                    "constant_cauchy_probe digits={digits} re={real} im={:.8e} nodes={n} error={:.8e}",
+                    DisplayFloat(&imaginary), DisplayFloat(&error)
+                );
+                if error > target {
+                    failures.push(format!(
+                        "{digits} digits, re={real}, error {} exceeds {}",
+                        DisplayFloat(&error),
+                        DisplayFloat(&target)
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn asymmetric_contours_budget_for_both_fixed_point_tails() {
+        for digits in [10, 70] {
+            let prec = cnum::digits_to_bits(digits);
+            let base = Complex::with_val_64(prec, -2);
+            let negative_log =
+                Complex::with_val_64(prec, -Complex::with_val_64(prec, base.ln_ref()));
+            let upper = Complex::with_val_64(prec, -lambertw::w0(&negative_log, prec).unwrap());
+            let lower = Complex::with_val_64(prec, -lambertw::wk(&negative_log, 1, prec).unwrap());
+            let rate = slowest_decay_rate(&upper, &lower, prec);
+            assert_eq!(rate, arg_abs(&lower, prec));
+            assert!(rate < arg_abs(&upper, prec));
+            let height = contour_height(digits, &rate, prec).unwrap();
+            let budget = cnum::epsilon(digits + 8, prec)
+                * (Float::with_val_64(prec, 1) + cnum::working_epsilon(prec));
+            for boundary in [&upper, &lower] {
+                let tail = (-Float::with_val_64(prec, &height * arg_abs(boundary, prec))).exp();
+                assert!(tail <= budget);
+            }
+            let old_height = contour_height(digits, &arg_abs(&upper, prec), prec).unwrap();
+            let old_lower_tail = (-Float::with_val_64(prec, old_height * &rate)).exp();
+            assert!(old_lower_tail > cnum::epsilon(digits + 3, prec));
+        }
+    }
+
+    #[test]
     fn node_and_em_orders_have_no_practical_precision_ceiling() {
         for (digits, expected_nodes) in [(200, 524_288), (1500, 16_777_216)] {
             let prec = cnum::digits_to_bits(digits);
@@ -4543,7 +4838,8 @@ mod tests {
             let nodes = pick_node_count(digits, &height, prec).unwrap();
             assert_eq!(nodes, expected_nodes);
             assert!(crate::fft::kernel_fft_len(nodes, prec).unwrap() >= nodes);
-            assert!(em_n_terms(prec).unwrap() > 20);
+            let spacing = Float::with_val_64(prec, &height * 2) / (nodes - 1);
+            assert!(em_n_terms(prec, &spacing, &fp.fixed_point, &fp.fixed_point).unwrap() > 20);
         }
         let prec = cnum::digits_to_bits(70);
         let height = contour_height(70, &cnum::decimal("1e-30", prec), prec).unwrap();
@@ -5083,6 +5379,115 @@ mod tests {
         .unwrap();
         assert!(cnum::abs(&answer[0], prec) < tolerance);
         assert!(cnum::abs(&Complex::with_val_64(prec, &answer[1] - 1), prec) < tolerance);
+    }
+
+    #[test]
+    fn height_conditioning_refines_accuracy_not_just_storage_precision() {
+        for digits in [40, 70, 1000] {
+            let prec = cnum::digits_to_bits(digits);
+            let log_gain = cnum::decimal("18.75", prec) * Float::with_val_64(prec, 10).ln();
+            assert_eq!(
+                height_precision_digits(digits, digits, &log_gain).unwrap(),
+                Some(digits + 19)
+            );
+            assert_eq!(
+                height_precision_digits(digits, digits + 19, &log_gain).unwrap(),
+                None
+            );
+            let tolerance = cnum::epsilon(digits, prec);
+            let large_log_gain = Float::with_val_64(prec, 100) * Float::with_val_64(prec, 10).ln();
+            let next = cnum::conditioned_precision(&large_log_gain, &tolerance, prec)
+                .unwrap()
+                .unwrap();
+            assert!(next > prec);
+            assert_eq!(
+                cnum::conditioned_precision(&large_log_gain, &tolerance, next).unwrap(),
+                None
+            );
+            let small_gain = cnum::decimal("2.5", prec) * Float::with_val_64(prec, 10).ln();
+            assert_eq!(
+                height_precision_digits(digits, digits, &small_gain).unwrap(),
+                None
+            );
+            assert!(
+                height_precision_digits(digits, digits, &cnum::decimal("1e1000", prec)).is_err()
+            );
+            assert!(
+                cnum::conditioned_precision(&cnum::decimal("1e1000", prec), &tolerance, prec)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn height_conditioning_logs_do_not_overflow_with_the_complex_magnitude() {
+        let prec = cnum::digits_to_bits(70);
+        let reference_prec = cnum::digits_to_bits(100);
+        let (_, max) = cnum::exponent_range();
+        let mut component = Float::with_val_64(prec, 1) << usize::try_from(max - 1).unwrap();
+        component *= cnum::decimal("1.5", prec);
+        let value = Complex::with_val_64(prec, (&component, &component));
+        assert!(cnum::is_finite(&value));
+        assert!(!cnum::abs(&value, prec).is_finite());
+        let actual = log_magnitude(&value, prec);
+        let expected = Float::with_val_64(reference_prec, &component).ln()
+            + Float::with_val_64(reference_prec, 2).ln() / 2;
+        let error = Float::with_val_64(reference_prec, actual - &expected).abs() / expected;
+        assert!(error < cnum::epsilon(70, reference_prec));
+    }
+
+    #[test]
+    fn cauchy_height_conditioning_tracks_exponential_and_logarithmic_sensitivity() {
+        let prec = cnum::digits_to_bits(70);
+        let t_max = Float::with_val_64(prec, 10);
+        let nodes = build_uniform_nodes(&t_max, 256, prec);
+        let weights = build_trapezoidal_weights(&t_max, 256, prec);
+        let one = cnum::one(prec);
+        let samples = vec![one.clone(); nodes.len()];
+        let height = cnum::parse_complex("0.25", "0", prec).unwrap();
+        let value = cauchy_eval(
+            &height, &samples, &nodes, &weights, &t_max, &one, &one, &one, prec, false,
+        )
+        .unwrap();
+        for shift in [-2i32, -1, 0, 1, 2] {
+            let mut expected = value.clone();
+            let mut expected_log_gain = Float::new_64(prec);
+            for _ in 0..shift.unsigned_abs() {
+                let magnitude = cnum::abs(&expected, prec);
+                let gain = if shift > 0 {
+                    magnitude.max(&Float::with_val_64(prec, 1)).ln()
+                } else {
+                    -magnitude.min(&Float::with_val_64(prec, 1)).ln()
+                };
+                expected_log_gain += gain;
+                expected = if shift > 0 {
+                    cnum::checked_exp(&expected, prec).unwrap()
+                } else {
+                    Complex::with_val_64(prec, expected.ln_ref())
+                };
+            }
+            expected_log_gain -= cnum::abs(&expected, prec)
+                .min(&Float::with_val_64(prec, 1))
+                .ln();
+            let (actual, log_gain) = eval_at_height_with_conditioning(
+                &(height.clone() + shift),
+                &samples,
+                &nodes,
+                &weights,
+                &t_max,
+                &one,
+                &one,
+                &one,
+                prec,
+                false,
+            )
+            .unwrap();
+            assert_eq!(actual, expected);
+            assert!(
+                Float::with_val_64(prec, log_gain - expected_log_gain).abs()
+                    < cnum::epsilon(70, prec)
+            );
+        }
     }
 
     #[test]

@@ -246,7 +246,7 @@ fn t920_reference_sqrt2_half() {
         prec,
     );
     let m = matching_digits(&f, &reference, prec);
-    assert!(m >= 55.0, "√2^^0.5 matched only {} digits vs reference", m);
+    assert!(m >= 55, "√2^^0.5 matched only {} digits vs reference", m);
     assert!(
         im_abs(&f, prec) < cnum::epsilon(50, prec),
         "√2^^0.5 must be real"
@@ -266,7 +266,7 @@ fn t921_reference_1p2_half() {
         prec,
     );
     let m = matching_digits(&f, &reference, prec);
-    assert!(m >= 55.0, "1.2^^0.5 matched only {} digits", m);
+    assert!(m >= 55, "1.2^^0.5 matched only {} digits", m);
     assert!(im_abs(&f, prec) < cnum::epsilon(50, prec));
 }
 
@@ -285,7 +285,7 @@ fn t922_reference_imaginary_base_and_schwarz() {
         prec,
     );
     let m = matching_digits(&f, &reference, prec);
-    assert!(m >= 35.0, "i^^0.5 matched only {} digits", m);
+    assert!(m >= 35, "i^^0.5 matched only {} digits", m);
 
     // Schwarz across the real axis of the BASE: F_{b̄}(h̄) = conj(F_b(h)).
     // For b=i, h real: F_{-i}(0.5) should equal conj(F_i(0.5)).
@@ -294,7 +294,7 @@ fn t922_reference_imaginary_base_and_schwarz() {
     let target = Complex::with_val_64(prec, f.conj_ref());
     let ms = matching_digits(&f_conj, &target, prec);
     assert!(
-        ms >= 35.0,
+        ms >= 35,
         "Schwarz F_{{-i}}(0.5)=conj(F_i(0.5)) matched {} digits",
         ms
     );
@@ -344,7 +344,7 @@ fn t931_precision_scaling_complex_base() {
     let f_lo_hi = Complex::with_val_64(prec_hi, &f_lo);
     let m = matching_digits(&f_lo_hi, &f_hi, prec_hi);
     assert!(
-        m >= 72.0,
+        m >= 72,
         "complex-base {}→{} scaling: only {} digits agree",
         lo,
         hi,
@@ -364,7 +364,7 @@ fn t940_integer_height_edges() {
     let b = parse("3", "0", prec);
     let f = dispatch::tetrate(&b, &parse("3", "0", prec), prec, digits).unwrap();
     assert!(
-        matching_digits(&f, &parse("7625597484987", "0", prec), prec) >= 40.0,
+        matching_digits(&f, &parse("7625597484987", "0", prec), prec) >= 40,
         "3^^3 = 7625597484987"
     );
     // F(0)=1, F(1)=b exactly for an arbitrary complex base.
@@ -442,7 +442,7 @@ fn t950_kouznetsov_b2_reality_reference_schwarz() {
     let reference = parse("1.458781816036421700683971661038587135296606605330907141888207751656464160881083209019144256057703804", "0", prec);
     let m = matching_digits(&f05, &reference, prec);
     assert!(
-        m >= 9.0,
+        m >= 9,
         "2^^0.5 matched only {} digits vs reference (got {})",
         m,
         f05.real()
@@ -456,7 +456,7 @@ fn t950_kouznetsov_b2_reality_reference_schwarz() {
     let target = Complex::with_val_64(prec, fp_v.conj_ref());
     let ms = matching_digits(&fm_v, &target, prec);
     assert!(
-        ms >= 9.0,
+        ms >= 9,
         "Schwarz F_2(h̄)=conj(F_2(h)) matched only {} digits",
         ms
     );
@@ -516,7 +516,7 @@ fn t961_kouznetsov_precision_scaling_b2() {
     let f_lo_hi = Complex::with_val_64(prec_hi, &f_lo);
     let m = matching_digits(&f_lo_hi, &f_hi, prec_hi);
     assert!(
-        m >= 11.0,
+        m >= 11,
         "Kouznetsov b=2 {}→{} scaling: only {} digits agree",
         lo,
         hi,
@@ -551,13 +551,7 @@ fn t962_kouznetsov_b2_complex_heights() {
         assert!(cnum::is_finite(&f), "F_2({}+{}i) must be finite", hr, hi);
         let target = Complex::with_val_64(prec, f.conj_ref());
         let m = matching_digits(&fc, &target, prec);
-        assert!(
-            m >= 9.0,
-            "Schwarz failed for h={}+{}i: {} digits",
-            hr,
-            hi,
-            m
-        );
+        assert!(m >= 9, "Schwarz failed for h={}+{}i: {} digits", hr, hi, m);
     }
 }
 

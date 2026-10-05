@@ -60,19 +60,19 @@ fn t800_golden_two_to_four() {
 
 #[test]
 fn t801_golden_e_to_three() {
-    // F_e(3) = e^(e^e). Cross-check vs unrolled tower at 100 digits.
+    // F_e(3) = exp(exp(exp(1))), checked independently at higher precision.
     let digits = 100;
     let prec = cnum::digits_to_bits(digits);
-    let b = parse(
-        "2.71828182845904523536028747135266249775724709369995",
-        "0",
-        prec,
-    );
+    let b = Complex::with_val_64(prec, Float::with_val_64(prec, 1).exp());
     let h = parse("3", "0", prec);
     let f = dispatch::tetrate(&b, &h, prec, digits).unwrap();
-    let expected = unrolled_tower(&b, 3, prec);
-    let m = matching_digits(&f, &expected, prec);
-    assert!(m >= 90, "e^^3 differs: matched only {} digits", m);
+    let reference_prec = cnum::digits_to_bits(digits + 40);
+    let expected = Complex::with_val_64(
+        reference_prec,
+        Float::with_val_64(reference_prec, 1).exp().exp().exp(),
+    );
+    let m = matching_digits(&f, &expected, reference_prec);
+    assert!(m >= digits, "e^^3 differs: matched only {} digits", m);
 }
 
 #[test]
@@ -289,7 +289,9 @@ fn t852_unit_circle_bases_functional_eq() {
             if numerator == 3 {
                 let error = dispatch::tetrate(&b, &z, prec, digits).unwrap_err();
                 assert!(
-                    error.contains("unsupported case") && error.contains("residual"),
+                    error.contains("unsupported case")
+                        && error.contains("boundary residual")
+                        && error.contains("two-sided unwrap retry"),
                     "{error}"
                 );
                 break;

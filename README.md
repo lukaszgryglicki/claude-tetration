@@ -339,12 +339,86 @@ tet [--quiet|--silent|-q] <precision_digits> <base_re> <base_im> <height_re> <he
 Detailed algorithm and iteration diagnostics go to stderr **by default**.
 Quiet flags or a truthy `SILENT` suppress progress, never fatal errors.
 
+**Precision and resources.** Significant digits and magnitude are independent:
+`10^^3 = 10^(10^10)` can be returned with 100,000 significant digits. The
+engine uses Rug's 64-bit precision APIs and widens MPFR's exponent range on
+every calling/worker thread to the library's supported extrema. On the tested
+64-bit build those binary exponent bounds are
+`[-4611686018427387903, 4611686018427387903]`, and the native precision maximum
+is `9223372036854775551` bits. Actual memory is exhausted far earlier; no
+additional digit cap is inferred from the exponent range.
+
+Mathematical values, tolerances, unbounded iteration counters and exact
+coefficients use arbitrary precision. π, e, logarithms and derived thresholds
+are computed at working precision, not read from native constants or fixed-digit
+tables. Only bounded indexes, native-library metadata and display/timing
+bookkeeping use native types. Rust API precision arguments are `u64`.
+
+There are no fixed application node, series-order, iteration, height-shift,
+continuation-step or per-value time budgets. Sizes follow precision and geometry,
+with native addressability checks; slow but improving solves may run for hours.
+Repeated states, unrepresentable updates, invalid branches and failed numerical
+gates still cause honest refusal. `TET_KOUZ_PATIENT` is no longer needed.
+Removing budgets does not establish convergence or canonical coverage.
+
+Use `cnum::format_float`, `format_complex`, `DisplayFloat` or `DisplayComplex`
+for wide-exponent values. These format the significand and exponent separately;
+Rug 1.30's ordinary formatter can attempt exponent-sized allocations.
+
+The checked complex exponential uses outward-rounded, binary-scaled MPFR
+component bounds, refining until their returned rounding agrees. This avoids
+MPC 1.4.1's component-underflow loop, tiny-input precision allocations and
+premature magnitude overflow when both components still fit. This certifies
+the primitive's rounding, not tetration's global forward error. Native-range
+and ordinary MPC-comparison regressions are in
+[`tests/phase11_resources.rs`](tests/phase11_resources.rs).
+
+Local reproducibility archive:
+`~/tetration-resource-limits-2026-10-04-artifacts/`, including source/binaries,
+raw logs and `limits-reference-check.json` (external-reference consistency).
+The corrected source/executable hashes are in `limits-post-geometry/manifest.json`;
+`limits-post-geometry-runtime-result.json` records 78 passing release/static/
+FreeBSD ST/MT output and precision checks. The frozen regression ledger
+(`limits-post-geometry-progress.json`) has 203 of 206 passing tests. The three
+unfinished regressions (`t423`, `t870`, `t872`) were stopped at the user's request
+and remain **unverified, not passed**; none were disabled or weakened.
+`limits-post-geometry-cancellations.json` preserves the cancellation provenance.
+Completed 118/130-digit constructions match
+corroborated external data for `2^^0.5` at their respective precisions.
+The actual `2^^5.1` real outputs round identically at 110 significant digits
+(empirical relative agreement: 118.35 digits), with relative imaginary components
+below `4.71e-128`. `limits-post-geometry-high-comparison.json` preserves these
+checks, actual outputs and hashes. Cross-precision agreement is not a global
+forward-error or canonicality certificate.
+The final handoff is `~/tetration-resource-limits-2026-10-04-1.md`;
+`limits-resource-final/manifest.json` in the archive records the final source,
+patch and evidence identities. No numerical jobs or new research remain running.
+
+The resource audit also exposed lost digits after finite height shifts:
+`2^^5.375` at 40/60 digits agreed to only 28.87 digits, although both recurrence
+residuals were zero (`limits-range-baseline-comparison.json` in that archive).
+Integer, Schroder and Kouznetsov evaluation now refine internal precision
+against a fixed output-digit goal, including tiny near-singular outputs and
+large imaginary phases. Decimal inputs are reparsed when refinement requires it.
+Kouznetsov also refines contour/normalization accuracy while preserving the
+selected fixed-point pair and log sheet. Regression coverage includes actual
+40/60/80-digit comparisons. The corrected-source 40-digit large-height regression
+passes (`limits-post-geometry-conditioning-40.json`); its cross-precision seed
+and the conditioning estimates are not independent canonicality certificates.
+
+Contour sizing uses the slower of both fixed-point tails. Automatic EM order
+now depends on spacing, scale and working precision, with optimal asymptotic
+truncation rather than a fixed order budget. At a 130-digit near-endpoint
+constant-Cauchy identity, this reduced error from `5.17e-104` to `7.00e-146`,
+below the `1e-133` target (`limits-geometry-library.log` in the archive).
+That quadrature witness does not certify the complete tetration construction.
+
 | variable | effect |
 |---|---|
 | `SILENT=1` | suppress progress diagnostics; fatal errors remain on stderr |
 | `TET_KOUZ_ANDERSON=1` / `TET_KOUZ_PICARD=1` | force alternative Kouznetsov iterators (diagnostics) |
 | `TET_KOUZ_NO_EM=1`, `TET_KOUZ_EM_K=<n>` | Euler–Maclaurin correction A/B switches |
-| `TET_KOUZ_CUT_ANCHOR=<ε₀>`, `TET_KOUZ_CUT_RATIO=<r>` | positive anchor (default 2), ratio strictly between 0 and 1 (default 0.72); oversized schedules are rejected |
+| `TET_KOUZ_CUT_ANCHOR=<ε₀>`, `TET_KOUZ_CUT_RATIO=<r>` | positive anchor (default 2), ratio strictly between 0 and 1 (default 0.72); unaddressable schedules are rejected |
 | `TET_KOUZ_CUT_CKPT=<file>` | atomic full-precision `TETCKPT2` checkpoints; exact base/precision/geometry matching is required. Corrupt, incompatible `TETCKPT1`, and I/O failures are errors, not silent cold starts |
 | `TET_KOUZ_UNWRAP_DEBUG=1` | branch-unwrap winding diagnostics |
 | `TET_KOUZ_RESID_DUMP=<prefix>` | full-precision residual profiles under the supplied prefix; collisions and I/O failures are reported |
@@ -418,7 +492,7 @@ Every row is subject to branch, domain, convergence and resource limits:
 | base class | heights | method | accuracy / status |
 |---|---|---|---|
 | `b = 0`, `b = 1` | integer / all | exact special case | exact |
-| nondegenerate `b` | integers `h ≥ −1` within iteration/exponent limits | direct iteration | finite-precision arithmetic; exact special cases |
+| nondegenerate `b` | integers `h ≥ −1` whose iteration chain fits MPFR | direct iteration | finite-precision arithmetic; exact special cases |
 | attracting regular cases (`√2`, `0.5`, `i`, `1.3+0.1i`, …) | tested complex heights | Schröder | independent 50/70-digit witnesses; not all-height coverage |
 | real `b > η` | heights within the reconstruction domain | Schwarz-symmetric Kouznetsov | base-2 half-height has an independent 50-digit cross-check |
 | general complex outside ST | case-dependent | experimental Kouznetsov / regular iteration | failures include `−2` and `−0.8+0.4i`; no class-wide accuracy certificate |
@@ -442,6 +516,8 @@ Numerically cross-checked, **not interval-certified**:
   `4.90e-51` from the independently constructed fatou.gp reference in
   [gp-tetration's values.json](https://github.com/Lightrunnerwastaken/gp-tetration/blob/main/research/reference/values.json).
   The older `1.4587818160364217112` anchor was inaccurate after about 16 digits.
+  In the archived dataset, the 200/500-digit records agree to about 240 digits,
+  but the 1000-labelled record agrees with them to only about 42 and is excluded.
 * Lambert branch identity/conditioning, FFT roundtrips and ST/MT bit identity,
   residual decisions, checkpoints and numerical tolerances include
   50/70/1000-digit checks. Primitive tests alone do not establish
@@ -713,8 +789,8 @@ final Cauchy application plus rounded integer FE steps.
 The boundary residual and FE check are consistency gates, **not certified
 forward-error bounds**. Error certification would additionally require
 conditioning, discretization/tail, roundoff and branch/uniqueness control.
-The existing Euler–Maclaurin coefficient table has 20 terms; arbitrary
-working precision does not remove this or the contour/node limits.
+Euler–Maclaurin coefficients are generated as exact rationals to the
+precision-driven order; geometry and actual memory still constrain solves.
 
 ### 6.5 Continuation solver
 
@@ -782,7 +858,8 @@ injects it directly). The construction:
    the walker now also **escalates reactively** — a rejected solve
    whose residual is a *near-miss* (within 3 decades of the gate,
    i.e. a resolution floor, not an O(0.1–1) ghost stall) is retried
-   once at doubled node tier before bisection.
+   at successively doubled node tiers while the near-miss criteria hold,
+   without a fixed refinement-count or maximum-node tier.
 6. **Ghost filtering and gates.** The discrete system admits spurious
    1-periodic-dressed near-solutions ("ghosts"). Defenses, all
    load-bearing and all documented from walk evidence: winding jumps
@@ -833,7 +910,10 @@ rerun these walks or verify their historical intermediate values or endpoint.
   extrapolant is insufficient. Cached Kouznetsov evaluation checks the base.
 * **Residual contract:** a final Kouznetsov state must meet
   `10^{−(digits+3)}`. Relaxed walker candidates cannot become successful final
-  answers just by printing an accuracy warning. GMRES checks the actual
+  answers just by printing an accuracy warning. Complex candidates must pass
+  that gate before costly normalization; failing ones retain the two-sided
+  retry, not an unbounded normalization attempt on unusable data.
+  GMRES checks the actual
   linear residual, not only its Arnoldi estimate.
 * **FE consistency, not proof:** the evaluator checks a precision-scaled
   recurrence residual. Kouznetsov normally checks the predecessor so a
@@ -844,10 +924,14 @@ rerun these walks or verify their historical intermediate values or endpoint.
   targeted guard does not certify arbitrary complex-base branch choices.
 * **Arbitrary-precision decisions:** tolerances, magnitudes, comparisons,
   continuation coordinates and checkpoints use MPFR/MPC precision rather
-  than f64 floors. Counts, indices and wall-clock statistics remain native.
+  than f64 floors. Unbounded counters and exact coefficients use GMP integers
+  and rationals. Only bounded indexes, library metadata and display/timing
+  statistics remain native.
   Lambert iteration separately accounts for branch-point conditioning.
 * **Independent evidence:** regular-reference checks at 50/70 digits exceed
   native 128-bit precision; targeted primitive checks reach 1000 digits.
+  Constant identities and returned digits are cross-checked through 10,000
+  digits, and a 100,000-significant-digit integer tower exercises actual output.
   Same-family agreement and printed digit count alone are not certification.
   [`FAILURE_CASES.md`](FAILURE_CASES.md) records the earlier correlated-error
   failure and the remaining limits.
@@ -857,13 +941,14 @@ rerun these walks or verify their historical intermediate values or endpoint.
 * **Coverage:** some near-parabolic, negative-real, general-complex and
   cut-base cases still fail. A failed rectangle or seed search is not proof
   that no alternative mathematical construction exists.
-* **Numerical budgets:** finite iteration, contour, node and coefficient
-  limits remain. For example, direct base-2 setup at 70 digits requests
-  65536 nodes but the direct budget is 32768. Its 1800-second CLI probe
-  stopped during continuation from the `b=2.35` anchor; no 70-digit base-2
-  value was obtained. This is a resource/method limitation, not a theorem
-  requiring parabolic machinery. The 50-digit independent comparison passed.
-* **Height domain:** off-contour values and excessive shifts are refused.
+* **Resources and convergence:** the former 32768/131072-node budgets and
+  fixed iteration/order limits are removed. Base-2 grid sizing requires
+  524288 nodes at 200 digits and 16777216 nodes at 1500 digits; those are
+  required sizes, not new caps or completed-solve evidence. Krylov storage
+  and Cauchy continuation resampling can be prohibitive. The earlier bounded
+  70-digit probe stopped at its `b=2.35` anchor, not at the requested `b=2`;
+  it remains invalid as base-2 accuracy evidence.
+* **Height domain:** off-contour values and unrepresentable shift chains are refused.
   There is no finite value at `h=−2` consistent with the nondegenerate
   recurrence through `F(−1)=0`. Base zero has only its integer convention;
   base one is the constant-function exception.
@@ -881,7 +966,7 @@ task assesses these directions without implementing new tetration constructions:
 | Direction | Why it is worth investigating | What must be established |
 |---|---|---|
 | Validated numerics | Residuals and same-family agreement do not bound output error | Outward-rounded enclosures for roots, series/tails, quadrature, normalization and inverse operators; explicit domain/branch conditions |
-| Real-base high-precision methods | The existing 32K direct-node cap already blocks base 2 at 70 digits | Resolution/conditioning estimates and independently checked references, not simply larger caps or looser gates |
+| Real-base high-precision methods | Large Cauchy grids and conditioning remain expensive after removing fixed node budgets | Resolution/conditioning estimates and independently checked references, not simply larger grids or looser gates |
 | Parabolic/root-of-unity cases | Sectorial Fatou coordinates exist in classical local theory; at λ=−1 use the second iterate | Truncation bounds, sector matching, inversion and the intended global normalization |
 | Near-parabolic continuation | Existing methods work on some points but become costly or stall | Stable parameter continuation and error control across changing contours |
 | Difficult complex bases | `−0.8+0.4i` and deep-band examples are concrete unresolved witnesses | Contours or merged-fixed-point constructions with controlled zeros, logarithmic branches and uniqueness hypotheses |

@@ -449,6 +449,9 @@ fn kouznetsov_normalization_checks_the_returned_function() {
     for (height, expected) in [("0", "1"), ("1", "2"), ("-1", "0")] {
         let actual = kouznetsov::eval_kouznetsov(&state, &base, &parse(height, "0", prec)).unwrap();
         assert_close(&actual, &parse(expected, "0", prec), digits, prec);
+        if height == "-1" {
+            assert!(cnum::is_zero(&actual));
+        }
     }
 }
 

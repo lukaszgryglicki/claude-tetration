@@ -39,6 +39,8 @@ use cnum::{DisplayComplex, DisplayFloat};
 /// base, this is a 10-100× speedup at digits ≥ 20.
 #[derive(Clone)]
 pub struct SchroderState {
+    /// Original base retained for higher-precision reconstruction.
+    pub base: Complex,
     /// Attracting (|λ|<1) or repelling (|λ|>1) fixed point of `b^z = z`.
     pub l: Complex,
     /// `ln(λ)` precomputed for `λ^h = exp(h · ln λ)` per cell.
@@ -88,6 +90,17 @@ pub fn tetrate_schroder(
     // state is rejected before we reach eval.
     let state = setup_schroder(b, fp_data, prec)?;
     eval_schroder(&state, h)
+}
+
+pub(crate) fn tetrate_schroder_at_digits(
+    b: &Complex,
+    h: &Complex,
+    fp_data: &FixedPointData,
+    prec: u64,
+    digits: u64,
+) -> Result<Complex, String> {
+    let state = setup_schroder(b, fp_data, prec)?;
+    eval_schroder_at_digits(&state, h, digits)
 }
 
 /// Post-validate `F(h)` by checking the functional equation
@@ -228,6 +241,7 @@ pub fn setup_schroder(
     }
 
     let base_state = SchroderState {
+        base: b.clone(),
         l: l.clone(),
         ln_lambda,
         ln_b,
@@ -259,17 +273,41 @@ pub fn setup_schroder(
     Ok(base_state)
 }
 
-/// Evaluate `F_b(h)` from a cached `SchroderState`. The expensive σ̃ build is
-/// already amortised; this call costs one `λ^h` exponential, one O(N) Horner
-/// pass, and (rarely) a few `b^·`/`log_b` integer-shift iterations.
+/// Evaluate from a cached state, refining when conditioning consumes its
+/// original working-precision tolerance.
 ///
 /// Uses `sigma_inner_radius` as the target for the h-shift, which was
 /// determined during setup as the radius at which σ̃ actually converged.
 /// This ensures σ̃⁻¹ is evaluated well inside its convergence disk.
 pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, String> {
+    eval_schroder_with_tolerance(state, h, cnum::working_epsilon(state.prec))
+}
+
+/// Evaluate at a fixed decimal-digit goal, independent of refined working precision.
+pub fn eval_schroder_at_digits(
+    state: &SchroderState,
+    h: &Complex,
+    digits: u64,
+) -> Result<Complex, String> {
+    cnum::require_precision(state.prec, digits)?;
+    eval_schroder_with_tolerance(state, h, cnum::epsilon(digits, state.prec))
+}
+
+fn eval_schroder_with_tolerance(
+    state: &SchroderState,
+    h: &Complex,
+    tolerance: Float,
+) -> Result<Complex, String> {
     cnum::init_mpfr();
     if !cnum::is_finite(h) {
         return Err("Schröder height must be finite".into());
+    }
+    if !cnum::is_finite(&state.base)
+        || cnum::is_zero(&state.base)
+        || cnum::is_one(&state.base)
+        || state.ln_b != Complex::with_val_64(state.prec, state.base.ln_ref())
+    {
+        return Err("Schröder base does not match a finite nondegenerate cached state".into());
     }
     // Roundoff in F(-1) must not turn log(0) into a finite surrogate.
     if h.imag().is_zero() && h.real().is_integer() && *h.real() <= -2 {
@@ -278,12 +316,85 @@ pub fn eval_schroder(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
             DisplayFloat(h.real())
         ));
     }
-    let value = eval_schroder_raw(state, h)?;
-    validate_functional_equation(state, h, &value, state.prec)?;
-    Ok(value)
+    if h.imag().is_zero() && *h.real() == -1 {
+        return Ok(cnum::zero(state.prec));
+    }
+    let mut refined = None;
+    loop {
+        let current = refined.as_ref().unwrap_or(state);
+        let (value, log_amplification) = eval_schroder_with_conditioning(current, h)?;
+        if let Some(prec) =
+            cnum::conditioned_precision(&log_amplification, &tolerance, current.prec)?
+        {
+            if cnum::verbose() {
+                eprintln!(
+                    "schroder height conditioning: refining from {} to {prec} working bits",
+                    current.prec
+                );
+            }
+            let fp_prec = prec
+                .checked_add(32)
+                .ok_or("Schröder fixed-point guard precision overflow")?;
+            cnum::check_precision(fp_prec)?;
+            let ln_base = Complex::with_val_64(fp_prec, current.base.ln_ref());
+            let seed = Complex::with_val_64(fp_prec, &current.l);
+            let l = crate::kouznetsov::newton_fixed_point(&ln_base, &seed, fp_prec)?;
+            let l = Complex::with_val_64(prec, l);
+            let ln_base = Complex::with_val_64(prec, current.base.ln_ref());
+            let lambda = Complex::with_val_64(prec, &l * &ln_base);
+            let fp = FixedPointData {
+                fixed_point: l,
+                lambda_abs: cnum::abs(&lambda, prec),
+                lambda,
+            };
+            refined = Some(setup_schroder(&current.base, &fp, prec)?);
+            continue;
+        }
+        validate_functional_equation(current, h, &value, current.prec)?;
+        return Ok(value);
+    }
 }
 
 fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, String> {
+    eval_schroder_with_conditioning(state, h).map(|(value, _)| value)
+}
+
+fn inverse_sum_conditioning(
+    state: &SchroderState,
+    height: &Complex,
+    coordinate: &Complex,
+    inverse: &Complex,
+    value: &Complex,
+) -> Result<Float, String> {
+    let prec = state.prec;
+    let mut power = cnum::one(prec);
+    let mut sensitivity = Float::new_64(prec);
+    for (index, coefficient) in state.sigma_inv.iter().enumerate().skip(1) {
+        power = Complex::with_val_64(prec, &power * coordinate);
+        let term = Complex::with_val_64(prec, coefficient * &power);
+        sensitivity += cnum::abs(&term, prec) * Integer::from(index);
+    }
+    if !sensitivity.is_finite() {
+        return Err("Schröder inverse-series sensitivity is non-finite".into());
+    }
+    let phase_gain = (cnum::log_magnitude(height, prec)
+        + cnum::log_magnitude(&state.ln_lambda, prec))
+    .max(&Float::new_64(prec));
+    let input_scale = sensitivity.ln() + phase_gain;
+    let scale = cnum::log_magnitude(&state.l, prec)
+        .max(&cnum::log_magnitude(inverse, prec))
+        .max(&input_scale)
+        .max(&Float::new_64(prec));
+    Ok(
+        (scale - cnum::log_magnitude(value, prec).max(&Float::new_64(prec)))
+            .max(&Float::new_64(prec)),
+    )
+}
+
+fn eval_schroder_with_conditioning(
+    state: &SchroderState,
+    h: &Complex,
+) -> Result<(Complex, Float), String> {
     let prec = state.prec;
     let lam_h = lambda_pow(h, &state.ln_lambda, prec)?;
     let t = Complex::with_val_64(prec, &state.s1 * &lam_h);
@@ -302,7 +413,10 @@ fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
     // This handles bases near η where σ̃⁻¹ has a small effective radius even
     // when sigma_inner_radius reports otherwise.
     if let Ok(inv_t) = eval_series_checked(&state.sigma_inv, &t, prec) {
-        return Ok(Complex::with_val_64(prec, &state.l + &inv_t));
+        let value = Complex::with_val_64(prec, &state.l + &inv_t);
+        let log_amplification = inverse_sum_conditioning(state, h, &t, &inv_t, &value)?
+            - cnum::log_magnitude(&value, prec).min(&Float::new_64(prec));
+        return Ok((value, log_amplification));
     }
 
     let log_lam_abs = state.lam_abs.clone().ln();
@@ -313,7 +427,7 @@ fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
         .min(&t_abs);
 
     let mut effective_target = initial_target / 2;
-    let (k, mut f) = loop {
+    let (k, mut f, mut log_amplification) = loop {
         let ratio = Float::with_val_64(prec, &effective_target / &t_abs);
         if !ratio.is_finite() || ratio <= 0 {
             return Err("Schröder height-shift target exceeded MPFR's exponent range".into());
@@ -350,7 +464,9 @@ fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
                         DisplayFloat(&effective_target)
                     );
                 }
-                break (k, f0);
+                let log_amplification =
+                    inverse_sum_conditioning(state, &h_shifted, &t_shifted, &inv_t_shifted, &f0)?;
+                break (k, f0, log_amplification);
             }
             Err(_) => {
                 effective_target /= 2;
@@ -380,6 +496,7 @@ fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
     let forward_log = k > 0;
     let shifts = k.abs();
     let mut step = Integer::new();
+    let log_ln_b = cnum::log_magnitude(&state.ln_b, prec);
     while shifts > step {
         if cnum::verbose() && (step == 0 || step.is_divisible_u(1024)) {
             eprintln!(
@@ -389,9 +506,14 @@ fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
         }
         if forward_log {
             check_chain(&f, &step)?;
+            let amplification =
+                -cnum::log_magnitude(&f, prec).min(&Float::new_64(prec)) - &log_ln_b;
+            log_amplification += amplification.max(&Float::new_64(prec));
             let ln_f = Complex::with_val_64(prec, f.ln_ref());
             f = Complex::with_val_64(prec, &ln_f / &state.ln_b);
         } else {
+            let amplification = cnum::log_magnitude(&f, prec).max(&Float::new_64(prec)) + &log_ln_b;
+            log_amplification += amplification.max(&Float::new_64(prec));
             let exponent = Complex::with_val_64(prec, &f * &state.ln_b);
             f = cnum::checked_exp(&exponent, prec)?;
             check_chain(&f, &step)?;
@@ -399,7 +521,8 @@ fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
         step += 1;
     }
     check_chain(&f, &step)?;
-    Ok(f)
+    log_amplification -= cnum::log_magnitude(&f, prec).min(&Float::new_64(prec));
+    Ok((f, log_amplification))
 }
 
 /// `λ^h = exp(h · ln λ)`. The principal branch of `ln λ` is fine inside the

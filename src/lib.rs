@@ -30,10 +30,27 @@ pub fn tetrate_str(
     let digits: u64 = prec_str
         .parse()
         .map_err(|_| format!("invalid precision: {:?}", prec_str))?;
-    let prec = cnum::checked_input_precision(digits, &[base_re, base_im, height_re, height_im])?;
-    let b = cnum::parse_complex(base_re, base_im, prec)?;
-    let h = cnum::parse_complex(height_re, height_im, prec)?;
-    let result = dispatch::tetrate(&b, &h, prec, digits)?;
+    let mut prec =
+        cnum::checked_input_precision(digits, &[base_re, base_im, height_re, height_im])?;
+    let result = loop {
+        let b = cnum::parse_complex(base_re, base_im, prec)?;
+        let h = cnum::parse_complex(height_re, height_im, prec)?;
+        let value = dispatch::tetrate(&b, &h, prec, digits)?;
+        let next_prec = value.real().prec_64().max(value.imag().prec_64());
+        if next_prec > prec
+            && (cnum::parse_complex(base_re, base_im, next_prec)? != b
+                || cnum::parse_complex(height_re, height_im, next_prec)? != h)
+        {
+            if cnum::verbose() {
+                eprintln!(
+                    "tet: reparsing decimal inputs at {next_prec} bits after precision refinement"
+                );
+            }
+            prec = next_prec;
+            continue;
+        }
+        break value;
+    };
     if !cnum::is_finite(&result) {
         return Err("tetration returned a non-finite result".into());
     }

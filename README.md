@@ -90,8 +90,8 @@ its tiny imaginary part is numerical roundoff, not a mathematical imaginary part
 * **Status (October 2026):** direct inverse-Poincare series extend strictly
   attracting coverage, including independently checked 100-digit boundary-band
   values, 1000-digit complex-height results and a 100,000-digit native-scale
-  fractional-height witness. Taylor jumps now accelerate real near-neutral
-  bases without changing the regular-iteration family.
+  fractional-height witness. Taylor jumps now accelerate real positive and
+  genuinely complex near-neutral attractors without changing the regular family.
   Coverage is not universal or globally certified.
   Some neutral, negative-real, general-complex and
   cut-base cases remain unsupported. See [`FAILURE_CASES.md`](FAILURE_CASES.md)
@@ -306,6 +306,9 @@ the C runtime (for example `target/x86_64-unknown-linux-gnu/release/tet`).
 It requires a toolchain supporting static CRT linking, its static system
 libraries and `file`; it fails if the output is not actually static.
 The native target comes from `rustc -vV` (`RUSTC` is configurable).
+FreeBSD static builds suppress Clang's unused-driver-argument warning for
+Rust's redundant `-no-pie` alongside `-static`; other linker warnings and
+errors, caller `RUSTFLAGS`, and the actual static-executable check remain.
 Cross-compilation, including GNU-to-musl, is not configured: the current
 GMP dependency rejects it without additional feature changes.
 `install-static` installs the static executable instead of the normal release
@@ -518,6 +521,20 @@ Every row is subject to branch, domain, convergence and resource limits:
 
 Numerically cross-checked, **not interval-certified**:
 
+* Complex near-neutral bases now have independent **100-digit real/complex-height**
+  witnesses at `b=1.444667861009766+1e-15i`, including its tiny real-height
+  imaginary component. Separate 360-digit classical orbit/log calculations
+  agree beyond 106 component-relative digits at two depths.
+  A closer base (the full real part in
+  [`tests/phase14_complex_jumps.rs`](tests/phase14_complex_jumps.rs), plus
+  `1e-40i`) has multiplier gap about `1.37e-20`; its half-height matches
+  independent **50/70-digit** rounding, including the `4.39e-41` imaginary part.
+  This exposed and repaired a five-last-place-unit error that whole-complex
+  norm conditioning missed. Local jump tests also exercise counts beyond
+  `u128`, not merely native floating-point precision.
+  In the final Linux campaign, the first base's 100-digit complex-height CLI
+  takes about 113 seconds; the closer 70-digit real-height CLI takes about
+  eleven minutes. These are measured witnesses, not universal runtime bounds.
 * Real near-neutral bases now have independent **100-digit complex-height**
   witnesses, including `b=1.444667861009766` and a 61-significant-digit base
   below `exp(1/e)` with multiplier gap about `1.58e-30`.
@@ -640,12 +657,30 @@ The 25,215-cell ordinary grid and nine transition cells match the preceding
 implementation, and eight unaffected CLI checks retain exact outputs through
 100,000 digits. This is focused validation, not a new full-suite pass.
 
+The complex extension is retained in
+`~/tetration-next-2026-10-06-artifacts/`. Its independent computations are
+`next-complex-reference.json` and `next-complex-middle-reference.json`.
+Under `next-final-v1/`, the frozen ledger records **167 focused Linux Rust
+passes**, one existing ignored debug test and two deferred older expensive
+tests. Native FreeBSD adds **97 Rust passes**, and the Makefile tests pass
+on both systems. The **40 ST/MT/platform checks** comprise 32 independently
+referenced values and eight expected singularities, with identical stdout/stderr
+across Linux, static Linux, FreeBSD and static FreeBSD.
+Eight unchanged-path comparisons retain outputs through 100,000
+digits. `extra-checks.json` records the 70-digit closer witness and two
+100-digit rotating/oscillating comparisons with the old scalar engine.
+Those direction controls can be slower with jumps; acceleration is not
+a universal speedup. Earlier probes at an even smaller multiplier gap
+near `1.87e-30` produced no output within 600 seconds, and a rotating
+140-digit probe exceeded 180 seconds. They remain unverified development
+probes, not solver refusals or successful accuracy checks.
+
 ### 5.2 ⏳ Pending / in progress
 
 The cut-walker endpoint, genuinely neutral/parabolic constructions, difficult
 complex-base contours and validated forward-error bounds remain research work.
-Real positive near-neutral multipliers now use bounded Taylor jumps, and
-t710/t871 pass without being ignored. Genuinely neutral and other slowly
+Real positive and genuinely complex near-neutral attractors now use bounded
+Taylor jumps, and t710/t871 pass without being ignored. Genuinely neutral and other slowly
 attracting regimes remain separate; no practical runtime is promised for
 every input. No old cut walk was restarted.
 A small positive imaginary
@@ -854,15 +889,25 @@ analytic inverse disk has radius `rho=(1-|lambda|)/(16*|a|)`, with tail bound
 precision at the actual normalization displacement, not a fixed numerical cap.
 Normalization follows the forward orbit from 1 into the disk, inverts the germ
 locally, compensates the multiplier power and checks reconstructed `F(0)=1`.
-Every evaluation rechecks its disk, tail and roundoff estimate.
+Germ evaluations recheck their disk, tail and roundoff estimate.
 
 For real attracting multipliers close to `+1`, scaled Taylor compositions
 accelerate both normalization and height unwinding in exact dyadic step blocks
-(`src/schroder_jumps.rs`). Analytic disks, outward-rounded coefficients,
-fixed-point defects and derivative/error bounds control each jump; the original
-single-step path remains elsewhere. Counts use GMP integers, and truncation
-order follows working precision. This accelerates the same regular family,
-not a parabolic surrogate or a new choice of logarithmic branch.
+(`src/schroder_jumps.rs`). Genuinely complex strictly attracting parameters
+also have a complex-coefficient engine (`src/schroder_complex_jumps.rs`),
+without changing the real engine's arithmetic. Its analytic majorants use
+`|lambda|`, and a right-half-plane fixed-point guard protects the principal
+logarithm. Analytic disks, outward coefficient-error bounds, fixed-point
+defects and derivative/error bounds control each jump; the original single-step
+path remains where a guarded block is unavailable. Counts use GMP integers,
+and truncation order follows working precision. This accelerates the same
+regular family, not a parabolic surrogate or a new logarithmic branch.
+
+After complex jumps, refinement scales the norm error budget to each nonzero
+output component, so a small imaginary part cannot borrow the real part's
+accuracy. This can require additional working precision. Cached `F(0)=1` and
+`F(1)=b` use their exact anchors; setup still checks the raw reconstruction.
+The real-engine and no-jump conditioning paths are unchanged.
 
 Log-domain height shifts avoid overflowing an unnecessary `lambda^h` or
 discarding an underflowed coordinate when a representable shifted evaluation
@@ -1098,6 +1143,7 @@ rerun these walks or verify their historical intermediate values or endpoint.
 
 **Further progress is possible; universal finite values are not.** The
 October 5 work implements the strict-attractor inverse construction in §6.3.
+The October 6 steps add real/complex near-neutral jumps, not neutral-sector solutions.
 The following remaining directions require separate mathematical work:
 
 | Direction | Why it is worth investigating | What must be established |
@@ -1106,6 +1152,7 @@ The following remaining directions require separate mathematical work:
 | Real-base high-precision methods | Large Cauchy grids and conditioning remain expensive after removing fixed node budgets | Resolution/conditioning estimates and independently checked references, not simply larger grids or looser gates |
 | Parabolic/root-of-unity cases | Sectorial Fatou coordinates exist in classical local theory; at λ=−1 use the second iterate | Truncation bounds, sector matching, inversion and the intended global normalization |
 | Near-parabolic continuation | Existing methods work on some points but become costly or stall | Stable parameter continuation and error control across changing contours |
+| Negative/rotating near-neutral attractors | Pure negative real multipliers still use scalar steps; generic complex jumps can cost more than those steps | Cancellation-aware iterates with local error/branch bounds, not relaxed precision goals |
 | Difficult complex bases | `−0.8+0.4i` remains unresolved; the former strictly attracting deep-band witness is now independently checked | Contours or merged-fixed-point constructions with controlled zeros, logarithmic branches and uniqueness hypotheses |
 | Cut-base limits | Upper-half-plane continuation supplies an intended branch convention | Stable convergence to the actual ε=0 endpoint, rather than quoting a small nonzero-ε value or a polynomial guess |
 
@@ -1156,6 +1203,8 @@ src/
   regions.rs         Shell–Thron classification (|λ| bands)
   lambertw.rs        Lambert W (W₀/W₋₁/W₊₁), Halley iteration
   schroder.rs        attracting inverse-Poincare germ; classical reversion, shifts
+  schroder_jumps.rs  real Taylor jumps and real/complex dispatch
+  schroder_complex_jumps.rs  guarded complex coefficient/error-disk jumps
   kouznetsov.rs      Cauchy-integral solver: grids, FFT matvec, LM Newton,
                      EM correction, normalization, continuation,
                      cut-base ε-walker (§ 6.7)
@@ -1163,7 +1212,7 @@ src/
   cnum.rs            complex-number helpers, parsing/formatting, env flags
   integer_height.rs  finite-precision integer towers and exact special cases
   linear_approx.rs   deprecated error-only compatibility entry point
-tests/               phase1…phase12 plus Python plotting/Makefile regressions
+tests/               phase1…phase14 plus Python plotting/Makefile regressions
                      batteries (CLI, regions, Schröder, Kouznetsov,
                      regression witnesses incl. the t860 case)
 FAILURE_CASES.md     current failure contracts + labeled historical observations
@@ -1174,9 +1223,10 @@ updates.md           dated research log (current campaign status)
 
 ```console
 $ TET_MT=4 cargo test --release --all-targets -- --test-threads=1
-$ cargo test --release --lib       # fast unit layer (<1 min)
+$ cargo test --release --lib       # includes high-precision jump cases
 $ TET_MT=2 cargo test --release --test phase12_coverage -- --test-threads=1
 $ TET_MT=2 cargo test --release --test phase13_near_neutral -- --test-threads=1
+$ TET_MT=2 cargo test --release --test phase14_complex_jumps -- --test-threads=1
 $ cargo test --release --test phase8_verification   # regression witnesses
 $ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_plotting.py'
 $ cargo test --release --doc

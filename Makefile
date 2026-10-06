@@ -27,8 +27,12 @@ debug:
 	@$(CARGO) build $(CARGO_OPTIONS)
 
 static:
-	@RUSTFLAGS="$(RUSTFLAGS) -C target-feature=+crt-static" \
-		$(CARGO) build $(CARGO_OPTIONS) --release --target "$(STATIC_TARGET)"
+	@target="$(STATIC_TARGET)"; \
+		flags="$(RUSTFLAGS) -C target-feature=+crt-static"; \
+		case "$$target" in \
+			*-freebsd) flags="$$flags -C link-arg=-Wno-unused-command-line-argument" ;; \
+		esac; \
+		RUSTFLAGS="$$flags" $(CARGO) build $(CARGO_OPTIONS) --release --target "$$target"
 	@kind="$$(LC_ALL=C file -b "$(CARGO_TARGET_DIR)/$(STATIC_TARGET)/release/tet")"; \
 		case "$$kind" in \
 			*"statically linked"*|*"static-pie linked"*) ;; \

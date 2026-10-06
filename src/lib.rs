@@ -16,6 +16,7 @@ pub mod linear_approx;
 pub mod mt;
 pub mod regions;
 pub mod schroder;
+mod schroder_complex_jumps;
 mod schroder_jumps;
 
 /// Top-level string-in / string-out API. Parses precision and complex inputs as

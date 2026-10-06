@@ -1,3 +1,31 @@
+# Status Update — 2026-10-06 (complex near-neutral extension)
+
+Guarded Taylor jumps now support genuinely complex strictly attracting
+multipliers in both normalization and height unwinding. Complex coefficient
+error disks, analytic tails, actual-map defects and principal-log guards
+preserve the regular family and the old positive-real engine.
+No public API/state field, dependency or solver limit was added.
+
+Independent references verify 100-digit real/complex heights at
+`b=1.444667861009766+1e-15i`, and 50/70-digit half-heights at the closer
+61-digit real base plus `1e-40i`. The latter uncovered a five-last-place-unit
+imaginary-component error: complex jumps now refine for each nonzero output
+component, not only the whole norm. Exact cached anchors retain working
+precision. Local primitive tests exercise logical counts beyond `u128`.
+
+The reported FreeBSD static-link warning is handled with a FreeBSD-only
+unused-driver-argument flag, retaining other linker diagnostics, caller flags
+and real static-ELF checks.
+
+The frozen source passes 167 focused Linux Rust tests, 97 native FreeBSD tests,
+40 byte-identical ST/MT/platform checks and unchanged outputs through 100,000
+digits. Old expensive/prohibited cases remain deferred rather than disguised
+as passes. Rotating/oscillating controls agree with scalar iteration but may
+be slower; still closer complex probes remain externally time-limited.
+README §5 records the precise reference, grid and archive scope.
+
+---
+
 # Status Update — 2026-10-06
 
 Real near-neutral regular iteration now uses scaled dyadic Taylor jumps in

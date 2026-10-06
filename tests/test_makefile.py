@@ -46,10 +46,11 @@ class MakefileTests(unittest.TestCase):
         native_target = "$(rustc -vV | sed -n 's/^host: //p')"
         output = self.make("static", "CARGO_TARGET_DIR=build output")
         self.assertIn("-C target-feature=+crt-static", output)
-        self.assertIn(f'--target "{native_target}"', output)
+        self.assertIn(f'target="{native_target}"', output)
+        self.assertIn('--target "$target"', output)
         self.assertIn('--target-dir "build output"', output)
         self.assertIn(
-            '--target "custom-target"',
+            'target="custom-target"',
             self.make("static", "STATIC_TARGET=custom-target"),
         )
         for target, source in [
@@ -62,6 +63,30 @@ class MakefileTests(unittest.TestCase):
                 )
                 self.assertIn('install -d "/tmp/stage/data/scripts"', output)
                 self.assertIn(f'install -m 0755 "{source}" "/tmp/stage/data/scripts/tet"', output)
+
+    def test_static_driver_workaround_is_freebsd_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cargo = Path(directory) / "cargo"
+            cargo.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$RUSTFLAGS" "$@"\n'
+                'printf "%s\\n" "stop after flags" >&2\nexit 1\n'
+            )
+            cargo.chmod(0o755)
+            for target in ["x86_64-unknown-freebsd", "aarch64-unknown-freebsd",
+                           "x86_64-unknown-linux-gnu"]:
+                with self.subTest(target=target):
+                    output = self.make(
+                        "static", f"CARGO={cargo}", f"STATIC_TARGET={target}",
+                        "RUSTFLAGS=-C opt-level=2", dry=False,
+                        expected_error="stop after flags",
+                    )
+                    flags = output.splitlines()[0]
+                    self.assertIn("-C opt-level=2 -C target-feature=+crt-static", flags)
+                    self.assertEqual(
+                        "-C link-arg=-Wno-unused-command-line-argument" in flags,
+                        target.endswith("-freebsd"),
+                    )
+                    self.assertIn(f"--target\n{target}\n", output)
 
     def test_static_rejects_non_static_outputs(self):
         if not shutil.which("file"):

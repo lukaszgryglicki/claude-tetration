@@ -4,14 +4,45 @@ use rug::{
     Complex, Float, Integer,
 };
 
-use crate::cnum;
+use crate::{cnum, schroder_complex_jumps::ComplexOrbitJumps};
 
 struct TaylorJet {
     lower: Vec<Float>,
     upper: Vec<Float>,
 }
 
-pub(crate) struct OrbitJumps {
+pub(crate) enum OrbitJumps {
+    Real(RealOrbitJumps),
+    Complex(ComplexOrbitJumps),
+}
+
+impl OrbitJumps {
+    pub fn new(
+        ln_b: &Complex,
+        fixed_point: &Complex,
+        logarithm: bool,
+        prec: u64,
+    ) -> Result<Option<Self>, String> {
+        if ln_b.imag().is_zero() && fixed_point.imag().is_zero() {
+            Ok(RealOrbitJumps::new(ln_b, fixed_point, logarithm, prec)?.map(Self::Real))
+        } else {
+            Ok(ComplexOrbitJumps::new(ln_b, fixed_point, logarithm, prec)?.map(Self::Complex))
+        }
+    }
+
+    pub fn advance(
+        &mut self,
+        point: &Complex,
+        maximum: Option<&Float>,
+    ) -> Result<Option<Jump>, String> {
+        match self {
+            Self::Real(real) => real.advance(point, maximum),
+            Self::Complex(complex) => complex.advance(point, maximum),
+        }
+    }
+}
+
+pub(crate) struct RealOrbitJumps {
     logarithm: bool,
     prec: u64,
     order: usize,
@@ -86,7 +117,7 @@ fn compose(a: &[Float], b: &[Float], prec: u64, round: Round) -> Vec<Float> {
     result
 }
 
-impl OrbitJumps {
+impl RealOrbitJumps {
     pub fn new(
         ln_b: &Complex,
         fixed_point: &Complex,
@@ -507,7 +538,11 @@ mod tests {
         let prec = cnum::digits_to_bits(70);
         let (a, fixed) = parameters(prec, "1e-8");
         let complex_a = a.clone() + cnum::parse_complex("0", "1e-100", prec).unwrap();
-        for logarithm in [complex_a, -a.clone(), cnum::one(prec)] {
+        assert!(matches!(
+            OrbitJumps::new(&complex_a, &fixed, true, prec).unwrap(),
+            Some(OrbitJumps::Complex(_))
+        ));
+        for logarithm in [-a.clone(), cnum::one(prec)] {
             assert!(OrbitJumps::new(&logarithm, &fixed, true, prec)
                 .unwrap()
                 .is_none());

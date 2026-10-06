@@ -434,7 +434,11 @@ fn setup_poincare(b: &Complex, fp: &FixedPointData, prec: u64) -> Result<Schrode
         };
         if let Some(jump) = jump {
             point = jump.value;
-            power *= Float::with_val_64(work_prec, lambda.real()).pow(&jump.steps);
+            if lambda.imag().is_zero() {
+                power *= Float::with_val_64(work_prec, lambda.real()).pow(&jump.steps);
+            } else {
+                power *= lambda.clone().pow(&jump.steps);
+            }
             shifts += jump.steps;
             jump_count += 1;
             if cnum::verbose() && jump_count.is_power_of_two() {
@@ -594,6 +598,12 @@ fn eval_schroder_with_tolerance(
     if h.imag().is_zero() && *h.real() == -1 {
         return Ok(cnum::zero(state.prec));
     }
+    if cnum::is_zero(h) {
+        return Ok(cnum::one(state.prec));
+    }
+    if cnum::is_one(h) {
+        return Ok(Complex::with_val_64(state.prec, &state.base));
+    }
     let validation_tolerance = Float::with_val_64(state.prec, &tolerance / 1000);
     let mut refined = None;
     loop {
@@ -673,6 +683,16 @@ fn inverse_sum_conditioning(
         (scale - cnum::log_magnitude(value, prec).max(&Float::new_64(prec)))
             .max(&Float::new_64(prec)),
     )
+}
+
+fn component_conditioning(value: &Complex, prec: u64) -> Float {
+    let magnitude = cnum::log_magnitude(value, prec);
+    let smallest = [value.real(), value.imag()]
+        .into_iter()
+        .filter(|component| !component.is_zero())
+        .map(|component| component.clone().abs().ln())
+        .fold(magnitude.clone(), |scale, component| scale.min(&component));
+    (magnitude - smallest).max(&Float::new_64(prec))
 }
 
 fn eval_schroder_with_conditioning(
@@ -843,6 +863,10 @@ fn eval_schroder_with_conditioning(
     log_amplification -= cnum::log_magnitude(&f, prec).min(&Float::new_64(prec));
     if jump_count > 0 {
         log_amplification += jump_error_log + Float::with_val_64(prec, updates + 1).ln();
+        if matches!(&jumps, Some(OrbitJumps::Complex(_))) {
+            // Complex error disks must protect each returned component, not just |F|.
+            log_amplification += component_conditioning(&f, prec);
+        }
     }
     Ok((f, log_amplification))
 }
@@ -1263,6 +1287,54 @@ fn eval_series_checked(coeffs: &[Complex], w: &Complex, prec: u64) -> Result<Com
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_exact_anchors_keep_working_precision() {
+        let digits = 50;
+        let prec = cnum::digits_to_bits(digits);
+        let base = cnum::parse_complex("1.25", "0.125", 32).unwrap();
+        let crate::regions::Region::ShellThronInterior(fp) =
+            crate::regions::classify(&base, prec).unwrap()
+        else {
+            panic!("expected a strict attractor");
+        };
+        let state = setup_schroder(&base, &fp, prec).unwrap();
+        for (height, expected) in [
+            (-1, cnum::zero(prec)),
+            (0, cnum::one(prec)),
+            (1, Complex::with_val_64(prec, &base)),
+        ] {
+            let height = Complex::with_val_64(prec, height);
+            let actual = eval_schroder_at_digits(&state, &height, digits).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual.real().prec_64(), prec);
+            assert_eq!(actual.imag().prec_64(), prec);
+        }
+    }
+
+    #[test]
+    fn complex_jump_conditioning_protects_both_components() {
+        let prec = cnum::digits_to_bits(100);
+        for (real, imaginary) in [
+            ("1", "1e-40"),
+            ("-1", "1e-40"),
+            ("1e-40", "1"),
+            ("1e-40", "-1"),
+            ("1e1000", "1e960"),
+            ("1e-960", "1e-1000"),
+        ] {
+            let value = cnum::parse_complex(real, imaginary, prec).unwrap();
+            let gain = component_conditioning(&value, prec);
+            let next = cnum::conditioned_precision(&gain, &cnum::working_epsilon(prec), prec)
+                .unwrap()
+                .unwrap();
+            assert_eq!(next, prec + 165, "{real}+{imaginary}i");
+        }
+        for (real, imaginary) in [("1", "0"), ("0", "1"), ("-1", "0"), ("0", "-1")] {
+            let value = cnum::parse_complex(real, imaginary, prec).unwrap();
+            assert!(component_conditioning(&value, prec).is_zero());
+        }
+    }
 
     #[test]
     fn inverse_poincare_coefficients_match_classical_reversion() {

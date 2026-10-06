@@ -1,3 +1,26 @@
+# Status Update — 2026-10-06
+
+Real near-neutral regular iteration now uses scaled dyadic Taylor jumps in
+both forward normalization and height unwinding. Directed coefficient bounds,
+analytic tails, fixed-point defects and conditioning protect the same
+principal-log family; other regimes retain their individual-step path.
+No public state/API field, dependency or artificial solver limit was added.
+
+t710/t871 now pass without ignore attributes. Independent 360-digit orbit/log
+references verify 100-digit real/complex-height outputs at multiplier gaps
+about `2.24e-8` and `1.58e-30`, including logical counts beyond `u64`.
+The first base's 20-digit half-height takes about 4.7 seconds; the closer
+100-digit string-API regression takes about six minutes.
+
+Focused validation: 158 Linux Rust passes, 88 FreeBSD passes, 30 ST/MT/platform
+checks, 135 complete targeted grid cells and 216 component comparisons against
+140 digits. Ordinary-grid/direct-iteration controls and unaffected outputs
+through 100,000 digits remain identical. This is not universal coverage or a
+full-suite certification. Exact scope, references and frozen artifacts are
+linked in README §5.
+
+---
+
 # Status Update — 2026-10-05
 
 Implemented a direct inverse-Poincare construction for every resolved strictly

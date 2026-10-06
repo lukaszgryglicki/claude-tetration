@@ -36,7 +36,7 @@
 
 use rug::{float::Round, ops::Pow, Complex, Float, Integer};
 
-use crate::{cnum, regions::FixedPointData};
+use crate::{cnum, regions::FixedPointData, schroder_jumps::OrbitJumps};
 use cnum::{DisplayComplex, DisplayFloat};
 
 /// Cached per-base Schröder state. Built once via `setup_schroder` and reused
@@ -413,9 +413,12 @@ fn setup_poincare(b: &Complex, fp: &FixedPointData, prec: u64) -> Result<Schrode
         );
     }
     let target = Float::with_val_64(work_prec, &radius / 64);
+    let mut jumps = OrbitJumps::new(&ln_b, &l, false, work_prec)?;
+    let mut jump_count = Integer::new();
     let mut point = cnum::one(work_prec);
     let mut power = cnum::one(work_prec);
     let mut shifts = Integer::new();
+    let mut orbit_updates = Integer::new();
     let mut checkpoint = point.clone();
     let displacement = loop {
         let displacement = Complex::with_val_64(work_prec, &point - &l);
@@ -425,18 +428,33 @@ fn setup_poincare(b: &Complex, fp: &FixedPointData, prec: u64) -> Result<Schrode
             }
             break displacement;
         }
-        point = cnum::checked_exp(&Complex::with_val_64(work_prec, &point * &ln_b), work_prec)?;
-        power = Complex::with_val_64(work_prec, power * &lambda);
-        shifts += 1;
+        let jump = match &mut jumps {
+            Some(cache) => cache.advance(&point, None)?,
+            None => None,
+        };
+        if let Some(jump) = jump {
+            point = jump.value;
+            power *= Float::with_val_64(work_prec, lambda.real()).pow(&jump.steps);
+            shifts += jump.steps;
+            jump_count += 1;
+            if cnum::verbose() && jump_count.is_power_of_two() {
+                eprintln!("Poincare normalization: {jump_count} Taylor jumps, {shifts} steps");
+            }
+        } else {
+            point = cnum::checked_exp(&Complex::with_val_64(work_prec, &point * &ln_b), work_prec)?;
+            power = Complex::with_val_64(work_prec, power * &lambda);
+            shifts += 1;
+        }
         if !cnum::is_finite(&power) || cnum::is_zero(&power) {
             return Err("Poincare normalization multiplier exceeded MPFR's range".into());
         }
+        orbit_updates += 1;
         if point == checkpoint {
             return Err(
                 "Poincare normalization orbit repeated before reaching its local disk".into(),
             );
         }
-        if shifts.is_power_of_two() {
+        if orbit_updates.is_power_of_two() {
             checkpoint = point.clone();
             if cnum::verbose() {
                 eprintln!("Poincare normalization orbit: {shifts} steps");
@@ -769,6 +787,10 @@ fn eval_schroder_with_conditioning(
     let shifts = k.abs();
     let mut step = Integer::new();
     let log_ln_b = cnum::log_magnitude(&state.ln_b, prec);
+    let mut jumps = OrbitJumps::new(&state.ln_b, &state.l, forward_log, prec)?;
+    let mut jump_count = Integer::new();
+    let mut updates = Integer::new();
+    let mut jump_error_log = Float::new_64(prec);
     while shifts > step {
         if cnum::verbose() && (step == 0 || step.is_divisible_u(1024)) {
             eprintln!(
@@ -776,7 +798,29 @@ fn eval_schroder_with_conditioning(
                 DisplayFloat(&shifts)
             );
         }
-        if forward_log {
+        let jump = match &mut jumps {
+            Some(cache) => {
+                let remaining = Float::with_val_round_64(prec, &shifts - &step, Round::Down).0;
+                cache.advance(&f, Some(&remaining))?
+            }
+            None => None,
+        };
+        if let Some(jump) = jump {
+            check_chain(&f, &step)?;
+            let input_scale = cnum::log_magnitude(&f, prec).max(&Float::new_64(prec));
+            f = jump.value;
+            check_chain(&f, &step)?;
+            let output_scale = cnum::log_magnitude(&f, prec).max(&Float::new_64(prec));
+            let amplification = jump.derivative.ln() + input_scale - &output_scale;
+            log_amplification += amplification.max(&Float::new_64(prec));
+            let error_log = jump.error.ln() - cnum::working_epsilon(prec).ln() - output_scale;
+            jump_error_log = jump_error_log.max(&error_log);
+            step += jump.steps;
+            jump_count += 1;
+            if cnum::verbose() && jump_count.is_power_of_two() {
+                eprintln!("schroder unwind: {jump_count} Taylor jumps, {step} steps");
+            }
+        } else if forward_log {
             check_chain(&f, &step)?;
             let input_scale = -cnum::log_magnitude(&f, prec).min(&Float::new_64(prec));
             let ln_f = cnum::ln_complex(&f, prec);
@@ -784,17 +828,22 @@ fn eval_schroder_with_conditioning(
             let amplification =
                 input_scale - &log_ln_b - cnum::log_magnitude(&f, prec).max(&Float::new_64(prec));
             log_amplification += amplification.max(&Float::new_64(prec));
+            step += 1;
         } else {
             let amplification = cnum::log_magnitude(&f, prec).max(&Float::new_64(prec)) + &log_ln_b;
             log_amplification += amplification.max(&Float::new_64(prec));
             let exponent = Complex::with_val_64(prec, &f * &state.ln_b);
             f = cnum::checked_exp(&exponent, prec)?;
             check_chain(&f, &step)?;
+            step += 1;
         }
-        step += 1;
+        updates += 1;
     }
     check_chain(&f, &step)?;
     log_amplification -= cnum::log_magnitude(&f, prec).min(&Float::new_64(prec));
+    if jump_count > 0 {
+        log_amplification += jump_error_log + Float::with_val_64(prec, updates + 1).ln();
+    }
     Ok((f, log_amplification))
 }
 

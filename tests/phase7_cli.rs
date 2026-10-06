@@ -166,7 +166,6 @@ fn t709_debug_diagnostics() {
 }
 
 #[test]
-#[ignore = "Very close strict attractor: normalization can take hours; routine fringe coverage is in phase12"]
 fn t710_very_close_attracting_boundary_preserves_cli_digits() {
     let mut values = Vec::new();
     for digits in ["20", "40"] {

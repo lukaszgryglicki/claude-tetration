@@ -11,7 +11,7 @@ full `10^-(digits+3)` boundary target; even that is not a forward-error proof.
 Current independent numerical witnesses and their limits are in README §5.1
 and `tests/phase10_honesty.rs` / `tests/phase12_coverage.rs`.
 
-In the latest bounded coverage pass, t852/t860 did not finish within external
+In the October 5 bounded coverage pass, t852/t860 did not finish within external
 300-second budgets, so their known-refusal contracts below remain unverified
 on that frozen build. t428 completed its extended run; the previously cancelled
 t423/t870/t872 were not restarted. A test timeout is not a solver refusal.
@@ -37,6 +37,13 @@ strict attractors in this band. Independent 100-digit references now cover
 deep-band witness below. Genuinely neutral cases remain separate research;
 arbitrarily close attraction does not imply practical completion time.
 
+The October 6 Taylor-jump accelerator makes the positive-real-multiplier
+near-neutral cases practical without selecting a parabolic surrogate.
+t710/t871 now pass normally, and phase13 checks independent 100-digit
+real/complex-height references, including a multiplier gap near `1.58e-30`.
+Negative/non-real neutral multipliers and the outside/cut constructions are
+not covered by this acceleration.
+
 The former five-level iε Richardson table is **removed**. Its levels could
 disagree around `1e-12` while it returned arbitrarily many digits, and an FE
 residual around `1e-16` was not a forward-error certificate. The current real
@@ -55,7 +62,7 @@ solver paths, rather than accepting that surrogate.
 
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
-| 1.444667861009766 | 0 | 0.5 | 0 | slow / unverified | t710/t871 now ignored success/accuracy targets; no completed solve claimed |
+| 1.444667861009766 | 0 | 0.5 | 0 | accelerated regular iteration | t710/t871 pass; independent reference checks through 100 digits in phase13 |
 | 1.4448 | 0 | 0.5 | 0 | unverified, not rerun | t870 retains the no-surrogate contract; its multi-hour run was cancelled |
 | 1.4447 | 0 | 0.5 | 0.5 | unverified, not rerun | t872 retains the no-surrogate contract; its multi-hour run was cancelled |
 | 1.5 | 0 | 0.5 | 0 | numerical success | existing direct method, 10-digit regression |

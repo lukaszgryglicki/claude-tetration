@@ -393,7 +393,6 @@ fn t870_parabolic_boundary_refuses_unvalidated_extrapolation() {
 }
 
 #[test]
-#[ignore = "Very close strict attractor: normalization can take hours; routine fringe coverage is in phase12"]
 fn t871_very_close_attracting_boundary_preserves_normalization_and_fe() {
     let digits = 25u64;
     let prec = cnum::digits_to_bits(digits);

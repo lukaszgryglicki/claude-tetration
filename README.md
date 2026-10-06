@@ -90,7 +90,9 @@ its tiny imaginary part is numerical roundoff, not a mathematical imaginary part
 * **Status (October 2026):** direct inverse-Poincare series extend strictly
   attracting coverage, including independently checked 100-digit boundary-band
   values, 1000-digit complex-height results and a 100,000-digit native-scale
-  fractional-height witness. Coverage is not universal or globally certified.
+  fractional-height witness. Taylor jumps now accelerate real near-neutral
+  bases without changing the regular-iteration family.
+  Coverage is not universal or globally certified.
   Some neutral, negative-real, general-complex and
   cut-base cases remain unsupported. See [`FAILURE_CASES.md`](FAILURE_CASES.md)
   and [`updates.md`](updates.md); August success claims are historical, not
@@ -516,6 +518,16 @@ Every row is subject to branch, domain, convergence and resource limits:
 
 Numerically cross-checked, **not interval-certified**:
 
+* Real near-neutral bases now have independent **100-digit complex-height**
+  witnesses, including `b=1.444667861009766` and a 61-significant-digit base
+  below `exp(1/e)` with multiplier gap about `1.58e-30`.
+  Separate 360-digit orbit/log calculations at two depths agree beyond
+  120 digits; their logical iteration counts exceed `u64`.
+  [`tests/phase13_near_neutral.rs`](tests/phase13_near_neutral.rs) preserves the
+  full inputs/references. The former ignored t710/t871 tests now run normally.
+  On the tested Linux build, the first base's 20-digit half-height finishes
+  in about 4.7 seconds; its 100-digit complex-height case takes about 24 seconds.
+  The closer base's 100-digit regression takes about six minutes.
 * New strict-attractor references through **100 digits**: `b=1.444666`,
   `b=0.0665`, and a complex base near `1.9800423+1.1901168i`, all at
   `h=0.5+0.25i`; plus the former t890 failure
@@ -616,13 +628,26 @@ certificate. Portable routine reference fixtures are in the Rust tests;
 the expanded platform/reference probes, logs and grids are maintainer-local
 evidence, not gallery data or global canonicality certificates.
 
+The subsequent near-neutral step is archived separately at
+`~/tetration-near-neutral-2026-10-06-artifacts/`.
+`near-neutral-reference.json` and `near-neutral-close-reference.json` record
+the independent computations. Under `near-neutral-final-v1/`, the frozen
+manifest, focused test ledger, grid and platform records show **158 focused
+Linux Rust passes**, **88 native FreeBSD passes**, and **30 byte-identical
+ST/MT/platform checks**. All 135 targeted grid cells at 5/20/50/100/140 digits
+completed; 216 lower-precision components match 140-digit rounding.
+The 25,215-cell ordinary grid and nine transition cells match the preceding
+implementation, and eight unaffected CLI checks retain exact outputs through
+100,000 digits. This is focused validation, not a new full-suite pass.
+
 ### 5.2 ⏳ Pending / in progress
 
 The cut-walker endpoint, genuinely neutral/parabolic constructions, difficult
 complex-base contours and validated forward-error bounds remain research work.
-Extremely close strict attractors can still take hours: t710/t871 retain
-success/normalization contracts as explicitly ignored long-run targets, not
-verified passes or obsolete refusal assertions. No old walk was restarted.
+Real positive near-neutral multipliers now use bounded Taylor jumps, and
+t710/t871 pass without being ignored. Genuinely neutral and other slowly
+attracting regimes remain separate; no practical runtime is promised for
+every input. No old cut walk was restarted.
 A small positive imaginary
 part does not guarantee a solvable or accurate near-cut case.
 
@@ -830,6 +855,14 @@ precision at the actual normalization displacement, not a fixed numerical cap.
 Normalization follows the forward orbit from 1 into the disk, inverts the germ
 locally, compensates the multiplier power and checks reconstructed `F(0)=1`.
 Every evaluation rechecks its disk, tail and roundoff estimate.
+
+For real attracting multipliers close to `+1`, scaled Taylor compositions
+accelerate both normalization and height unwinding in exact dyadic step blocks
+(`src/schroder_jumps.rs`). Analytic disks, outward-rounded coefficients,
+fixed-point defects and derivative/error bounds control each jump; the original
+single-step path remains elsewhere. Counts use GMP integers, and truncation
+order follows working precision. This accelerates the same regular family,
+not a parabolic surrogate or a new choice of logarithmic branch.
 
 Log-domain height shifts avoid overflowing an unnecessary `lambda^h` or
 discarding an underflowed coordinate when a representable shifted evaluation
@@ -1143,6 +1176,7 @@ updates.md           dated research log (current campaign status)
 $ TET_MT=4 cargo test --release --all-targets -- --test-threads=1
 $ cargo test --release --lib       # fast unit layer (<1 min)
 $ TET_MT=2 cargo test --release --test phase12_coverage -- --test-threads=1
+$ TET_MT=2 cargo test --release --test phase13_near_neutral -- --test-threads=1
 $ cargo test --release --test phase8_verification   # regression witnesses
 $ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_plotting.py'
 $ cargo test --release --doc
@@ -1158,7 +1192,7 @@ branch-point conditioning, cached-state/domain checks, checkpoint corruption,
 MPFR grid axes, CLI verbosity and ST/MT identity. Numerical reference
 provenance is recorded in the tests and § 5.1.
 
-The final October 5 frozen ledger has **204 passed, two externally timed out,
+The historical October 5 frozen ledger has **204 passed, two externally timed out,
 four deferred and nine ignored** identities (219 total), not a full-suite pass.
 `t852`/`t860` remain unverified after 300-second external budgets; `t428`
 completed its extended run. The previously cancelled `t423`/`t870`/`t872` were

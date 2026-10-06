@@ -22,6 +22,12 @@ The frozen source passes 167 focused Linux Rust tests, 97 native FreeBSD tests,
 digits. Old expensive/prohibited cases remain deferred rather than disguised
 as passes. Rotating/oscillating controls agree with scalar iteration but may
 be slower; still closer complex probes remain externally time-limited.
+The completed grid ledger has135 targeted cells through140 digits,
+216 matching lower-precision components,25215 old/new ordinary cells,
+16810 conjugacy checks,8405 same-branch overlaps and9 scalar controls.
+External batch/slice timeouts were recovered without rerunning successful
+slices; no target cells are missing. These are scoped checks, not a global
+accuracy or canonicality certificate.
 README §5 records the precise reference, grid and archive scope.
 
 ---

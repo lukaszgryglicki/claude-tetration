@@ -675,6 +675,22 @@ near `1.87e-30` produced no output within 600 seconds, and a rotating
 140-digit probe exceeded 180 seconds. They remain unverified development
 probes, not solver refusals or successful accuracy checks.
 
+The final complex grid ledger has **135/135 target cells** at
+5/20/50/100/140 digits, with all 216 lower-precision component comparisons
+against 140 digits agreeing. Ordinary 100-digit values/statuses match the
+previous source on **25,215 cells**. The reflected rectangle adds
+16,810 conjugacy checks and 8,405 same-height, same-branch real-axis overlaps;
+real bases below one are not assumed Schwarz symmetric. Each rectangle
+contains 25,159 defined values and 56 expected singularities. Nine transition
+cells also match the older scalar engine.
+Three initial batch timeouts and two later slice timeouts are retained in
+`grid-initial-progress.json`, `grid-recovery.json` and
+`grid-cell-recovery.json`, under `next-final-v1/`.
+Successful slices were retained; the six remaining individual 140-digit
+cells finished in 365–410 seconds each. No target cell remains unobserved,
+and no grid solver error remains. These are scoped precision/compatibility
+checks, not independent 140-digit certification of the whole domain.
+
 ### 5.2 ⏳ Pending / in progress
 
 The cut-walker endpoint, genuinely neutral/parabolic constructions, difficult

@@ -482,10 +482,14 @@ fn build_cache(b: &Complex, prec: u64, digits: u64) -> BaseCache {
     };
     match &region {
         regions::Region::BaseZero | regions::Region::BaseOne => BaseCache::SpecialBase,
-        regions::Region::ShellThronInterior(d) => match schroder::setup_schroder(b, d, prec) {
-            Ok(state) => BaseCache::SchroderCached(state),
-            Err(e) => BaseCache::SetupErrorFallback(format!("Schröder setup failed: {}", e)),
-        },
+        regions::Region::ShellThronInterior(d) | regions::Region::ShellThronBoundary(d)
+            if d.lambda_abs < 1 =>
+        {
+            match schroder::setup_schroder(b, d, prec) {
+                Ok(state) => BaseCache::SchroderCached(state),
+                Err(e) => BaseCache::SetupErrorFallback(format!("Schröder setup failed: {}", e)),
+            }
+        }
         regions::Region::OutsideShellThronRealPositive(d)
             if b.imag().is_zero() && *b.real() > cnum::eta_upper(prec) =>
         {
@@ -660,6 +664,36 @@ mod tests {
         let axis = build_axis("0", "1e10000", "1e9995", prec).unwrap();
         assert_eq!(axis.len(), 100_001);
         assert_eq!(axis.last().unwrap().value, cnum::decimal("1e10000", prec));
+    }
+
+    #[test]
+    fn strictly_attracting_boundary_uses_the_regular_cache() {
+        let digits = 50;
+        let prec = cnum::digits_to_bits(digits);
+        for (re, im) in [
+            ("1.444666", "0"),
+            ("0.0665", "0"),
+            ("0.0653281554868594", "0.025"),
+        ] {
+            let base = cnum::parse_complex(re, im, prec).unwrap();
+            let cache = build_cache(&base, prec, digits);
+            assert!(
+                matches!(&cache, BaseCache::SchroderCached(state) if state.inverse_radius.is_some())
+            );
+            for (hr, hi) in [
+                ("0", "0"),
+                ("3", "0"),
+                ("-1", "0"),
+                ("0.5", "0.25"),
+                ("-0.5", "0.25"),
+            ] {
+                let height = cnum::parse_complex(hr, hi, prec).unwrap();
+                assert_eq!(
+                    eval_cell(&cache, &base, &height, prec, digits).unwrap(),
+                    dispatch::tetrate(&base, &height, prec, digits).unwrap()
+                );
+            }
+        }
     }
 
     #[test]

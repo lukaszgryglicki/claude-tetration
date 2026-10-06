@@ -87,8 +87,11 @@ its tiny imaginary part is numerical roundoff, not a mathematical imaginary part
 * **Definition used:** `F_b(0) = 1`, `F_b(z+1) = b^{F_b(z)}`, with
   method-specific branch and normalization conventions
   (§ [Conventions](#12-conventions-and-normalization)).
-* **Status (October 2026 audit):** useful numerical coverage, not universal or
-  certified tetration. Some near-parabolic, negative-real, general-complex and
+* **Status (October 2026):** direct inverse-Poincare series extend strictly
+  attracting coverage, including independently checked 100-digit boundary-band
+  values, 1000-digit complex-height results and a 100,000-digit native-scale
+  fractional-height witness. Coverage is not universal or globally certified.
+  Some neutral, negative-real, general-complex and
   cut-base cases remain unsupported. See [`FAILURE_CASES.md`](FAILURE_CASES.md)
   and [`updates.md`](updates.md); August success claims are historical, not
   current accuracy guarantees.
@@ -373,6 +376,13 @@ the primitive's rounding, not tetration's global forward error. Native-range
 and ordinary MPC-comparison regressions are in
 [`tests/phase11_resources.rs`](tests/phase11_resources.rs).
 
+`cnum::ln_complex` also avoids MPC's excessive refinement for `1+i*y` when
+guarded precision exceeds the precision of a tiny dyadic input: exact squaring,
+MPFR `log1p(y*y)/2` and `atan(y)` retain both components. Other inputs and the
+native exponent edge retain MPC's principal logarithm. Fixed-point
+classification uses the identity `L=exp(-W_0(-Log(b)))`, avoiding an ill-scaled
+division near base one. These changes do not replace the numerical libraries.
+
 Local reproducibility archive:
 `~/tetration-resource-limits-2026-10-04-artifacts/`, including source/binaries,
 raw logs and `limits-reference-check.json` (external-reference consistency).
@@ -392,7 +402,8 @@ checks, actual outputs and hashes. Cross-precision agreement is not a global
 forward-error or canonicality certificate.
 The final handoff is `~/tetration-resource-limits-2026-10-04-1.md`;
 `limits-resource-final/manifest.json` in the archive records the final source,
-patch and evidence identities. No numerical jobs or new research remain running.
+patch and evidence identities. That resource-audit handoff precedes the
+coverage work described in §5.
 
 The resource audit also exposed lost digits after finite height shifts:
 `2^^5.375` at 40/60 digits agreed to only 28.87 digits, although both recurrence
@@ -493,11 +504,11 @@ Every row is subject to branch, domain, convergence and resource limits:
 |---|---|---|---|
 | `b = 0`, `b = 1` | integer / all | exact special case | exact |
 | nondegenerate `b` | integers `h ≥ −1` whose iteration chain fits MPFR | direct iteration | finite-precision arithmetic; exact special cases |
-| attracting regular cases (`√2`, `0.5`, `i`, `1.3+0.1i`, …) | tested complex heights | Schröder | independent 50/70-digit witnesses; not all-height coverage |
+| strictly attracting regular cases (`\|λ\| < 1`) | tested complex heights | direct inverse-Poincare / Schröder | independent 100-digit fringe, 1000-digit ordinary and 100,000-digit native-scale witnesses; not all-height coverage |
 | real `b > η` | heights within the reconstruction domain | Schwarz-symmetric Kouznetsov | base-2 half-height has an independent 50-digit cross-check |
 | general complex outside ST | case-dependent | experimental Kouznetsov / regular iteration | failures include `−2` and `−0.8+0.4i`; no class-wide accuracy certificate |
 | `Im(b) < 0` | reflected domain | Schwarz convention | same numerical limitations as the reflected case |
-| boundary band `0.95 ≤ \|λ\| ≤ 1.05` | case-dependent | regular iteration, continuation, direct Kouznetsov | b=1.5 has a converging direct route; near-parabolic examples refuse |
+| boundary band `0.95 ≤ \|λ\| ≤ 1.05` | case-dependent | attracting inverse germ; other existing methods outside strict attraction | strict-attractor fringe now covered; b=1.5 has a direct route; genuinely neutral and very slow cases remain |
 | real cut segment `0 < b < e^{−e}` | case-dependent | regular branch where available; experimental ε-walker otherwise | no verified walker endpoint in this audit |
 | `b=0` outside nonnegative integer heights; nondegenerate `b` at integer `h≤−2` | — | error | base one retains its constant-function convention |
 
@@ -505,6 +516,35 @@ Every row is subject to branch, domain, convergence and resource limits:
 
 Numerically cross-checked, **not interval-certified**:
 
+* New strict-attractor references through **100 digits**: `b=1.444666`,
+  `b=0.0665`, and a complex base near `1.9800423+1.1901168i`, all at
+  `h=0.5+0.25i`; plus the former t890 failure
+  `b=0.0653281554868594+0.025i, h=48.013`.
+  Independent 300-digit forward-orbit/log references at two depths agree
+  beyond 110 digits. The new construction preserves the regular-iteration
+  family rather than accepting stalled Kouznetsov samples.
+* **1000-digit noninteger output** for `b=1.25` at both `h=0.5` and
+  `h=0.5+0.25i` matches independent 2100-digit orbit/log computations at
+  depths 1941 and 1989, which agree beyond 1012 digits. These are actual
+  returned-value checks, not merely high-precision storage or primitive tests;
+  the real-height case is also a durable Rust regression.
+* Native-range complex bases `1+i*10^(-10^18)` have checked fractional and
+  negative heights through 100 digits, including `-14.5+0.25i`.
+  Independent small-parameter asymptotics and principal-log continuation
+  check the actual tiny/huge components; 220/280-digit mpmath calculations
+  agree beyond 203 digits. CLI ST/MT output agrees exactly.
+  [`tests/phase12_coverage.rs`](tests/phase12_coverage.rs) preserves these
+  fixtures, boundary caching and the 1000-digit case.
+* **100,000 significant digits in both components**, at
+  `b=1+i*10^(-10^18), h=-1.5`, match an independent small-parameter reference:
+  `(-1+i)/sqrt(2*epsilon)`, where `epsilon=10^(-10^18)`.
+  The inverse-disk bound makes the omitted component-relative terms smaller
+  than `2048*sqrt(epsilon)`. The reference's rounded `sqrt(50)` mantissa is
+  checked by exact integer midpoint inequalities, not another tetration
+  implementation. Its decimal exponent is `499999999999999999`, independent
+  of the requested digit count. All six Linux/static/FreeBSD ST/MT executions
+  agree byte-for-byte and finish in approximately seven seconds each.
+  This certifies the scalar reference for this witness, not a global solver.
 * Six independent regular-iteration references at both 50 and 70 digits:
   `b=1.2, h=0.4+0.2i`; and `h=0.5` for `b=0.5`, `1.3+0.1i`, high-precision
   `√2`, `i`, and `0.99·exp(−e)+0.05i`. A separate 260-decimal-digit mpmath
@@ -521,7 +561,7 @@ Numerically cross-checked, **not interval-certified**:
 * Lambert branch identity/conditioning, FFT roundtrips and ST/MT bit identity,
   residual decisions, checkpoints and numerical tolerances include
   50/70/1000-digit checks. Primitive tests alone do not establish
-  1000-digit noninteger tetration coverage.
+  noninteger tetration accuracy; the separate returned-value witness above does.
 * Exact base `-1` stays exactly `-1` at every supported positive integer
   height. The 50/70/1000-digit regressions prevent repeated log/exp roundoff
   from being amplified at this repelling fixed point.
@@ -529,6 +569,27 @@ Numerically cross-checked, **not interval-certified**:
   exact domain/parity decisions, including 1000-digit requests. Regressions
   cover the string API, actual CLI error/output shape, grid axes, exponent
   notation and ST/MT identity.
+
+The frozen October 5 grid campaign covers all combinations shown below at
+**5/10/20/50/100/140 digits**:
+
+| grid | bases | heights | observed cells |
+|---|---|---|---|
+| attracting rectangle | Re `0.25..1.25`, Im `0..0.5`, step `0.25` | both axes `-5..5`, step `0.25` | 151,290 |
+| four new fringe witnesses | exact bases from the reference fixtures above | Re `-1..2`, Im `-1..1`, step `0.5` | 840 |
+
+All **152,130 cells** were observed: **151,794 values**, **336 undefined
+singularities**, and **zero numerical errors or missing cells**. All **252,990**
+lower-precision components round exactly like the 140-digit run; 126,775 status
+comparisons also agree. This is same-family precision consistency, not an
+independent accuracy certificate for every cell. It is not the whole
+`[-5,5]^4` domain.
+
+A separate coarse outer survey used `{-5,0,5}` on all four axes at
+5/10/20/50/100 digits: 40 values, 40 undefined cases, 108 external ten-second
+timeouts and 217 unstarted cells at the ten-minute campaign boundary.
+Its 48 comparable components agree; the remaining cells are **unverified**,
+not mathematical failures or covered inputs.
 
 Maintainer-local audit evidence (full logs, independent reference generator
 and snapshots) is retained in `~/tetration-audit-2026-10-04-artifacts/`, including
@@ -542,11 +603,27 @@ The detailed audit and deferred implementation sequence are in
 `~/tetration-audit-2026-10-04-1.md`; committed-source reproduction evidence
 includes `oct-committed-b146.log` and `oct-committed-source.tar`.
 
+The new coverage evidence is retained in
+`~/tetration-coverage-2026-10-05-artifacts/`: independent
+`coverage-reference-*-100.json`, `coverage-reference-thousand-1000.json`,
+`coverage-reference-thousand-complex-1000.json` and
+`coverage-native-complex-reference.json`. Under `coverage-final-v1/`,
+`manifest.json` freezes the numerical sources/binaries,
+`grid-*-comparison-140.json` records the grid comparisons, and
+`platform-comparison.json` records **144 byte-identical ST/MT/platform checks**.
+`native-hundred-thousand-reference.json` preserves the exact scalar rounding
+certificate. Portable routine reference fixtures are in the Rust tests;
+the expanded platform/reference probes, logs and grids are maintainer-local
+evidence, not gallery data or global canonicality certificates.
+
 ### 5.2 ⏳ Pending / in progress
 
-The cut-walker endpoint, robust near-parabolic constructions, difficult
+The cut-walker endpoint, genuinely neutral/parabolic constructions, difficult
 complex-base contours and validated forward-error bounds remain research work.
-No old walk was restarted for the October audit. A small positive imaginary
+Extremely close strict attractors can still take hours: t710/t871 retain
+success/normalization contracts as explicitly ignored long-run targets, not
+verified passes or obsolete refusal assertions. No old walk was restarted.
+A small positive imaginary
 part does not guarantee a solvable or accurate near-cut case.
 
 ### 5.3 ❌ Known-bad / missing (by design or documented ceiling)
@@ -559,16 +636,13 @@ part does not guarantee a solvable or accurate near-cut case.
   full-precision continuation claim: its first warm step stalls, then the
   old code returns unchecked extrapolation. t880 now requires honest refusal
   from both failed solver paths; see [the failure atlas](FAILURE_CASES.md).
-* **Complex bases close to |λ|=1** (`|λ| ≳ 0.99`, e.g.
-  `b = 0.0653 + 0.025i` with `|λ| = 0.995`): Schröder correctly
-  refuses its convergence checks, the Kouznetsov LM iteration stalls at an O(1)
-  residual.
-  Since the honesty gate (§ 7) rejects stalled solves, these bases
-  **ERR cleanly** instead of returning plausible-looking garbage.
-  (Before the gate, one such stalled solve produced values that
-  diverged to `∞` under upward iteration while the true orbit is
-  bounded — caught during the § 5.4 chart campaign and now a
-  regression case.)
+* **Neutral and very slowly attracting multipliers:** the former blanket
+  strict-attractor exclusion is removed. In particular, the old deep-band
+  garbage witness `b=0.0653281554868594+0.025i, h=48.013` now matches an
+  independent 100-digit reference using the inverse germ. This does not solve
+  root-of-unity or irrationally neutral cases, or guarantee practical runtime
+  arbitrarily close to the neutral boundary. Stalled alternative constructions
+  still cannot return their old relaxed-gate samples as answers.
 * **Outside-ST bases with unresolved contour/branch obstructions**
   (discovered on `b = −0.8 + 0.4i`, `|λ| ≈ 1.15`): the LM solve stalls
   at an O(1) residual that is partly a *phantom* (principal-log
@@ -709,14 +783,18 @@ or port the ideas. Each subsection names the implementing module.
 
 ### 6.1 Classification: fixed points and λ (`src/regions.rs`, `src/lambertw.rs`)
 
-For `b ∉ {0, 1}` compute `L = −W₀(−ln b)/ln b` and `λ = L·ln b` in
+For `b ∉ {0, 1}` compute `L = exp(−W₀(−ln b)) = −W₀(−ln b)/ln b`
+and `λ = L·ln b` in
 full working precision (Lambert W by Halley iteration with branch checks and
 extra internal precision near `−1/e`, `src/lambertw.rs`). Classify by `|λ|` with a guard
 band: interior `< 0.95`, boundary band `0.95…1.05`, outside `> 1.05`
-(split into real-positive and general-complex arms). The band exists
-because Schröder's geometric convergence rate is `|λ|` — uselessly slow
-near 1 — and the Kouznetsov contour height blows up like
-`1/|arg λ|` there.
+(split into real-positive and general-complex arms). The band is a routing
+label, not a refusal of every nearby base: all resolved strict attractors use
+the inverse-germ path, including in both cached runners. Convergence can still
+be very slow near 1, and Kouznetsov contour height grows like `1/|arg λ|`.
+For sufficiently small Lambert arguments, a local contraction bound can
+establish convergence before an unnecessary ill-scaled Halley division;
+the final residual and branch checks remain.
 
 ### 6.2 Exact cases (`src/integer_height.rs`, `src/dispatch.rs`)
 
@@ -736,15 +814,38 @@ With `σ̃(w) = σ(L + w)`:
 F_b(z) = L + σ̃⁻¹( σ̃(1 − L) · λ^z )
 ```
 
-satisfies the FE analytically and `F_b(0) = 1` exactly. The
-implementation computes σ̃ Taylor coefficients from the recursion
+satisfies the FE analytically and `F_b(0) = 1` exactly. Strict attraction now
+constructs the inverse `psi(t)=sum(d_n*t^n)` directly, with `a=Log(b)`:
+
+```
+psi(lambda*t) = L*(exp(a*psi(t))-1),  d_1=1,
+d_n = a * sum_{k=1}^{n-1}(k*d_k*d_(n-k)*lambda^(n-k))
+      / (n*(lambda^n-lambda)).
+```
+
+This uses quadratic arithmetic and linear coefficient storage. A conservative
+analytic inverse disk has radius `rho=(1-|lambda|)/(16*|a|)`, with tail bound
+`2*rho*(|t|/rho)^(N+1)/(1-|t|/rho)`. Order follows this bound and working
+precision at the actual normalization displacement, not a fixed numerical cap.
+Normalization follows the forward orbit from 1 into the disk, inverts the germ
+locally, compensates the multiplier power and checks reconstructed `F(0)=1`.
+Every evaluation rechecks its disk, tail and roundoff estimate.
+
+Log-domain height shifts avoid overflowing an unnecessary `lambda^h` or
+discarding an underflowed coordinate when a representable shifted evaluation
+exists. Genuine finite log/exp chains recover the requested height; there is no
+unchecked fixed-point substitution. Mixed absolute/relative unwind conditioning
+includes the output scale and refinement keeps the original requested goal.
+These analytic-tail and roundoff checks are not a whole-function enclosure.
+
+The retained non-attracting path computes σ̃ from the classical recursion:
 
 ```
 c_N (λ^N − λ) = − Σ_{n=1}^{N−1} c_n λ^n [w^{N−n}] q(w)^n,
 h(w) = (b^{L+w} − L)/λ = w·q(w),  q_j = (ln b)^j/(j+1)!
 ```
 
-then reverts the series for σ̃⁻¹ and evaluates by Horner. Two shift
+It then reverts the series for σ̃⁻¹ and evaluates by Horner. Two shift
 mechanisms extend the reach when Taylor disks are too small:
 a **σ̃-shift** (iterate the dynamics toward `L` until inside the disk,
 compensating by powers of λ) and an **h-shift** (evaluate at `z + k`,
@@ -928,8 +1029,10 @@ rerun these walks or verify their historical intermediate values or endpoint.
   and rationals. Only bounded indexes, library metadata and display/timing
   statistics remain native.
   Lambert iteration separately accounts for branch-point conditioning.
-* **Independent evidence:** regular-reference checks at 50/70 digits exceed
-  native 128-bit precision; targeted primitive checks reach 1000 digits.
+* **Independent evidence:** regular-reference checks reach 100 digits in the
+  newly covered fringe and 1000 digits for ordinary real/complex heights.
+  A native-scale fractional-height witness resolves 100,000 significant
+  digits in both components against a scalar-certified asymptotic reference.
   Constant identities and returned digits are cross-checked through 10,000
   digits, and a 100,000-significant-digit integer tower exercises actual output.
   Same-family agreement and printed digit count alone are not certification.
@@ -960,8 +1063,9 @@ rerun these walks or verify their historical intermediate values or endpoint.
 
 ### 8.1 How hard would closing each gap be? (feasibility verdicts)
 
-**Further progress is possible; universal finite values are not.** The October
-task assesses these directions without implementing new tetration constructions:
+**Further progress is possible; universal finite values are not.** The
+October 5 work implements the strict-attractor inverse construction in §6.3.
+The following remaining directions require separate mathematical work:
 
 | Direction | Why it is worth investigating | What must be established |
 |---|---|---|
@@ -969,7 +1073,7 @@ task assesses these directions without implementing new tetration constructions:
 | Real-base high-precision methods | Large Cauchy grids and conditioning remain expensive after removing fixed node budgets | Resolution/conditioning estimates and independently checked references, not simply larger grids or looser gates |
 | Parabolic/root-of-unity cases | Sectorial Fatou coordinates exist in classical local theory; at λ=−1 use the second iterate | Truncation bounds, sector matching, inversion and the intended global normalization |
 | Near-parabolic continuation | Existing methods work on some points but become costly or stall | Stable parameter continuation and error control across changing contours |
-| Difficult complex bases | `−0.8+0.4i` and deep-band examples are concrete unresolved witnesses | Contours or merged-fixed-point constructions with controlled zeros, logarithmic branches and uniqueness hypotheses |
+| Difficult complex bases | `−0.8+0.4i` remains unresolved; the former strictly attracting deep-band witness is now independently checked | Contours or merged-fixed-point constructions with controlled zeros, logarithmic branches and uniqueness hypotheses |
 | Cut-base limits | Upper-half-plane continuation supplies an intended branch convention | Stable convergence to the actual ε=0 endpoint, rather than quoting a small nonzero-ε value or a polynomial guess |
 
 Do not conflate all `|λ|≈1` cases. A routing band is not the neutral boundary;
@@ -1018,7 +1122,7 @@ src/
                      real-base branch guard, cut-base routing
   regions.rs         Shell–Thron classification (|λ| bands)
   lambertw.rs        Lambert W (W₀/W₋₁/W₊₁), Halley iteration
-  schroder.rs        Schröder linearization: σ̃ Taylor, reversion, shifts
+  schroder.rs        attracting inverse-Poincare germ; classical reversion, shifts
   kouznetsov.rs      Cauchy-integral solver: grids, FFT matvec, LM Newton,
                      EM correction, normalization, continuation,
                      cut-base ε-walker (§ 6.7)
@@ -1026,7 +1130,7 @@ src/
   cnum.rs            complex-number helpers, parsing/formatting, env flags
   integer_height.rs  finite-precision integer towers and exact special cases
   linear_approx.rs   deprecated error-only compatibility entry point
-tests/               phase1…phase10 plus Python plotting regressions
+tests/               phase1…phase12 plus Python plotting/Makefile regressions
                      batteries (CLI, regions, Schröder, Kouznetsov,
                      regression witnesses incl. the t860 case)
 FAILURE_CASES.md     current failure contracts + labeled historical observations
@@ -1038,6 +1142,7 @@ updates.md           dated research log (current campaign status)
 ```console
 $ TET_MT=4 cargo test --release --all-targets -- --test-threads=1
 $ cargo test --release --lib       # fast unit layer (<1 min)
+$ TET_MT=2 cargo test --release --test phase12_coverage -- --test-threads=1
 $ cargo test --release --test phase8_verification   # regression witnesses
 $ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_plotting.py'
 $ cargo test --release --doc
@@ -1052,6 +1157,16 @@ low/high precision, finite-input/range errors, actual output shape,
 branch-point conditioning, cached-state/domain checks, checkpoint corruption,
 MPFR grid axes, CLI verbosity and ST/MT identity. Numerical reference
 provenance is recorded in the tests and § 5.1.
+
+The final October 5 frozen ledger has **204 passed, two externally timed out,
+four deferred and nine ignored** identities (219 total), not a full-suite pass.
+`t852`/`t860` remain unverified after 300-second external budgets; `t428`
+completed its extended run. The previously cancelled `t423`/`t870`/`t872` were
+not restarted, and the multi-hour Kouznetsov large-height resource regression
+was deferred. Native FreeBSD has 148 focused Rust passes; 18 Python tests also
+pass. Exact per-test outcomes and original attempts are preserved in
+`coverage-final-v1/tests-extended-progress.json` in the coverage archive.
+These validation budgets are not application solver limits.
 
 ## 11. References
 

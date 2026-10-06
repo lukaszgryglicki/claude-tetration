@@ -133,7 +133,7 @@ pub fn setup_kouznetsov(
     // are conjugate in the real case, regardless of which branch was sampled).
     // For complex bases the two fixed points come from distinct W branches
     // (W₀ and W₋₁), so we recompute both explicitly.
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let ln_b = cnum::ln_complex(b, prec);
     let neg_ln_b = Complex::with_val_64(prec, -&ln_b);
 
     let raw = fp.fixed_point.clone();
@@ -412,7 +412,7 @@ fn setup_kouznetsov_core(
     {
         return Err("Kouznetsov core requires finite nondegenerate inputs".into());
     }
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let ln_b = cnum::ln_complex(b, prec);
     // λ = (ln b)·L drives each side's decay rate. F → L_upper as t → +∞ like
     // λ_up^{it} (rate |arg λ_up|) and F → L_lower as t → −∞ (rate |arg λ_low|).
     // For Schwarz-conjugate pairs the two rates coincide; for asymmetric pairs
@@ -781,7 +781,7 @@ fn refine_kouznetsov_precision(
     digits: u64,
 ) -> Result<KouznetsovState, String> {
     let prec = cnum::checked_digits_to_bits(digits)?.max(state.prec);
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let ln_b = cnum::ln_complex(b, prec);
     let l_upper = newton_fixed_point(&ln_b, &Complex::with_val_64(prec, &state.l_upper), prec)?;
     let l_lower = newton_fixed_point(&ln_b, &Complex::with_val_64(prec, &state.l_lower), prec)?;
     let use_schwarz = is_real_positive(b)
@@ -836,7 +836,7 @@ fn eval_kouznetsov_once(
     if !cnum::is_finite(b) || !cnum::is_finite(h) || !state.normalized {
         return Err("Kouznetsov evaluation requires finite inputs and a normalized state".into());
     }
-    if state.ln_b != Complex::with_val_64(prec, b.ln_ref()) {
+    if state.ln_b != cnum::ln_complex(b, prec) {
         return Err("Kouznetsov base does not match the cached state".into());
     }
     let required_residual = cnum::epsilon(state.digits.saturating_add(3), prec);
@@ -1677,10 +1677,7 @@ fn unwrapped_ln_samples(
 ) -> Vec<Complex> {
     let n = samples.len();
     if !two_sided {
-        return samples
-            .iter()
-            .map(|s| Complex::with_val_64(prec, s.ln_ref()))
-            .collect();
+        return samples.iter().map(|s| cnum::ln_complex(s, prec)).collect();
     }
     let two_pi = Float::with_val_64(prec, Constant::Pi) * 2u32;
     let debug = cnum::verbose() && std::env::var_os("TET_KOUZ_UNWRAP_DEBUG").is_some();
@@ -1694,7 +1691,7 @@ fn unwrapped_ln_samples(
     let mut ref_im = top_anchor.imag().clone();
     let mut top: Vec<Complex> = Vec::with_capacity(n - joint);
     for sample in samples[joint..n].iter().rev() {
-        let pl = Complex::with_val_64(prec, sample.ln_ref());
+        let pl = cnum::ln_complex(sample, prec);
         let pl_im = pl.imag();
         let k = ((ref_im - pl_im) / &two_pi).round();
         let adjusted = if k.is_zero() {
@@ -1714,7 +1711,7 @@ fn unwrapped_ln_samples(
     let mut ref_im = bot_anchor.imag().clone();
     let mut out: Vec<Complex> = Vec::with_capacity(n);
     for sample in samples.iter().take(joint) {
-        let pl = Complex::with_val_64(prec, sample.ln_ref());
+        let pl = cnum::ln_complex(sample, prec);
         let pl_im = pl.imag();
         let k = ((ref_im - pl_im) / &two_pi).round();
         let adjusted = if k.is_zero() {
@@ -1737,7 +1734,7 @@ fn unwrapped_ln_samples(
         let m = (Float::with_val_64(prec, hi_im - lo_im) / &two_pi).round();
         let mut n_dev = 0usize;
         for (u, s) in out.iter().zip(samples.iter()) {
-            let pl = Complex::with_val_64(prec, s.ln_ref());
+            let pl = cnum::ln_complex(s, prec);
             let d = cnum::abs(&Complex::with_val_64(prec, u - &pl), prec);
             if d > 1 {
                 n_dev += 1;
@@ -1846,7 +1843,7 @@ fn cauchy_eval(
     let top_num = Complex::with_val_64(prec, &cm1_plus_itmax - z0);
     let top_den = Complex::with_val_64(prec, &cp1_plus_itmax - z0);
     let top_ratio = Complex::with_val_64(prec, &top_num / &top_den);
-    let ln_top = Complex::with_val_64(prec, top_ratio.ln_ref());
+    let ln_top = cnum::ln_complex(&top_ratio, prec);
 
     // Bottom edge contributes L · ln((c+1-iT-z0)/(c-1-iT-z0)).
     let cp1_minus_itmax = Complex::with_val_64(prec, &cp1 + &neg_it_max);
@@ -1854,7 +1851,7 @@ fn cauchy_eval(
     let bot_num = Complex::with_val_64(prec, &cp1_minus_itmax - z0);
     let bot_den = Complex::with_val_64(prec, &cm1_minus_itmax - z0);
     let bot_ratio = Complex::with_val_64(prec, &bot_num / &bot_den);
-    let ln_bot = Complex::with_val_64(prec, bot_ratio.ln_ref());
+    let ln_bot = cnum::ln_complex(&bot_ratio, prec);
 
     let pi_f = Float::with_val_64(prec, rug::float::Constant::Pi);
     let two_pi_f = Float::with_val_64(prec, &pi_f * 2u32);
@@ -2921,7 +2918,7 @@ fn eval_at_height_with_conditioning(
             }
             let amplification = -log_magnitude(&f, prec).min(&Float::new_64(prec)) - &log_ln_b;
             log_amplification += amplification.max(&Float::new_64(prec));
-            let ln_f = Complex::with_val_64(prec, f.ln_ref());
+            let ln_f = cnum::ln_complex(&f, prec);
             f = Complex::with_val_64(prec, &ln_f / ln_b);
         }
         step += 1;
@@ -3248,12 +3245,12 @@ pub(crate) fn apply_t_fft(
         let top_num = Complex::with_val_64(prec, &cm1_plus_itmax - &z0);
         let top_den = Complex::with_val_64(prec, &cp1_plus_itmax - &z0);
         let top_ratio = Complex::with_val_64(prec, &top_num / &top_den);
-        let ln_top = Complex::with_val_64(prec, top_ratio.ln_ref());
+        let ln_top = cnum::ln_complex(&top_ratio, prec);
 
         let bot_num = Complex::with_val_64(prec, &cp1_minus_itmax - &z0);
         let bot_den = Complex::with_val_64(prec, &cm1_minus_itmax - &z0);
         let bot_ratio = Complex::with_val_64(prec, &bot_num / &bot_den);
-        let ln_bot = Complex::with_val_64(prec, bot_ratio.ln_ref());
+        let ln_bot = cnum::ln_complex(&bot_ratio, prec);
 
         let up_term = Complex::with_val_64(prec, l_upper * &ln_top);
         let dn_term = Complex::with_val_64(prec, l_lower * &ln_bot);
@@ -3762,7 +3759,7 @@ pub fn setup_kouznetsov_continuation(
         };
 
         // Compute fixed-point pair for this b value.
-        let ln_b = Complex::with_val_64(prec, b_cplx.ln_ref());
+        let ln_b = cnum::ln_complex(&b_cplx, prec);
         let neg_ln_b = Complex::with_val_64(prec, -&ln_b);
         let w0_val = lambertw::w0(&neg_ln_b, prec)
             .map_err(|e| format!("continuation step {}: W₀ failed: {}", step, e))?;
@@ -4030,7 +4027,7 @@ fn load_cut_ckpt(
     if lines.next().is_some() || nodes != build_uniform_nodes(&t_max, n, prec)
         || weights != build_trapezoidal_weights(&t_max, n, prec)
         || samples.first()? != &l_lower || samples.last()? != &l_upper
-        || ln_b != Complex::with_val_64(prec, base.ln_ref())
+        || ln_b != cnum::ln_complex(&base, prec)
     {
         return None;
     }
@@ -4174,7 +4171,7 @@ pub fn setup_kouznetsov_cut_base(
         state = r_state;
     } else {
         let b_anchor = base_at(&eps_anchor);
-        let ln_b_anchor = Complex::with_val_64(prec, b_anchor.ln_ref());
+        let ln_b_anchor = cnum::ln_complex(&b_anchor, prec);
         let neg_ln_b_anchor = Complex::with_val_64(prec, -&ln_b_anchor);
         let w0_val = lambertw::w0(&neg_ln_b_anchor, prec)?;
         let neg_w0 = Complex::with_val_64(prec, -&w0_val);
@@ -4240,7 +4237,7 @@ pub fn setup_kouznetsov_cut_base(
         solves += 1;
 
         let b_next = base_at(&eps_next);
-        let ln_b_next = Complex::with_val_64(prec, b_next.ln_ref());
+        let ln_b_next = cnum::ln_complex(&b_next, prec);
 
         // Germ-track the pair by Newton from the previous values; W-branch
         // labels are meaningless mid-walk (L_low crosses Im = 0 near ε≈0.7).

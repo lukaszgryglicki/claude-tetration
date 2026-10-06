@@ -166,20 +166,24 @@ fn t709_debug_diagnostics() {
 }
 
 #[test]
-fn t710_boundary_band_refuses_unvalidated_extrapolation() {
-    let out = run(&["20", "1.444667861009766", "0", "0.5", "0"]);
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        out.stdout.is_empty(),
-        "an unsupported request must not emit surrogate values"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("unsupported case"), "{stderr}");
+#[ignore = "Very close strict attractor: normalization can take hours; routine fringe coverage is in phase12"]
+fn t710_very_close_attracting_boundary_preserves_cli_digits() {
+    let mut values = Vec::new();
+    for digits in ["20", "40"] {
+        let out = run(&["--quiet", digits, "1.444667861009766", "0", "0.5", "0"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stderr.is_empty());
+        let (re, im) = parse_two_lines(&out.stdout);
+        assert_eq!(im, "0");
+        values.push(re);
+    }
+    let reference =
+        tetration::cnum::parse_float(&values[1], tetration::cnum::digits_to_bits(70)).unwrap();
+    assert_eq!(values[0], tetration::cnum::format_float(&reference, 20));
 }
 
 #[test]

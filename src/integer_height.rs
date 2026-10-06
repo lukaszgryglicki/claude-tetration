@@ -86,7 +86,7 @@ fn tetrate_integer_once(b: &Complex, n: &Float, prec: u64) -> Result<(Complex, F
     if b.imag().is_zero() && *b.real() == -1 {
         return Ok((Complex::with_val_64(prec, b), no_loss));
     }
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let ln_b = cnum::ln_complex(b, prec);
     let log_ln_b = cnum::log_magnitude(&ln_b, prec);
     let mut log_amplification = no_loss;
     let mut acc = Complex::with_val_64(prec, b);

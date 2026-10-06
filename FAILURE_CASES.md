@@ -9,7 +9,12 @@ certificates. Unchecked Richardson, fixed-point substitution and low-accuracy
 successful fallbacks are retired. Final Kouznetsov evaluation requires the
 full `10^-(digits+3)` boundary target; even that is not a forward-error proof.
 Current independent numerical witnesses and their limits are in README §5.1
-and `tests/phase10_honesty.rs`.
+and `tests/phase10_honesty.rs` / `tests/phase12_coverage.rs`.
+
+In the latest bounded coverage pass, t852/t860 did not finish within external
+300-second budgets, so their known-refusal contracts below remain unverified
+on that frozen build. t428 completed its extended run; the previously cancelled
+t423/t870/t872 were not restarted. A test timeout is not a solver refusal.
 
 Legend:
 - **ERR** — exits cleanly with non-zero status and a diagnostic on stderr; no result printed.
@@ -25,6 +30,12 @@ Newton-Kantorovich Kouznetsov falls into a pathological scalability trap:
 `|arg(λ)|` is tiny (e.g. 0.1411 rad for b=1.45), so the strip must extend to
 `t_max ≈ (digits+8)·ln(10)/|arg(λ)| ≈ 457` at 20 digits, requiring `n_nodes=65536`. Each LM matvec took
 ~19s; convergence on this grid takes hours.
+
+The October 5 inverse-Poincare construction removes the blanket exclusion of
+strict attractors in this band. Independent 100-digit references now cover
+`b=1.444666`, `b=0.0665`, a complex multiplier near `0.997i`, and the old
+deep-band witness below. Genuinely neutral cases remain separate research;
+arbitrarily close attraction does not imply practical completion time.
 
 The former five-level iε Richardson table is **removed**. Its levels could
 disagree around `1e-12` while it returned arbitrarily many digits, and an FE
@@ -44,15 +55,15 @@ solver paths, rather than accepting that surrogate.
 
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
-| 1.444667861009766 | 0 | 0.5 | 0 | ERR | obsolete Richardson answer rejected (t710/t871) |
-| 1.4448 | 0 | 0.5 | 0 | ERR | explicit refusal at 20/50/70 digits (t870) |
-| 1.4447 | 0 | 0.5 | 0.5 | ERR | no complex-height surrogate (t872) |
+| 1.444667861009766 | 0 | 0.5 | 0 | slow / unverified | t710/t871 now ignored success/accuracy targets; no completed solve claimed |
+| 1.4448 | 0 | 0.5 | 0 | unverified, not rerun | t870 retains the no-surrogate contract; its multi-hour run was cancelled |
+| 1.4447 | 0 | 0.5 | 0.5 | unverified, not rerun | t872 retains the no-surrogate contract; its multi-hour run was cancelled |
 | 1.5 | 0 | 0.5 | 0 | numerical success | existing direct method, 10-digit regression |
 | 1.46 | 0 | 0.5 | 0 | ERR | continuation and direct solve stall at 20 digits (t880); old success claim retracted |
 | 1.45 | 0 | 0.5 | 0 | historical only | old continuation claims not independent accuracy evidence |
 | 1.43 / 1.44 | 0 | 0.5 | 0 | historical only | old regular-iteration observations, not current certificates |
 
-### A.1 Complex bases deep in the band — silent garbage, now gated (RESOLVED as honest ERR)
+### A.1 Strictly attracting deep-band witness — now independently checked
 
 Discovered 2026-08-23 during the § 5.4 chart campaign. For
 `b = 0.0653281554868594 + 0.025i` (99% of `e^{−e}` lifted by `iε = 0.025`,
@@ -74,10 +85,16 @@ Richardson fallback. Relaxed states may still be inspected internally, but
 decisive numerical evidence; comparing an integer orbit with a nearby
 noninteger height is only a diagnostic, not an accuracy certificate.
 
+The new inverse germ now computes the original `h=48.013` witness through
+100 digits, matching independent 300-digit orbit/log references at two depths.
+The value begins `0.13077855094231531 - 0.016878312175402064i`.
+This is a new regular-iteration construction, not acceptance of the old
+stalled Kouznetsov samples. t890 checks the actual reference digits.
+
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
-| 0.0653281554868594 | 0.025 | 48.013 | 0 | was: RC=0 garbage (−4.31+7.57i @10dig, −20.10+11.87i @15dig) | ERR; normalization/full requested boundary target required |
-| 0.0653281554868594 | 0.05 | any swept | 0 | OK (Schröder, |λ|=0.978) | 1015-point sweep, zero errors |
+| 0.0653281554868594 | 0.025 | 48.013 | 0 | inverse-Poincare / regular iteration | independently checked at 10/50/70/100 digits (t890) |
+| 0.0653281554868594 | 0.05 | any swept | 0 | historical Schröder sweep, |λ|=0.978 | 1015-point observation, not a current accuracy certificate |
 
 ### A.2 The t860 "canonical value" was a discretization artifact (pseudo-verification uncovered)
 
@@ -329,9 +346,13 @@ Resolved: every Schröder result is now post-validated via
 `|F(h+1) − b^F(h)| / max(|F(h+1)|,1)` against a working-precision MPFR
 tolerance, not a fixed `1e-6` floor. Failure is an error; passing is not proof.
 
-### I.1 Schröder near-η — now ERR (was WRONG)
+### I.1 Historical heuristic-series failures near η
 
-| b_re | b_im | h_re | h_im | before | after |
+This table records the old guard's behavior, not current refusal contracts.
+Strict attractors now use the analytic-disk inverse germ; the independently
+checked `b=1.444666` witness is closer to the endpoint than these rows.
+
+| b_re | b_im | h_re | h_im | before | after the old guard |
 |---|---|---|---|---|---|
 | 1.435 | 0 | 0.5 | 0 | 1.2528955 ✓ | 1.2528955 ✓ |
 | 1.438 | 0 | 0.5 | 0 | 1.2542204 ✓ | 1.2542204 ✓ |
@@ -453,7 +474,7 @@ artifact, not a working baseline. See A.2.
 
 ## Historical comparison list (not a present-day pass contract)
 
-Use the independently sourced fixtures in phase10 and explicit refusal
+Use the independently sourced fixtures in phases10/12 and explicit refusal
 contracts instead. This list preserves historical observations, not
 certified digits or current success for every row.
 
@@ -480,5 +501,6 @@ certified digits or current success for every row.
 Investigate validated error/conditioning bounds, high-precision real-base
 methods, sectorial parabolic constructions, and controlled complex-base
 contours/limits. Preserve independent references and explicit branch/domain
-contracts. README §8.1 separates promising directions from proven coverage;
-none of these new constructions was implemented by this audit.
+contracts. README §8.1 separates promising directions from proven coverage.
+The October 5 strict-attractor inverse germ is implemented; the neutral,
+complex-contour and global certification directions above remain research.

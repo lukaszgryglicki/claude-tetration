@@ -579,12 +579,35 @@ impl fmt::Display for DisplayComplex<'_> {
     }
 }
 
+/// Principal logarithm, retaining small components near the unit real axis.
+pub fn ln_complex(z: &Complex, prec: u64) -> Complex {
+    init_mpfr();
+    if *z.real() == 1 && z.imag().clone().abs() <= 1 {
+        if let Some(square_prec) = z
+            .imag()
+            .prec_64()
+            .checked_mul(2)
+            .filter(|bits| *bits <= rug::float::prec_max_64())
+        {
+            // Exact squaring and log1p avoid MPC's unit-real cancellation loop.
+            let square = Float::with_val_64(square_prec, z.imag().square_ref());
+            let (min, _) = exponent_range();
+            if !square.is_zero() && unsafe { mpfr::get_exp(square.as_raw()) } > min + 1 {
+                let real = Float::with_val_64(prec, square.ln_1p_ref()) / 2;
+                let imaginary = Float::with_val_64(prec, z.imag().atan_ref());
+                return Complex::with_val_64(prec, (real, imaginary));
+            }
+        }
+    }
+    Complex::with_val_64(prec, z.ln_ref())
+}
+
 /// Complex exponentiation `b^e = exp(e * ln(b))`.
 ///
-/// Uses the principal branch via MPC's `ln`/`exp`, with intermediate rounding.
+/// Uses the principal branch with intermediate rounding.
 pub fn pow_complex(b: &Complex, e: &Complex, prec: u64) -> Complex {
     init_mpfr();
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let ln_b = ln_complex(b, prec);
     let prod = Complex::with_val_64(prec, &ln_b * e);
     Complex::with_val_64(prec, prod.exp_ref())
 }
@@ -592,8 +615,8 @@ pub fn pow_complex(b: &Complex, e: &Complex, prec: u64) -> Complex {
 /// Complex logarithm in arbitrary base: `log_b(z) = ln(z) / ln(b)`. Principal branch.
 pub fn log_b_complex(z: &Complex, b: &Complex, prec: u64) -> Complex {
     init_mpfr();
-    let ln_z = Complex::with_val_64(prec, z.ln_ref());
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let ln_z = ln_complex(z, prec);
+    let ln_b = ln_complex(b, prec);
     Complex::with_val_64(prec, &ln_z / &ln_b)
 }
 
@@ -638,4 +661,34 @@ pub fn one(prec: u64) -> Complex {
 pub fn zero(prec: u64) -> Complex {
     init_mpfr();
     Complex::with_val_64(prec, (0, 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unit_real_logarithm_matches_mpc_component_rounding() {
+        for digits in [70, 100, 1000] {
+            let prec = digits_to_bits(digits);
+            for imaginary in ["0", "0.125", "-0.125", "0.5", "-1", "1e-100", "-1e-100"] {
+                let input = parse_complex("1", imaginary, prec).unwrap();
+                let actual = ln_complex(&input, prec);
+                let expected = Complex::with_val_64(prec, input.ln_ref());
+                assert_eq!(actual, expected, "digits={digits}, imaginary={imaginary}");
+            }
+        }
+    }
+
+    #[test]
+    fn guarded_logarithm_preserves_tiny_dyadic_components() {
+        let input = parse_complex("1", "1e-10000000000000000", digits_to_bits(1)).unwrap();
+        let prec = digits_to_bits(100);
+        let square = Float::with_val_64(prec, input.imag().square_ref());
+        let expected = Complex::with_val_64(prec, (square / 2, input.imag()));
+        let actual = ln_complex(&input, prec);
+        assert_eq!(format_complex(&actual, 100), format_complex(&expected, 100));
+        let conjugate = Complex::with_val_64(input.real().prec_64(), input.conj_ref());
+        assert_eq!(ln_complex(&conjugate, prec), actual.conj());
+    }
 }

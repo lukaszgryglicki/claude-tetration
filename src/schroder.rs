@@ -6,7 +6,13 @@
 //! `F_b(z) = L + σ̃⁻¹(σ̃(1 − L) · λ^z)` where `σ̃(w) = σ(L + w)`. This satisfies
 //! `F_b(0) = 1` exactly and `F_b(z+1) = b^{F_b(z)}` analytically.
 //!
-//! Coefficients of `σ̃` are computed from the functional equation
+//! Strictly attracting fixed points use the inverse Poincare germ directly:
+//! `psi(lambda*t) = L*(exp(Log(b)*psi(t))-1)`, `psi'(0)=1`. Its differentiated
+//! coefficient recurrence needs quadratic work and linear coefficient storage.
+//! A conservative analytic disk controls the Taylor tail; normalization uses
+//! the actual forward orbit from 1 and local inversion of this germ.
+//!
+//! The retained non-attracting construction computes `σ̃` from the equation
 //! `σ̃(λ h(w)) = λ σ̃(w)` with `h(w) = (b^{L+w} − L)/λ`. Writing
 //! `h(w) = w·q(w)` factors out the leading order; the resulting recursion is
 //! `c_N (λ^N − λ) = − Σ c_n λ^n [w^{N−n}] q(w)^n` (sum from `n = 1` to `N − 1`),
@@ -28,15 +34,14 @@
 //!     inside the σ̃⁻¹ Taylor disk, then iterate `b^·` (`k<0`) or `log_b`
 //!     (`k>0`) back.
 
-use rug::{ops::Pow, Complex, Float, Integer};
+use rug::{float::Round, ops::Pow, Complex, Float, Integer};
 
 use crate::{cnum, regions::FixedPointData};
 use cnum::{DisplayComplex, DisplayFloat};
 
 /// Cached per-base Schröder state. Built once via `setup_schroder` and reused
-/// for many heights via `eval_schroder`. Amortises the O(N²) σ̃ Taylor build
-/// across all heights — for grid sweeps over many `(b, h)` cells with the same
-/// base, this is a 10-100× speedup at digits ≥ 20.
+/// for many heights via `eval_schroder`. Strict attraction uses an O(N²)
+/// inverse-series build; other states retain the classical construction.
 #[derive(Clone)]
 pub struct SchroderState {
     /// Original base retained for higher-precision reconstruction.
@@ -49,16 +54,19 @@ pub struct SchroderState {
     pub ln_b: Complex,
     /// `|λ|` drives shift direction.
     pub lam_abs: Float,
-    /// σ̃⁻¹ Taylor coefficients (series reversion of σ̃). `sigma_inv[i]` is the
+    /// σ̃⁻¹ Taylor coefficients. `sigma_inv[i]` is the
     /// `i`-th coefficient; `sigma_inv[0] = 0`.
     pub sigma_inv: Vec<Complex>,
     /// `σ̃(1 − L)` — entry point for the formula `F(z) = L + σ̃⁻¹(s1·λ^z)`.
     pub s1: Complex,
-    /// `safe_radius = 0.5 · max(|1−L|, 0.5)`. Heuristic outer bound for σ̃⁻¹ convergence.
+    /// Outer evaluation target; inside the analytic disk for attracting states.
     pub safe_radius: Float,
-    /// Actual inner radius at which σ̃ was evaluated during setup (after φ-shifts).
-    /// This guides shifts; it is not a convergence proof for the inverse series.
+    /// Local inverse target, or the classical σ̃ input radius after φ-shifts.
+    /// The latter alone is not a convergence proof for the inverse series.
     pub sigma_inner_radius: Float,
+    /// Conservative analytic disk for the attracting inverse germ. This
+    /// controls truncation, not all floating-point or continuation errors.
+    pub inverse_radius: Option<Float>,
     /// MPC bit precision the state was built at — must match the precision
     /// used for per-cell evaluation.
     pub prec: u64,
@@ -113,6 +121,7 @@ fn validate_functional_equation(
     state: &SchroderState,
     h: &Complex,
     f_h: &Complex,
+    tolerance: &Float,
     prec: u64,
 ) -> Result<(), String> {
     let one = cnum::one(prec);
@@ -128,8 +137,8 @@ fn validate_functional_equation(
     let f_abs = cnum::abs(&f_h_plus_one, prec).max(&Float::with_val_64(prec, 1));
     let rel = Float::with_val_64(prec, &diff_abs / &f_abs);
 
-    let tol = cnum::working_epsilon(prec);
-    if !rel.is_finite() || rel > tol {
+    let tol = tolerance;
+    if !rel.is_finite() || rel > *tol {
         if cnum::verbose() {
             eprintln!(
                 "schröder validation FAILED: |F(h+1) − b^F(h)| = {:.3e}, |F(h+1)| ≈ {:.3e}, rel = {:.3e}",
@@ -141,7 +150,7 @@ fn validate_functional_equation(
              |F(h+1) − b^F(h)| / max(|F(h+1)|, 1) = {:.3e} exceeds {:.0e} \
              — Taylor series likely outside true radius of convergence (|λ|={:.4})",
             DisplayFloat(&rel),
-            DisplayFloat(&tol),
+            DisplayFloat(tol),
             DisplayFloat(&state.lam_abs)
         ));
     }
@@ -154,10 +163,9 @@ fn validate_functional_equation(
     Ok(())
 }
 
-/// Build the Schröder state for base `b`. All the heavy lifting (σ̃ Taylor
-/// coefficient recursion, series reversion, σ̃-shift to evaluate at `1 − L`)
-/// lives here. Per-cell evaluation via `eval_schroder` is then O(N) plus the
-/// integer-shift chain.
+/// Build and normalize the inverse germ for base `b`. Strict attraction uses
+/// direct Poincare coefficients; other states retain σ̃ and series reversion.
+/// Per-cell evaluation is O(N) plus the integer-shift chain.
 pub fn setup_schroder(
     b: &Complex,
     fp_data: &FixedPointData,
@@ -180,11 +188,11 @@ pub fn setup_schroder(
             DisplayFloat(&lam_abs)
         ));
     }
-    // The build recursion divides by `λ^N − λ`, which vanishes only at
-    // λ ∈ root-of-unity. For |λ|=1 exactly (true parabolic), we'd hit a
-    // zero denominator at N=1 (since λ^1 − λ = 0 trivially). Block only
-    // a very tight band around |λ|=1; let σ̃-shift + extended N handle
-    // the boundary band (|λ|=0.95–0.99).
+    if lam_abs < 1 {
+        return setup_poincare(b, fp_data, prec);
+    }
+    // The attracting-disk argument does not validate the retained
+    // near-neutral non-attracting construction.
     if Float::with_val_64(prec, &lam_abs - 1).abs() < cnum::decimal("0.005", prec) {
         return Err(format!(
             "Schröder unreliable on parabolic boundary (|λ| = {})",
@@ -223,8 +231,8 @@ pub fn setup_schroder(
     // justified replacement. The dispatcher may try its other constructions.
     let (s1, sigma_inner_radius) = eval_sigma_with_shift(&sigma, b, l, lambda, prec, &w0)?;
 
-    let ln_lambda = Complex::with_val_64(prec, lambda.ln_ref());
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let ln_lambda = cnum::ln_complex(lambda, prec);
+    let ln_b = cnum::ln_complex(b, prec);
     let safe_radius = w0_abs.clone().max(&cnum::decimal("0.5", prec)) / 2;
 
     if cnum::verbose() {
@@ -250,6 +258,7 @@ pub fn setup_schroder(
         s1,
         safe_radius,
         sigma_inner_radius,
+        inverse_radius: None,
         prec,
     };
 
@@ -271,6 +280,254 @@ pub fn setup_schroder(
     }
 
     Ok(base_state)
+}
+
+fn poincare_coefficients(
+    ln_b: &Complex,
+    lambda: &Complex,
+    prec: u64,
+    order: usize,
+) -> Result<Vec<Complex>, String> {
+    if order < 1 {
+        return Err("Poincare series requires a positive order".into());
+    }
+    cnum::check_complex_storage((order as u128 + 1) * 2, prec)?;
+    let mut powers = Vec::with_capacity(order + 1);
+    powers.push(cnum::one(prec));
+    for n in 1..=order {
+        let power = Complex::with_val_64(prec, &powers[n - 1] * lambda);
+        if !cnum::is_finite(&power) || cnum::is_zero(&power) {
+            return Err("Poincare multiplier power exceeded MPFR's exponent range".into());
+        }
+        powers.push(power);
+    }
+    let mut inverse = vec![cnum::zero(prec); order + 1];
+    inverse[1] = cnum::one(prec);
+    for n in 2..=order {
+        let mut sum = cnum::zero(prec);
+        for k in 1..n {
+            let product = Complex::with_val_64(prec, &inverse[k] * &inverse[n - k]);
+            sum += Complex::with_val_64(prec, product * &powers[n - k]) * Integer::from(k);
+        }
+        // Differentiate psi(lambda*t) = L*expm1(Log(b)*psi(t)).
+        let denominator = Complex::with_val_64(prec, &powers[n] - lambda) * Integer::from(n);
+        if cnum::is_zero(&denominator) {
+            return Err(format!("Poincare resonance at order {n}"));
+        }
+        inverse[n] = Complex::with_val_64(prec, sum * ln_b) / denominator;
+        if !cnum::is_finite(&inverse[n]) {
+            return Err(format!("Poincare coefficient {n} exceeded MPFR's range"));
+        }
+        if cnum::verbose() && (n.is_power_of_two() || n == order) {
+            eprintln!("Poincare coefficients: {n}/{order}");
+        }
+    }
+    Ok(inverse)
+}
+
+fn eval_poincare_series(
+    coefficients: &[Complex],
+    coordinate: &Complex,
+    radius: &Float,
+    prec: u64,
+) -> Result<(Complex, Complex), String> {
+    let magnitude = cnum::abs(coordinate, prec);
+    if !magnitude.is_finite() || !radius.is_finite() || magnitude >= *radius || *radius <= 0 {
+        return Err("Poincare coordinate is outside its analytic inverse disk".into());
+    }
+    if coefficients.len() < 2 {
+        return Err("Poincare inverse requires a linear coefficient".into());
+    }
+    let mut value = coefficients
+        .last()
+        .ok_or("Poincare series has no coefficients")?
+        .clone();
+    let mut derivative = cnum::zero(prec);
+    let rounding_unit = Float::with_val_64(prec, 16)
+        >> usize::try_from(prec).map_err(|_| "Poincare precision is not addressable")?;
+    let mut roundoff = cnum::abs(&value, prec) * &rounding_unit;
+    for coefficient in coefficients[..coefficients.len() - 1].iter().rev() {
+        derivative = Complex::with_val_64(prec, derivative * coordinate) + &value;
+        let product = Complex::with_val_64(prec, value * coordinate);
+        roundoff = roundoff * &magnitude
+            + (cnum::abs(&product, prec) + cnum::abs(coefficient, prec)) * &rounding_unit;
+        value = product + coefficient;
+    }
+    if !cnum::is_finite(&value) || !cnum::is_finite(&derivative) || !roundoff.is_finite() {
+        return Err("Poincare evaluation exceeded MPFR's range".into());
+    }
+    if magnitude.is_zero() {
+        return Ok((value, derivative));
+    }
+    let goal = cnum::working_epsilon(prec).ln() + cnum::log_magnitude(&value, prec);
+    let ratio = Float::with_val_64(prec, &magnitude / radius);
+    let log_radius = radius.clone().ln();
+    let log_ratio = cnum::log_magnitude(coordinate, prec) - &log_radius;
+    let log_tail = log_radius
+        + Float::with_val_64(prec, 2).ln()
+        + log_ratio * Integer::from(coefficients.len())
+        - (Float::with_val_64(prec, 1) - ratio).ln();
+    if log_tail > goal || roundoff.ln() > goal {
+        return Err("Poincare inverse tail or roundoff estimate misses working accuracy".into());
+    }
+    Ok((value, derivative))
+}
+
+fn setup_poincare(b: &Complex, fp: &FixedPointData, prec: u64) -> Result<SchroderState, String> {
+    let gap = Float::with_val_64(prec, 1) - &fp.lambda_abs;
+    let gain = -gap.ln() * 4 + Float::with_val_64(prec, prec).ln() * 2;
+    let work_prec =
+        cnum::conditioned_precision(&gain, &cnum::working_epsilon(prec), prec)?.unwrap_or(prec);
+    let fp_prec = work_prec
+        .checked_add(32)
+        .ok_or("Poincare fixed-point precision overflow")?;
+    cnum::check_precision(fp_prec)?;
+    let ln_b = cnum::ln_complex(b, fp_prec);
+    let seed = Complex::with_val_64(fp_prec, &fp.fixed_point);
+    let l = crate::kouznetsov::newton_fixed_point(&ln_b, &seed, fp_prec)?;
+    let l = Complex::with_val_64(work_prec, l);
+    let ln_b = cnum::ln_complex(b, work_prec);
+    let lambda = Complex::with_val_64(work_prec, &l * &ln_b);
+    let lam_abs = Float::with_val_round_64(work_prec, lambda.abs_ref(), Round::Up).0;
+    if !(lam_abs > 0 && lam_abs < 1) {
+        return Err(
+            "Poincare construction requires a resolved strictly attracting fixed point".into(),
+        );
+    }
+    let log_size = Float::with_val_round_64(work_prec, ln_b.abs_ref(), Round::Up).0;
+    let gap = Float::with_val_round_64(
+        work_prec,
+        &Float::with_val_64(work_prec, 1) - &lam_abs,
+        Round::Down,
+    )
+    .0;
+    let denominator = log_size * 16;
+    let radius = Float::with_val_round_64(work_prec, &gap / &denominator, Round::Down).0;
+    if !radius.is_finite() || radius <= 0 {
+        return Err("Poincare inverse disk is not representable".into());
+    }
+    if cnum::verbose() {
+        eprintln!(
+            "Poincare setup: {work_prec} internal bits, inverse radius {}",
+            DisplayFloat(&radius)
+        );
+    }
+    let target = Float::with_val_64(work_prec, &radius / 64);
+    let mut point = cnum::one(work_prec);
+    let mut power = cnum::one(work_prec);
+    let mut shifts = Integer::new();
+    let mut checkpoint = point.clone();
+    let displacement = loop {
+        let displacement = Complex::with_val_64(work_prec, &point - &l);
+        if cnum::abs(&displacement, work_prec) <= target {
+            if cnum::is_zero(&displacement) {
+                return Err("Poincare normalization lost its nonzero displacement".into());
+            }
+            break displacement;
+        }
+        point = cnum::checked_exp(&Complex::with_val_64(work_prec, &point * &ln_b), work_prec)?;
+        power = Complex::with_val_64(work_prec, power * &lambda);
+        shifts += 1;
+        if !cnum::is_finite(&power) || cnum::is_zero(&power) {
+            return Err("Poincare normalization multiplier exceeded MPFR's range".into());
+        }
+        if point == checkpoint {
+            return Err(
+                "Poincare normalization orbit repeated before reaching its local disk".into(),
+            );
+        }
+        if shifts.is_power_of_two() {
+            checkpoint = point.clone();
+            if cnum::verbose() {
+                eprintln!("Poincare normalization orbit: {shifts} steps");
+            }
+        }
+    };
+    // For |t| <= 2*|displacement|, q=2*|displacement|/radius <= 1/32
+    // bounds the relative tail by 8*q^N. Reserve a factor16 for inversion.
+    let log_ratio = cnum::log_magnitude(&displacement, work_prec)
+        + Float::with_val_64(work_prec, 2).ln()
+        - radius.clone().ln();
+    let order = ((cnum::working_epsilon(work_prec).ln() - Float::with_val_64(work_prec, 128).ln())
+        / log_ratio)
+        .ceil()
+        .max(&Float::with_val_64(work_prec, 1))
+        .to_integer()
+        .and_then(|value| value.to_usize())
+        .ok_or("Poincare series order exceeds addressable memory")?;
+    let inverse = poincare_coefficients(&ln_b, &lambda, work_prec, order)?;
+    let mut coordinate = displacement.clone();
+    let local_goal = cnum::working_epsilon(work_prec) * cnum::abs(&displacement, work_prec);
+    loop {
+        let (value, derivative) = eval_poincare_series(&inverse, &coordinate, &radius, work_prec)?;
+        let residual = Complex::with_val_64(work_prec, value - &displacement);
+        let error = cnum::abs(&residual, work_prec);
+        if error <= local_goal {
+            break;
+        }
+        if cnum::is_zero(&derivative) {
+            return Err("Poincare normalization inverse has a zero derivative".into());
+        }
+        let correction = Complex::with_val_64(work_prec, residual / derivative);
+        let mut damping = Float::with_val_64(work_prec, 1);
+        loop {
+            let step = Complex::with_val_64(work_prec, &correction * &damping);
+            let candidate = Complex::with_val_64(work_prec, &coordinate - step);
+            if candidate == coordinate {
+                return Err("Poincare normalization stalled at working precision".into());
+            }
+            if let Ok((value, _)) = eval_poincare_series(&inverse, &candidate, &radius, work_prec) {
+                if cnum::abs(
+                    &Complex::with_val_64(work_prec, value - &displacement),
+                    work_prec,
+                ) < error
+                {
+                    coordinate = candidate;
+                    break;
+                }
+            }
+            damping /= 2;
+        }
+    }
+    let mut state = SchroderState {
+        base: b.clone(),
+        l,
+        ln_lambda: cnum::ln_complex(&lambda, work_prec),
+        ln_b,
+        lam_abs,
+        sigma_inv: inverse,
+        s1: Complex::with_val_64(work_prec, coordinate / power),
+        safe_radius: Float::with_val_64(work_prec, &radius / 4),
+        sigma_inner_radius: Float::with_val_64(work_prec, &radius / 4),
+        inverse_radius: Some(radius),
+        prec: work_prec,
+    };
+    let anchor = eval_schroder_raw(&state, &cnum::zero(work_prec))?;
+    let anchor_error = cnum::abs(&Complex::with_val_64(work_prec, anchor - 1), work_prec);
+    if !anchor_error.is_finite() || anchor_error > cnum::working_epsilon(prec) {
+        return Err(format!(
+            "Poincare normalization failed: |F(0)-1|={}",
+            DisplayFloat(&anchor_error)
+        ));
+    }
+    state.l = Complex::with_val_64(prec, state.l);
+    state.ln_lambda = Complex::with_val_64(prec, state.ln_lambda);
+    state.ln_b = cnum::ln_complex(b, prec);
+    state.lam_abs = Float::with_val_64(prec, state.lam_abs);
+    state.s1 = Complex::with_val_64(prec, state.s1);
+    state.sigma_inv = state
+        .sigma_inv
+        .into_iter()
+        .map(|coefficient| Complex::with_val_64(prec, coefficient))
+        .collect();
+    state.safe_radius = Float::with_val_round_64(prec, state.safe_radius, Round::Down).0;
+    state.sigma_inner_radius =
+        Float::with_val_round_64(prec, state.sigma_inner_radius, Round::Down).0;
+    state.inverse_radius = state
+        .inverse_radius
+        .map(|radius| Float::with_val_round_64(prec, radius, Round::Down).0);
+    state.prec = prec;
+    Ok(state)
 }
 
 /// Evaluate from a cached state, refining when conditioning consumes its
@@ -305,7 +562,7 @@ fn eval_schroder_with_tolerance(
     if !cnum::is_finite(&state.base)
         || cnum::is_zero(&state.base)
         || cnum::is_one(&state.base)
-        || state.ln_b != Complex::with_val_64(state.prec, state.base.ln_ref())
+        || state.ln_b != cnum::ln_complex(&state.base, state.prec)
     {
         return Err("Schröder base does not match a finite nondegenerate cached state".into());
     }
@@ -319,12 +576,13 @@ fn eval_schroder_with_tolerance(
     if h.imag().is_zero() && *h.real() == -1 {
         return Ok(cnum::zero(state.prec));
     }
+    let validation_tolerance = Float::with_val_64(state.prec, &tolerance / 1000);
     let mut refined = None;
     loop {
         let current = refined.as_ref().unwrap_or(state);
         let (value, log_amplification) = eval_schroder_with_conditioning(current, h)?;
         if let Some(prec) =
-            cnum::conditioned_precision(&log_amplification, &tolerance, current.prec)?
+            cnum::conditioned_precision(&log_amplification, &validation_tolerance, current.prec)?
         {
             if cnum::verbose() {
                 eprintln!(
@@ -336,11 +594,11 @@ fn eval_schroder_with_tolerance(
                 .checked_add(32)
                 .ok_or("Schröder fixed-point guard precision overflow")?;
             cnum::check_precision(fp_prec)?;
-            let ln_base = Complex::with_val_64(fp_prec, current.base.ln_ref());
+            let ln_base = cnum::ln_complex(&current.base, fp_prec);
             let seed = Complex::with_val_64(fp_prec, &current.l);
             let l = crate::kouznetsov::newton_fixed_point(&ln_base, &seed, fp_prec)?;
             let l = Complex::with_val_64(prec, l);
-            let ln_base = Complex::with_val_64(prec, current.base.ln_ref());
+            let ln_base = cnum::ln_complex(&current.base, prec);
             let lambda = Complex::with_val_64(prec, &l * &ln_base);
             let fp = FixedPointData {
                 fixed_point: l,
@@ -350,13 +608,21 @@ fn eval_schroder_with_tolerance(
             refined = Some(setup_schroder(&current.base, &fp, prec)?);
             continue;
         }
-        validate_functional_equation(current, h, &value, current.prec)?;
+        validate_functional_equation(current, h, &value, &validation_tolerance, current.prec)?;
         return Ok(value);
     }
 }
 
 fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, String> {
     eval_schroder_with_conditioning(state, h).map(|(value, _)| value)
+}
+
+fn eval_inverse(state: &SchroderState, coordinate: &Complex) -> Result<Complex, String> {
+    match &state.inverse_radius {
+        Some(radius) => eval_poincare_series(&state.sigma_inv, coordinate, radius, state.prec)
+            .map(|(value, _)| value),
+        None => eval_series_checked(&state.sigma_inv, coordinate, state.prec),
+    }
 }
 
 fn inverse_sum_conditioning(
@@ -396,12 +662,13 @@ fn eval_schroder_with_conditioning(
     h: &Complex,
 ) -> Result<(Complex, Float), String> {
     let prec = state.prec;
-    let lam_h = lambda_pow(h, &state.ln_lambda, prec)?;
-    let t = Complex::with_val_64(prec, &state.s1 * &lam_h);
-    let t_abs = cnum::abs(&t, prec);
-
-    if !t_abs.is_finite() || t_abs <= 0 {
-        return Err(format!("Schröder: bad |t| = {}", DisplayFloat(&t_abs)));
+    let exponent = Complex::with_val_64(prec, h * &state.ln_lambda);
+    let log_t_abs = cnum::log_magnitude(&state.s1, prec) + exponent.real();
+    let log_lam_abs = state.lam_abs.clone().ln();
+    if !log_t_abs.is_finite() || !log_lam_abs.is_finite() || log_lam_abs.is_zero() {
+        return Err(
+            "Schröder coordinate or multiplier has an invalid logarithmic magnitude".into(),
+        );
     }
 
     // The σ̃⁻¹ convergence radius can be smaller than sigma_inner_radius (which
@@ -412,27 +679,36 @@ fn eval_schroder_with_conditioning(
     //
     // This handles bases near η where σ̃⁻¹ has a small effective radius even
     // when sigma_inner_radius reports otherwise.
-    if let Ok(inv_t) = eval_series_checked(&state.sigma_inv, &t, prec) {
-        let value = Complex::with_val_64(prec, &state.l + &inv_t);
-        let log_amplification = inverse_sum_conditioning(state, h, &t, &inv_t, &value)?
-            - cnum::log_magnitude(&value, prec).min(&Float::new_64(prec));
-        return Ok((value, log_amplification));
+    let mut initial_target = state.sigma_inner_radius.clone().min(&state.safe_radius);
+    if state
+        .inverse_radius
+        .as_ref()
+        .is_none_or(|radius| log_t_abs < radius.clone().ln())
+    {
+        match inverse_coordinate(state, h) {
+            Ok(t) => {
+                initial_target = initial_target.min(&cnum::abs(&t, prec));
+                if let Ok(inv_t) = eval_inverse(state, &t) {
+                    let value = Complex::with_val_64(prec, &state.l + &inv_t);
+                    let log_amplification = inverse_sum_conditioning(state, h, &t, &inv_t, &value)?
+                        - cnum::log_magnitude(&value, prec).min(&Float::new_64(prec));
+                    return Ok((value, log_amplification));
+                }
+            }
+            Err(error) => {
+                if cnum::verbose() {
+                    eprintln!("schroder coordinate requires a height shift: {error}");
+                }
+            }
+        }
     }
 
-    let log_lam_abs = state.lam_abs.clone().ln();
-    let initial_target = state
-        .sigma_inner_radius
-        .clone()
-        .min(&state.safe_radius)
-        .min(&t_abs);
-
-    let mut effective_target = initial_target / 2;
+    let mut effective_target: Float = initial_target / 2;
     let (k, mut f, mut log_amplification) = loop {
-        let ratio = Float::with_val_64(prec, &effective_target / &t_abs);
-        if !ratio.is_finite() || ratio <= 0 {
+        if !effective_target.is_finite() || effective_target <= 0 {
             return Err("Schröder height-shift target exceeded MPFR's exponent range".into());
         }
-        let k_raw = ratio.ln() / &log_lam_abs;
+        let k_raw = (effective_target.clone().ln() - &log_t_abs) / &log_lam_abs;
         let mut k = if log_lam_abs < 0 {
             k_raw.ceil()
         } else {
@@ -447,12 +723,8 @@ fn eval_schroder_with_conditioning(
         }
 
         let h_shifted = Complex::with_val_64(prec, h + &k);
-        let lam_h_shifted = lambda_pow(&h_shifted, &state.ln_lambda, prec)?;
-        let t_shifted = Complex::with_val_64(prec, &state.s1 * &lam_h_shifted);
-        if !cnum::is_finite(&t_shifted) || cnum::is_zero(&t_shifted) {
-            return Err("Schröder height shift lost its nonzero inverse-series coordinate".into());
-        }
-        match eval_series_checked(&state.sigma_inv, &t_shifted, prec) {
+        let t_shifted = inverse_coordinate(state, &h_shifted)?;
+        match eval_inverse(state, &t_shifted) {
             Ok(inv_t_shifted) => {
                 let f0 = Complex::with_val_64(prec, &state.l + &inv_t_shifted);
                 if cnum::verbose() {
@@ -506,11 +778,12 @@ fn eval_schroder_with_conditioning(
         }
         if forward_log {
             check_chain(&f, &step)?;
-            let amplification =
-                -cnum::log_magnitude(&f, prec).min(&Float::new_64(prec)) - &log_ln_b;
-            log_amplification += amplification.max(&Float::new_64(prec));
-            let ln_f = Complex::with_val_64(prec, f.ln_ref());
+            let input_scale = -cnum::log_magnitude(&f, prec).min(&Float::new_64(prec));
+            let ln_f = cnum::ln_complex(&f, prec);
             f = Complex::with_val_64(prec, &ln_f / &state.ln_b);
+            let amplification =
+                input_scale - &log_ln_b - cnum::log_magnitude(&f, prec).max(&Float::new_64(prec));
+            log_amplification += amplification.max(&Float::new_64(prec));
         } else {
             let amplification = cnum::log_magnitude(&f, prec).max(&Float::new_64(prec)) + &log_ln_b;
             log_amplification += amplification.max(&Float::new_64(prec));
@@ -523,6 +796,34 @@ fn eval_schroder_with_conditioning(
     check_chain(&f, &step)?;
     log_amplification -= cnum::log_magnitude(&f, prec).min(&Float::new_64(prec));
     Ok((f, log_amplification))
+}
+
+fn inverse_coordinate(state: &SchroderState, h: &Complex) -> Result<Complex, String> {
+    let prec = state.prec;
+    if let Ok(power) = lambda_pow(h, &state.ln_lambda, prec) {
+        let coordinate = Complex::with_val_64(prec, &state.s1 * power);
+        if cnum::is_finite(&coordinate) && !cnum::is_zero(&coordinate) {
+            return Ok(coordinate);
+        }
+    }
+    // Combine real scales without taking arg(s1), which would perturb real axes.
+    let scale = state
+        .s1
+        .real()
+        .clone()
+        .abs()
+        .max(&state.s1.imag().clone().abs());
+    if !scale.is_finite() || scale <= 0 {
+        return Err("Schröder normalization coordinate is zero or non-finite".into());
+    }
+    let unit = Complex::with_val_64(prec, &state.s1 / &scale);
+    let mut exponent = Complex::with_val_64(prec, h * &state.ln_lambda);
+    exponent += scale.ln();
+    let coordinate = Complex::with_val_64(prec, unit * cnum::checked_exp(&exponent, prec)?);
+    if !cnum::is_finite(&coordinate) || cnum::is_zero(&coordinate) {
+        return Err("Schröder inverse coordinate exceeded MPFR's exponent range".into());
+    }
+    Ok(coordinate)
 }
 
 /// `λ^h = exp(h · ln λ)`. The principal branch of `ln λ` is fine inside the
@@ -624,7 +925,7 @@ fn build_series(
     if cnum::verbose() {
         eprintln!("schröder build: {m} terms at {prec} bits; quadratic storage, cubic work");
     }
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let ln_b = cnum::ln_complex(b, prec);
 
     // q[j] = (ln b)^j / (j+1)! for j = 0..m-1; q has length m.
     let mut q: Vec<Complex> = Vec::with_capacity(m);
@@ -779,7 +1080,7 @@ fn eval_sigma_with_shift(
     let lam_abs = cnum::abs(lambda, prec);
     let attracting = lam_abs < 1;
 
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let ln_b = cnum::ln_complex(b, prec);
     let mut w_curr = w0.clone();
     let mut n_shifts = Integer::new();
     let mut orbit_checkpoint = w0.clone();
@@ -803,7 +1104,7 @@ fn eval_sigma_with_shift(
                     w_curr = Complex::with_val_64(prec, &bw - l);
                 } else {
                     // φ⁻¹(w) = log_b(L+w) − L = ln(L+w)/ln_b − L (principal log)
-                    let ln_lpw = Complex::with_val_64(prec, l_plus_w.ln_ref());
+                    let ln_lpw = cnum::ln_complex(&l_plus_w, prec);
                     let logb_lpw = Complex::with_val_64(prec, &ln_lpw / &ln_b);
                     w_curr = Complex::with_val_64(prec, &logb_lpw - l);
                 }
@@ -913,6 +1214,66 @@ fn eval_series_checked(coeffs: &[Complex], w: &Complex, prec: u64) -> Result<Com
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inverse_poincare_coefficients_match_classical_reversion() {
+        let prec = cnum::digits_to_bits(70);
+        for (re, im) in [
+            ("1.25", "0"),
+            ("0.5", "0"),
+            ("1.3", "0.1"),
+            ("1.444666", "0"),
+            ("0.0665", "0"),
+        ] {
+            let base = cnum::parse_complex(re, im, prec).unwrap();
+            let ln_base = Complex::with_val_64(prec, base.ln_ref());
+            let w = crate::lambertw::w0(&Complex::with_val_64(prec, -&ln_base), prec).unwrap();
+            let multiplier = Complex::with_val_64(prec, -w);
+            let (_, classical) = build_series(&base, &multiplier, prec, 32).unwrap();
+            let inverse = poincare_coefficients(&ln_base, &multiplier, prec, 32).unwrap();
+            for (index, (actual, expected)) in inverse.iter().zip(&classical).enumerate() {
+                let error = cnum::abs(&Complex::with_val_64(prec, actual - expected), prec);
+                let scale = cnum::abs(expected, prec).max(&Float::with_val_64(prec, 1));
+                assert!(
+                    error < cnum::epsilon(60, prec) * scale,
+                    "{re}+{im}i coefficient {index}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn poincare_series_requires_analytic_disk_and_small_tail() {
+        let prec = cnum::digits_to_bits(70);
+        let radius = Float::with_val_64(prec, 1);
+        let mut coefficients = vec![cnum::zero(prec); 513];
+        coefficients[1] = cnum::one(prec);
+        let coordinate = Complex::with_val_64(prec, cnum::decimal("0.25", prec));
+        let (value, derivative) =
+            eval_poincare_series(&coefficients, &coordinate, &radius, prec).unwrap();
+        assert_eq!(value, coordinate);
+        assert_eq!(derivative, cnum::one(prec));
+        assert!(eval_poincare_series(&coefficients[..2], &coordinate, &radius, prec).is_err());
+        assert!(eval_poincare_series(&coefficients, &cnum::one(prec), &radius, prec).is_err());
+        assert!(eval_poincare_series(&coefficients[..1], &coordinate, &radius, prec).is_err());
+        for invalid in [rug::float::Special::Nan, rug::float::Special::Infinity] {
+            assert!(eval_poincare_series(
+                &coefficients,
+                &coordinate,
+                &Float::with_val_64(prec, invalid),
+                prec
+            )
+            .is_err());
+        }
+        assert!(poincare_coefficients(
+            &cnum::one(prec),
+            &Complex::with_val_64(prec, cnum::decimal("0.5", prec)),
+            prec,
+            usize::MAX
+        )
+        .unwrap_err()
+        .contains("addressable"));
+    }
 
     #[test]
     fn precision_driven_series_order_is_not_clamped_to_1500() {

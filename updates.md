@@ -1,3 +1,57 @@
+# Status Update — 2026-10-05
+
+Implemented a direct inverse-Poincare construction for every resolved strictly
+attracting fixed point, including the former near-neutral exclusion band.
+The quadratic recurrence avoids cubic sigma construction/reversion; a
+conservative analytic inverse disk controls truncation. Order follows precision
+and the actual normalization coordinate. Forward-orbit normalization, a fixed
+requested-digit goal and corrected logarithm-unwind conditioning retain the
+regular-iteration family and reject inaccurate reconstructions.
+
+Independent references now check three new fringe bases and the original t890
+deep-band witness through 100 digits, plus actual `b=1.25` noninteger real and
+complex heights at 1000 digits. Native-scale complex bases and real/complex heights also match
+independent asymptotic/log references through 100 digits, with exact ST/MT CLI
+agreement. These are returned-value checks, not storage-type or FE-only claims.
+Fixtures are in `tests/phase12_coverage.rs` and t890; t710/t871 are explicitly
+ignored long-run success targets, not claimed passes.
+
+The new native-scale fractional-height witness
+`(1+i*10^(-10^18))^^(-1.5)` resolves 100,000 significant digits in both components,
+with decimal exponent 499999999999999999. Its independent asymptotic reference
+has a negligible analytic remainder and an exact integer check of the rounded
+square-root mantissa. Six ST/MT/platform runs agree and take about 7 seconds
+each. All 144 Linux/static-Linux/native-FreeBSD compatibility checks pass.
+
+The completed attracting/fringe 4D grids contain 152,130 cells across
+5/10/20/50/100/140 digits: 151,794 values, 336 undefined, 0 errors/unobserved.
+All 252,990 compared components match 140-digit rounding. The separate coarse
+outer survey remains partial (40 values, 40 undefined, 108 timed out, 217 not run),
+not a full `[-5,5]^4` or global-canonicality certificate.
+
+The final frozen Rust ledger is 204 passed, two externally timed out, four
+deferred and nine ignored identities, not a 219/219 pass. t852/t860 remain
+unverified at 300 seconds; t428 finishes its extended run. The original
+t423/t870/t872 were not restarted. Native FreeBSD adds 148 focused passes,
+and all 18 Python tests pass. No assertion failure was recorded.
+
+Log-domain coordinate/height shifts remove avoidable intermediate exponent
+failures without substituting a fixed point. Small-root Lambert convergence,
+the equivalent fixed-point exponential identity, and an exact-squaring
+MPFR `log1p`/`atan` path for unit-real logarithms remove demonstrated MPC
+division/refinement stalls and allocations. The numerical libraries, native
+limits, final residual gates and branch conventions are unchanged; no solver
+iteration, order, time or memory cap was added.
+
+README §5 records the completed numerical evidence and its scope. Frozen
+sources/binaries, grids, independent references and bounded-validation logs are
+in `~/tetration-coverage-2026-10-05-artifacts/`. Universal finite coverage,
+neutral-sector matching, difficult outside/cut-base constructions and global
+forward-error/uniqueness certificates remain unresolved. The older audit and
+historical reports below are retained with their original scopes.
+
+---
+
 # Status Update — 2026-10-04
 
 This is a correctness/precision audit, **not a new tetration construction or

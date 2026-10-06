@@ -230,15 +230,19 @@ fn build_cache(b: &Complex, prec: u64, digits: u64) -> BaseCache {
     };
     match &region {
         regions::Region::BaseZero | regions::Region::BaseOne => BaseCache::SpecialBase,
-        regions::Region::ShellThronInterior(d) => match schroder::setup_schroder(b, d, prec) {
-            Ok(s) => BaseCache::SchroderCached(s),
-            Err(e) => {
-                if cnum::verbose() {
-                    eprintln!("edge Schröder setup failed; deferring to dispatcher: {e}");
+        regions::Region::ShellThronInterior(d) | regions::Region::ShellThronBoundary(d)
+            if d.lambda_abs < 1 =>
+        {
+            match schroder::setup_schroder(b, d, prec) {
+                Ok(s) => BaseCache::SchroderCached(s),
+                Err(e) => {
+                    if cnum::verbose() {
+                        eprintln!("edge Schröder setup failed; deferring to dispatcher: {e}");
+                    }
+                    BaseCache::SetupErrorFallback
                 }
-                BaseCache::SetupErrorFallback
             }
-        },
+        }
         regions::Region::OutsideShellThronRealPositive(d)
             if b.imag().is_zero() && *b.real() > cnum::eta_upper(prec) =>
         {
@@ -318,7 +322,7 @@ fn functional_eq_residual(
     }
     let h1 = Complex::with_val_64(prec, h + 1u32);
     let fh1 = eval_cell(cache, b, &h1, prec, digits)?;
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    let ln_b = cnum::ln_complex(b, prec);
     let b_to_fh = cnum::checked_exp(&Complex::with_val_64(prec, &ln_b * fh), prec)?;
     let diff = Complex::with_val_64(prec, &fh1 - &b_to_fh);
     let residual = cnum::abs(&diff, prec) / cnum::abs(&fh1, prec).max(&Float::with_val_64(prec, 1));
@@ -620,6 +624,41 @@ mod tests {
             digits
         )
         .is_err());
+    }
+
+    #[test]
+    fn strictly_attracting_boundary_uses_the_regular_cache() {
+        let digits = 50;
+        let prec = cnum::digits_to_bits(digits);
+        for (re, im) in [
+            ("1.444666", "0"),
+            ("0.0665", "0"),
+            ("0.0653281554868594", "0.025"),
+        ] {
+            let base = cnum::parse_complex(re, im, prec).unwrap();
+            let cache = build_cache(&base, prec, digits);
+            assert!(
+                matches!(&cache, BaseCache::SchroderCached(state) if state.inverse_radius.is_some())
+            );
+            for (hr, hi) in [
+                ("0", "0"),
+                ("3", "0"),
+                ("-1", "0"),
+                ("0.5", "0.25"),
+                ("-0.5", "0.25"),
+            ] {
+                let height = cnum::parse_complex(hr, hi, prec).unwrap();
+                let actual = eval_cell(&cache, &base, &height, prec, digits).unwrap();
+                assert_eq!(
+                    actual,
+                    dispatch::tetrate(&base, &height, prec, digits).unwrap()
+                );
+                assert!(
+                    functional_eq_residual(&cache, &base, &height, &actual, prec, digits).unwrap()
+                        < cnum::epsilon(digits, prec)
+                );
+            }
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use rug::{Complex, Float};
 
-use tetration::{cnum, dispatch, kouznetsov, regions};
+use tetration::{cnum, dispatch, kouznetsov, regions, schroder};
 
 fn parse(re: &str, im: &str, prec: u64) -> Complex {
     cnum::parse_complex(re, im, prec).unwrap()
@@ -393,17 +393,27 @@ fn t870_parabolic_boundary_refuses_unvalidated_extrapolation() {
 }
 
 #[test]
-fn t871_near_parabolic_refusal_is_consistent_across_heights() {
+#[ignore = "Very close strict attractor: normalization can take hours; routine fringe coverage is in phase12"]
+fn t871_very_close_attracting_boundary_preserves_normalization_and_fe() {
     let digits = 25u64;
     let prec = cnum::digits_to_bits(digits);
     let b = parse("1.444667861009766", "0", prec);
-    for height in ["0.5", "1.5"] {
-        let error = dispatch::tetrate(&b, &parse(height, "0", prec), prec, digits).unwrap_err();
-        assert!(
-            error.contains("unsupported case") && error.contains("unchecked polynomial"),
-            "{error}"
-        );
-    }
+    let regions::Region::ShellThronBoundary(fp) = regions::classify(&b, prec).unwrap() else {
+        panic!("expected a boundary-band attractor");
+    };
+    assert!(fp.lambda_abs < 1);
+    let state = schroder::setup_schroder(&b, &fp, prec).unwrap();
+    let anchor = schroder::eval_schroder_at_digits(&state, &cnum::zero(prec), digits).unwrap();
+    assert!(abs(&Complex::with_val_64(prec, anchor - 1), prec) < cnum::epsilon(digits, prec));
+    let first =
+        schroder::eval_schroder_at_digits(&state, &parse("0.5", "0", prec), digits).unwrap();
+    let second =
+        schroder::eval_schroder_at_digits(&state, &parse("1.5", "0", prec), digits).unwrap();
+    let advanced =
+        cnum::checked_exp(&Complex::with_val_64(prec, first * &state.ln_b), prec).unwrap();
+    assert!(
+        abs(&Complex::with_val_64(prec, second - advanced), prec) < cnum::epsilon(digits, prec)
+    );
 }
 
 #[test]
@@ -445,26 +455,39 @@ fn t880_parabolic_boundary_rejects_legacy_extrapolation() {
 /// Regression for the 2026-08-23 stalled-solve acceptance bug
 /// (FAILURE_CASES § A.1): at b = 0.0653281554868594 + 0.025i
 /// (|λ| = 0.995, deep in the Shell–Thron parabolic band on the
-/// oscillating side) Schröder refuses, the Kouznetsov LM stalls at an
+/// oscillating side) the former Schröder guard refused, the Kouznetsov LM stalled at an
 /// O(1) boundary residual, and the old relaxed acceptance (residual ≤ 5)
 /// returned stalled samples as a final answer: RC=0 with values that
 /// diverged to 10^6913 under upward iteration while the true orbit is
 /// bounded (integer-height F(48) = 0.1353 − 0.0070i).
 ///
-/// A bounded-looking answer is not enough to replace this refusal contract.
+/// The strict-attractor construction is now checked against independent
+/// forward-orbit/log references, not just a bounded-looking value or FE residual.
 #[test]
 fn t890_deep_band_complex_base_no_garbage() {
-    let digits = 10u64;
-    let prec = cnum::digits_to_bits(digits);
-    let b = parse("0.0653281554868594", "0.025", prec);
-    let h = parse("48.013", "0", prec);
-    let error = dispatch::tetrate(&b, &h, prec, digits).unwrap_err();
-    assert!(
-        error.contains("unsupported case")
-            && (error.contains("residual")
-                || error.contains(
-                    "Kouznetsov normalization: no grid seed produced Newton-converged root"
-                )),
-        "{error}"
+    let reference_prec = cnum::digits_to_bits(130);
+    let reference = parse(
+        "0.1307785509423153108121630445655154919891037553240039547061605541941923489889319479543796104858956289848797418",
+        "-0.016878312175402064488942330263003307011513924021783637543613654379407598689275776557212728740327885619975336782",
+        reference_prec,
     );
+    for digits in [10, 50, 70, 100] {
+        let prec = cnum::digits_to_bits(digits);
+        let b = parse("0.0653281554868594", "0.025", prec);
+        let h = parse("48.013", "0", prec);
+        let actual = dispatch::tetrate(&b, &h, prec, digits).unwrap();
+        assert!(cnum::is_finite(&actual));
+        for (got, expected) in [
+            (actual.real(), reference.real()),
+            (actual.imag(), reference.imag()),
+        ] {
+            let error = Float::with_val_64(reference_prec, got - expected).abs();
+            assert!(error < cnum::epsilon(digits, reference_prec) * expected.clone().abs());
+        }
+        let output_digits = usize::try_from(digits).unwrap();
+        assert_eq!(
+            cnum::format_complex(&actual, output_digits),
+            cnum::format_complex(&reference, output_digits)
+        );
+    }
 }

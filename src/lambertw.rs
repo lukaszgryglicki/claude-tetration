@@ -40,8 +40,8 @@ fn w0_at_precision(z: &Complex, prec: u64, target_prec: u64) -> Result<Complex, 
     if cnum::is_zero(z) {
         return Ok(cnum::zero(prec));
     }
-    let log_z = Complex::with_val_64(prec, z.ln_ref());
-    let log_log_z = Complex::with_val_64(prec, log_z.ln_ref());
+    let log_z = cnum::ln_complex(z, prec);
+    let log_log_z = cnum::ln_complex(&log_z, prec);
     let asymptotic = Complex::with_val_64(prec, &log_z - &log_log_z);
     let correction = Complex::with_val_64(prec, &log_log_z / &log_z);
     let zp1 = Complex::with_val_64(prec, z + 1);
@@ -49,7 +49,7 @@ fn w0_at_precision(z: &Complex, prec: u64, target_prec: u64) -> Result<Complex, 
         initial_guess_w0(z, prec),
         asymptotic.clone(),
         Complex::with_val_64(prec, &asymptotic + &correction),
-        Complex::with_val_64(prec, zp1.ln_ref()),
+        cnum::ln_complex(&zp1, prec),
         branch_point_seed(z, false, prec),
     ];
     let mut last_error = "W_0: no finite seed".to_string();
@@ -96,10 +96,10 @@ fn nonprincipal_at_precision(
     if cnum::is_zero(z) {
         return Err(format!("W_{k}(0) is undefined"));
     }
-    let mut l1 = Complex::with_val_64(prec, z.ln_ref());
+    let mut l1 = cnum::ln_complex(z, prec);
     let turn = Float::with_val_64(prec, Constant::Pi) * 2 * k;
     l1 += Complex::with_val_64(prec, (0, turn));
-    let l2 = Complex::with_val_64(prec, l1.ln_ref());
+    let l2 = cnum::ln_complex(&l1, prec);
     let mut seed = Complex::with_val_64(prec, &l1 - &l2);
     seed += Complex::with_val_64(prec, &l2 / &l1);
     let distance = Complex::with_val_64(prec, z + Float::with_val_64(prec, -1).exp());
@@ -133,6 +133,16 @@ fn halley_refine(w: &mut Complex, z: &Complex, prec: u64, target_prec: u64) -> R
             return Err(format!("Halley non-finite residual at iteration {iter}"));
         }
         if cnum::is_zero(&f) {
+            return Ok(());
+        }
+        // On |z| <= 1/8 and |w| <= 1/4, z*exp(-w) is a contraction
+        // and the root error is less than 2*|f|. Avoid an ill-scaled
+        // correction division when the root is already resolved.
+        let z_abs = cnum::abs(z, prec);
+        if z_abs <= Float::with_val_64(prec, 1) / 8
+            && cnum::abs(w, prec) <= Float::with_val_64(prec, 1) / 4
+            && cnum::abs(&f, prec) <= Float::with_val_64(prec, &target * &z_abs) / 4
+        {
             return Ok(());
         }
         let wp1 = Complex::with_val_64(prec, &*w + 1);
@@ -215,9 +225,8 @@ fn verify_branch(
         };
     }
     // Taking principal logs labels the root away from the real two-root interval.
-    let mut branch_residual =
-        Complex::with_val_64(prec, w + Complex::with_val_64(prec, w.ln_ref()));
-    branch_residual -= Complex::with_val_64(prec, z.ln_ref());
+    let mut branch_residual = Complex::with_val_64(prec, w + cnum::ln_complex(w, prec));
+    branch_residual -= cnum::ln_complex(z, prec);
     branch_residual -=
         Complex::with_val_64(prec, (0, Float::with_val_64(prec, Constant::Pi) * 2 * k));
     let scale = cnum::abs(w, prec).max(&Float::with_val_64(prec, 1));
@@ -251,10 +260,6 @@ fn branch_point_seed(z: &Complex, negative: bool, prec: u64) -> Complex {
 }
 
 fn initial_guess_w0(z: &Complex, prec: u64) -> Complex {
-    let distance = Complex::with_val_64(prec, z + Float::with_val_64(prec, -1).exp());
-    if cnum::abs(&distance, prec) < cnum::decimal("0.5", prec) {
-        return branch_point_seed(z, false, prec);
-    }
     let magnitude = cnum::abs(z, prec);
     if magnitude < cnum::decimal("0.3", prec) {
         let z2 = Complex::with_val_64(prec, z * z);
@@ -265,10 +270,14 @@ fn initial_guess_w0(z: &Complex, prec: u64) -> Complex {
         w -= Complex::with_val_64(prec, z4 * 8 / 3);
         return w;
     }
+    let distance = Complex::with_val_64(prec, z + Float::with_val_64(prec, -1).exp());
+    if cnum::abs(&distance, prec) < cnum::decimal("0.5", prec) {
+        return branch_point_seed(z, false, prec);
+    }
     let zp1 = Complex::with_val_64(prec, z + 1);
     if magnitude <= 5 && cnum::abs(&zp1, prec) > cnum::decimal("0.3", prec) {
         if *zp1.real() >= 0 {
-            return Complex::with_val_64(prec, zp1.ln_ref());
+            return cnum::ln_complex(&zp1, prec);
         }
         let im = if *z.imag() >= 0 { "1.337" } else { "-1.337" };
         return Complex::with_val_64(
@@ -276,6 +285,6 @@ fn initial_guess_w0(z: &Complex, prec: u64) -> Complex {
             (cnum::decimal("-0.318", prec), cnum::decimal(im, prec)),
         );
     }
-    let l1 = Complex::with_val_64(prec, z.ln_ref());
-    Complex::with_val_64(prec, &l1 - Complex::with_val_64(prec, l1.ln_ref()))
+    let l1 = cnum::ln_complex(z, prec);
+    Complex::with_val_64(prec, &l1 - cnum::ln_complex(&l1, prec))
 }

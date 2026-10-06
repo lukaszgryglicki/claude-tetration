@@ -73,12 +73,12 @@ pub fn classify(b: &Complex, prec: u64) -> Result<Region, String> {
         return Ok(Region::BaseZero);
     }
 
-    // L = -W₀(-ln b) / ln b
-    let ln_b = Complex::with_val_64(prec, b.ln_ref());
+    // L = exp(-W₀(-ln b)) avoids an ill-scaled division near b=1.
+    let ln_b = cnum::ln_complex(b, prec);
     let neg_ln_b = Complex::with_val_64(prec, -&ln_b);
     let w = lambertw::w0(&neg_ln_b, prec)?;
     let neg_w = Complex::with_val_64(prec, -&w);
-    let l = Complex::with_val_64(prec, &neg_w / &ln_b);
+    let l = cnum::checked_exp(&neg_w, prec)?;
     let lambda = Complex::with_val_64(prec, &l * &ln_b);
     let lambda_abs = Float::with_val_64(prec, lambda.abs_ref());
     if !cnum::is_finite(&l) || !lambda_abs.is_finite() {

@@ -761,7 +761,11 @@ fn eval_schroder_with_conditioning(
         }
 
         let h_shifted = Complex::with_val_64(prec, h + &k);
-        let t_shifted = inverse_coordinate(state, &h_shifted)?;
+        let t_shifted = if has_real_negative_multiplier(state) {
+            real_negative_coordinate(state, h, &k)?
+        } else {
+            inverse_coordinate(state, &h_shifted)?
+        };
         match eval_inverse(state, &t_shifted) {
             Ok(inv_t_shifted) => {
                 let f0 = Complex::with_val_64(prec, &state.l + &inv_t_shifted);
@@ -873,6 +877,9 @@ fn eval_schroder_with_conditioning(
 
 fn inverse_coordinate(state: &SchroderState, h: &Complex) -> Result<Complex, String> {
     let prec = state.prec;
+    if has_real_negative_multiplier(state) {
+        return real_negative_coordinate(state, h, &Float::new_64(prec));
+    }
     if let Ok(power) = lambda_pow(h, &state.ln_lambda, prec) {
         let coordinate = Complex::with_val_64(prec, &state.s1 * power);
         if cnum::is_finite(&coordinate) && !cnum::is_zero(&coordinate) {
@@ -895,6 +902,55 @@ fn inverse_coordinate(state: &SchroderState, h: &Complex) -> Result<Complex, Str
     let coordinate = Complex::with_val_64(prec, unit * cnum::checked_exp(&exponent, prec)?);
     if !cnum::is_finite(&coordinate) || cnum::is_zero(&coordinate) {
         return Err("Schröder inverse coordinate exceeded MPFR's exponent range".into());
+    }
+    Ok(coordinate)
+}
+
+fn has_real_negative_multiplier(state: &SchroderState) -> bool {
+    state.l.imag().is_zero()
+        && state.ln_b.imag().is_zero()
+        && *state.l.real() > 0
+        && *state.ln_b.real() < 0
+}
+
+fn real_negative_coordinate(
+    state: &SchroderState,
+    h: &Complex,
+    shift: &Float,
+) -> Result<Complex, String> {
+    let prec = state.prec;
+    if !cnum::is_finite(h) || !shift.is_finite() || !shift.is_integer() {
+        return Err(
+            "Negative-multiplier coordinate requires a finite height and integer shift".into(),
+        );
+    }
+    let scale = state
+        .s1
+        .real()
+        .clone()
+        .abs()
+        .max(&state.s1.imag().clone().abs());
+    if !scale.is_finite() || scale <= 0 {
+        return Err("Schroder normalization coordinate is zero or non-finite".into());
+    }
+    let unit = Complex::with_val_64(prec, &state.s1 / &scale);
+    let mut pi = Float::with_val_64(prec, rug::float::Constant::Pi);
+    let mut phase = Complex::with_val_64(prec, (h.real().cos_pi_ref(), h.real().sin_pi_ref()));
+    if *state.ln_lambda.imag() < 0 {
+        phase = phase.conj();
+        pi = -pi;
+    }
+    if Float::with_val_64(prec, shift % 2_u32) != 0 {
+        phase = -phase;
+    }
+    // Keep the integer phase exact, and do not lose a tiny h in h + shift.
+    let mut exponent = Complex::with_val_64(prec, h * state.ln_lambda.real());
+    *exponent.mut_real() += Float::with_val_64(prec, shift * state.ln_lambda.real());
+    *exponent.mut_real() -= Float::with_val_64(prec, h.imag() * pi);
+    *exponent.mut_real() += scale.ln();
+    let coordinate = Complex::with_val_64(prec, unit * phase * cnum::checked_exp(&exponent, prec)?);
+    if !cnum::is_finite(&coordinate) || cnum::is_zero(&coordinate) {
+        return Err("Negative-multiplier inverse coordinate exceeded MPFR's exponent range".into());
     }
     Ok(coordinate)
 }
@@ -1287,6 +1343,96 @@ fn eval_series_checked(coeffs: &[Complex], w: &Complex, prec: u64) -> Result<Com
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn negative_coordinate_state(prec: u64) -> SchroderState {
+        let mut lambda = Complex::with_val_64(prec, -1);
+        lambda += cnum::decimal("1e-45", prec);
+        let l = Complex::with_val_64(prec, lambda.exp_ref());
+        let ln_b = Complex::with_val_64(prec, &lambda / &l);
+        SchroderState {
+            base: cnum::checked_exp(&ln_b, prec).unwrap(),
+            l,
+            ln_lambda: cnum::ln_complex(&lambda, prec),
+            ln_b,
+            lam_abs: cnum::abs(&lambda, prec),
+            sigma_inv: Vec::new(),
+            s1: cnum::one(prec),
+            safe_radius: Float::with_val_64(prec, 1),
+            sigma_inner_radius: Float::with_val_64(prec, 1),
+            inverse_radius: None,
+            prec,
+        }
+    }
+
+    #[test]
+    fn negative_coordinates_preserve_native_height_components_and_integer_parity() {
+        let prec = cnum::digits_to_bits(110);
+        let state = negative_coordinate_state(prec);
+        let pi = Float::with_val_64(prec, rug::float::Constant::Pi);
+        let large: Integer = Integer::from(1) << 140;
+        for shift in [large.clone(), Integer::from(&large + 1), -large] {
+            let mut amplitude = state.lam_abs.clone().pow(&shift);
+            if shift.is_odd() {
+                amplitude = -amplitude;
+            }
+            let shift = Float::with_val_64(prec, shift);
+            for text in ["1e-80", "1e-1000", "1e-1000000000000000000"] {
+                let epsilon = cnum::decimal(text, prec);
+                for (height, expected_imaginary) in [
+                    (
+                        Complex::with_val_64(prec, (0, &epsilon)),
+                        Float::with_val_64(prec, &amplitude * state.ln_lambda.real()) * &epsilon,
+                    ),
+                    (
+                        Complex::with_val_64(prec, (&epsilon, 0)),
+                        Float::with_val_64(prec, &amplitude * &pi) * &epsilon,
+                    ),
+                ] {
+                    let actual = real_negative_coordinate(&state, &height, &shift).unwrap();
+                    for (actual, expected) in [
+                        (actual.real(), &amplitude),
+                        (actual.imag(), &expected_imaginary),
+                    ] {
+                        let error = Float::with_val_64(prec, actual - expected).abs();
+                        assert!(
+                            error < cnum::epsilon(70, prec) * expected.clone().abs(),
+                            "{text}, shift={shift}: {error}",
+                        );
+                    }
+                }
+            }
+            let half = cnum::parse_complex("0.5", "0", prec).unwrap();
+            let actual = real_negative_coordinate(&state, &half, &shift).unwrap();
+            assert!(actual.real().is_zero());
+            let expected = amplitude * state.lam_abs.clone().sqrt();
+            assert!(
+                Float::with_val_64(prec, actual.imag() - &expected).abs()
+                    < cnum::epsilon(70, prec) * expected.abs()
+            );
+        }
+    }
+
+    #[test]
+    fn negative_coordinates_preserve_sheet_and_validate_inputs() {
+        let prec = cnum::digits_to_bits(70);
+        let mut state = negative_coordinate_state(prec);
+        let height = cnum::parse_complex("0.5", "0.25", prec).unwrap();
+        let upper = inverse_coordinate(&state, &height).unwrap();
+        *state.ln_lambda.mut_imag() *= -1;
+        let lower = inverse_coordinate(&state, &height.conj()).unwrap();
+        assert_eq!(lower, upper.conj());
+        for shift in [
+            cnum::decimal("0.5", prec),
+            Float::with_val_64(prec, rug::float::Special::Infinity),
+            Float::with_val_64(prec, rug::float::Special::Nan),
+        ] {
+            assert!(real_negative_coordinate(&state, &cnum::one(prec), &shift).is_err());
+        }
+        let nan = Complex::with_val_64(prec, rug::float::Special::Nan);
+        assert!(real_negative_coordinate(&state, &nan, &Float::new_64(prec)).is_err());
+        state.s1 = cnum::zero(prec);
+        assert!(inverse_coordinate(&state, &cnum::one(prec)).is_err());
+    }
 
     #[test]
     fn cached_exact_anchors_keep_working_precision() {

@@ -1,3 +1,30 @@
+# Status Update — 2026-10-06 (paired negative-multiplier extension)
+
+Strictly attracting multipliers near `-1` now use guarded paired Taylor
+iterations. Quadratic cancellation permits larger checked disks, while
+coefficient/tail bounds, actual-map defects and logarithm guards preserve the
+regular family. Original-step counts remain GMP integers, including beyond
+`u128`; no public API/state field, dependency or solver limit was added.
+
+Independent 20/50/100-digit library references cover real and genuinely complex
+bases near the lower Shell-Thron boundary, at both real and complex heights.
+Exact pi-scaled phases and separate integer shifts also repair native-scale
+height components: actual 50-digit CLI regressions pass on both axes at
+`epsilon=10^(-10^18)`, without artificial `sin(k*pi)` noise.
+
+The frozen focused suite passes 184 Linux Rust tests and 68 native FreeBSD
+tests; unchanged ST/MT outputs remain identical through 100000 digits.
+All 40 scoped platform checks pass. All 80 targeted 4D cells complete through
+140 digits with 128 matching lower-precision components; 16 directional
+controls pass and both ordinary/reflected grids retain 50430 baseline cells.
+README §5 records the scoped grids, platform evidence and archive.
+A deeper 50-digit CLI probe and two initial 100-digit CLI platform probes
+exceeded external budgets; independent reference data and raw-library passes
+do not turn those timeouts into verified CLI values. Exactly neutral and
+difficult outside/cut constructions remain research.
+
+---
+
 # Status Update — 2026-10-06 (complex near-neutral extension)
 
 Guarded Taylor jumps now support genuinely complex strictly attracting

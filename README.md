@@ -521,6 +521,24 @@ Every row is subject to branch, domain, convergence and resource limits:
 
 Numerically cross-checked, **not interval-certified**:
 
+* Strict attractors near multiplier **`-1`** now have independent
+  **20/50/100-digit real/complex-height library** witnesses at
+  `b=0.0659880358454` and `b=0.0659880358454+1e-14i`.
+  Paired iterates expose quadratic cancellation without changing the
+  regular family. Separate 300-digit exp/log recurrences and classical
+  composition agree beyond 126 component-relative digits at two contraction
+  depths; both `h=0.5` and `h=0.5+0.25i` are checked.
+  [`tests/phase15_paired_jumps.rs`](tests/phase15_paired_jumps.rs) preserves
+  the full reference components. The multiplier gap is about `2.44e-13`;
+  primitive checks also exercise original-step counts beyond `u128`.
+* Negative real multipliers now preserve **50-digit native-scale height
+  components** at `b=0.066`, for both `h=epsilon` and `h=i*epsilon`,
+  `epsilon=10^(-10^18)`. Independent paired exp/log limits agree beyond
+  122 component-relative digits. The imaginary components are approximately
+  `12277.0718818117*epsilon` and `-0.130321479597902*epsilon`, respectively;
+  the real component rounds to one. Exact pi-scaled phases and separate
+  integer shifts remove artificial `sin(k*pi)` noise and loss of `h` in
+  `h+k`. Both actual CLI outputs are preserved by phase15 regressions.
 * Complex near-neutral bases now have independent **100-digit real/complex-height**
   witnesses at `b=1.444667861009766+1e-15i`, including its tiny real-height
   imaginary component. Separate 360-digit classical orbit/log calculations
@@ -691,12 +709,43 @@ cells finished in 365–410 seconds each. No target cell remains unobserved,
 and no grid solver error remains. These are scoped precision/compatibility
 checks, not independent 140-digit certification of the whole domain.
 
+The paired near-negative extension is archived at
+`~/tetration-paired-jumps-2026-10-06-artifacts/`, with the detailed report at
+`~/tetration-paired-jumps-2026-10-06-1.md`.
+`paired-reference-real.json`, `paired-reference-complex.json` and
+`paired-native-reference.json` retain the independent computations.
+Under `paired-final-v1/`, the frozen evidence records **184 focused Linux
+Rust passes**, **68 native FreeBSD passes**, and **40 byte-identical
+ST/MT/platform checks**: 32 independently referenced values and eight expected
+singularities. The native-exponent axes are checked on dynamic Linux/FreeBSD;
+the other cases also cover both static products. Two older expensive tests
+remain deferred and one existing debug test remains ignored.
+
+All **80 paired target cells** at 5/20/50/100/140 digits completed, with all
+128 lower-precision components matching 140-digit rounding. Sixteen
+directional controls also pass, without imposing Schwarz symmetry on real
+bases below one. Both ordinary/reflected rectangles retain the preceding
+values and statuses on **50,430 cells**: each has 25,159 values and 56 expected
+singularities. All 54 grid jobs completed within their original external
+budgets, with no missing cells or comparison mismatches. Eight unchanged-path
+ST/MT comparisons retain outputs through 100,000 digits. Two additional
+old-build controls match the moderate paired regime at 100 digits;
+paired acceleration is not a universal speedup.
+
+The final platform matrix uses 50-digit paired witnesses. Its retained
+`platform-initial-progress.json` records two 100-digit complex-height CLI
+timeouts; separate 100-digit library passes do not verify those unfinished
+CLI runs. A deeper preliminary 50-digit probe also remains unobserved after
+1800 seconds. These scoped deferrals are not mathematical refusals, and
+neither the grids nor the reference calculations certify global coverage.
+
 ### 5.2 ⏳ Pending / in progress
 
 The cut-walker endpoint, genuinely neutral/parabolic constructions, difficult
 complex-base contours and validated forward-error bounds remain research work.
 Real positive and genuinely complex near-neutral attractors now use bounded
-Taylor jumps, and t710/t871 pass without being ignored. Genuinely neutral and other slowly
+Taylor jumps; paired steps also address strict attraction near `-1`.
+t710/t871 pass without being ignored. Genuinely neutral and other slowly
 attracting regimes remain separate; no practical runtime is promised for
 every input. No old cut walk was restarted.
 A small positive imaginary
@@ -919,11 +968,26 @@ path remains where a guarded block is unavailable. Counts use GMP integers,
 and truncation order follows working precision. This accelerates the same
 regular family, not a parabolic surrogate or a new logarithmic branch.
 
+Strictly attracting multipliers near `-1`, including real ones, now also use
+paired iterates. In the centered coordinate `y=a*(z-L)`, the forward map
+`A(y)=lambda*(exp(y)-1)` has paired quadratic coefficient
+`lambda^2*(1+lambda)/2`; the inverse pair has the corresponding cancellation.
+Checked dyadic disks start at an inverse-square-root scale in the number of
+pairs and shrink further when coefficient bounds require it. Outward cubic
+and higher-tail majorants, intermediate logarithm domains, and paired
+actual-map/derivative perturbation bounds guard the larger blocks.
+The returned count is the number of original iterations, not pairs.
+This does not construct a Fatou coordinate at the exactly neutral multiplier.
+
 After complex jumps, refinement scales the norm error budget to each nonzero
 output component, so a small imaginary part cannot borrow the real part's
 accuracy. This can require additional working precision. Cached `F(0)=1` and
 `F(1)=b` use their exact anchors; setup still checks the raw reconstruction.
 The real-engine and no-jump conditioning paths are unchanged.
+Negative real multipliers use MPFR's pi-scaled trigonometric functions and
+separate integer shifts to avoid artificial `sin(k*pi)` noise or losing a
+tiny height in `h+k`. Real-coefficient paired jumps retain the scalar path
+when a norm-only bound cannot resolve a nonzero imaginary mantissa.
 
 Log-domain height shifts avoid overflowing an unnecessary `lambda^h` or
 discarding an underflowed coordinate when a representable shifted evaluation
@@ -1168,7 +1232,7 @@ The following remaining directions require separate mathematical work:
 | Real-base high-precision methods | Large Cauchy grids and conditioning remain expensive after removing fixed node budgets | Resolution/conditioning estimates and independently checked references, not simply larger grids or looser gates |
 | Parabolic/root-of-unity cases | Sectorial Fatou coordinates exist in classical local theory; at λ=−1 use the second iterate | Truncation bounds, sector matching, inversion and the intended global normalization |
 | Near-parabolic continuation | Existing methods work on some points but become costly or stall | Stable parameter continuation and error control across changing contours |
-| Negative/rotating near-neutral attractors | Pure negative real multipliers still use scalar steps; generic complex jumps can cost more than those steps | Cancellation-aware iterates with local error/branch bounds, not relaxed precision goals |
+| Other rotating near-neutral attractors | Paired steps now address strict attraction near `-1`; other near-resonances still use generic bounds | Further cancellation-aware iterates with local error/branch bounds, not relaxed precision goals |
 | Difficult complex bases | `−0.8+0.4i` remains unresolved; the former strictly attracting deep-band witness is now independently checked | Contours or merged-fixed-point constructions with controlled zeros, logarithmic branches and uniqueness hypotheses |
 | Cut-base limits | Upper-half-plane continuation supplies an intended branch convention | Stable convergence to the actual ε=0 endpoint, rather than quoting a small nonzero-ε value or a polynomial guess |
 

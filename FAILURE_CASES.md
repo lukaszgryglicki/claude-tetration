@@ -47,9 +47,17 @@ complex strict attractors. Phase14 checks independent 100-digit real/complex
 heights at `b=1.444667861009766+1e-15i`, and 50/70-digit half-heights at a
 closer complex base with multiplier gap about `1.37e-20`. Component-aware
 conditioning repairs an initially incorrect tiny imaginary component.
-These remain strictly attracting constructions: genuinely neutral cases,
-pure negative real multipliers, and the outside/cut constructions are not
-covered by this acceleration. Moderate rotating/oscillating cases can cost
+The paired-iterate extension also addresses strictly attracting multipliers
+near `-1`, including real ones. Phase15 checks independent 20/50/100-digit
+real/complex heights at `b=0.0659880358454` and
+`b=0.0659880358454+1e-14i`, with multiplier gap about `2.44e-13`.
+The deeper `b=0.0659880358453125370767901876+1e-40i`, gap about
+`8.79e-30`, has independent reference data, but its preliminary 50-digit
+CLI probe produced no output within an external 1800-second budget.
+That is unverified production coverage, not a mathematical refusal.
+These remain strictly attracting constructions:
+genuinely neutral cases and the outside/cut constructions are not covered by
+this acceleration. Moderate rotating/oscillating cases can cost
 more than scalar iteration. Still closer complex probes with gap about
 `1.87e-30` produced no output within external 600-second budgets; they are
 unverified, not known mathematical failures.
@@ -75,6 +83,9 @@ solver paths, rather than accepting that surrogate.
 | 1.444667861009766 | 0 | 0.5 | 0 | accelerated regular iteration | t710/t871 pass; independent reference checks through 100 digits in phase13 |
 | 1.444667861009766 | 1e-15 | 0.5 | 0 | complex Taylor jumps | independent 100-digit components, including the tiny imaginary part |
 | 1.444667861009766133658339108596430223058595453242253165820522 | 1e-40 | 0.5 | 0 | complex Taylor jumps | independent 50/70-digit components; full input and 50-digit regression in phase14 |
+| 0.0659880358454 | 0 | 0.5 | 0 / 0.25 | paired Taylor jumps | independent components through 100 digits in phase15 |
+| 0.0659880358454 | 1e-14 | 0.5 | 0 / 0.25 | paired Taylor jumps | independent components through 100 digits in phase15 |
+| 0.0659880358453125370767901876 | 1e-40 | 0.5 | 0 | unverified production value | independent reference exists; preliminary 50-digit CLI exceeded 1800 seconds with no output |
 | 1.4448 | 0 | 0.5 | 0 | unverified, not rerun | t870 retains the no-surrogate contract; its multi-hour run was cancelled |
 | 1.4447 | 0 | 0.5 | 0.5 | unverified, not rerun | t872 retains the no-surrogate contract; its multi-hour run was cancelled |
 | 1.5 | 0 | 0.5 | 0 | numerical success | existing direct method, 10-digit regression |

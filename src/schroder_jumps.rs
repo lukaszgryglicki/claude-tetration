@@ -23,6 +23,12 @@ impl OrbitJumps {
         logarithm: bool,
         prec: u64,
     ) -> Result<Option<Self>, String> {
+        if *ln_b.real() < 0 {
+            if let Some(paired) = ComplexOrbitJumps::new_paired(ln_b, fixed_point, logarithm, prec)?
+            {
+                return Ok(Some(Self::Complex(paired)));
+            }
+        }
         if ln_b.imag().is_zero() && fixed_point.imag().is_zero() {
             Ok(RealOrbitJumps::new(ln_b, fixed_point, logarithm, prec)?.map(Self::Real))
         } else {
@@ -543,9 +549,13 @@ mod tests {
             Some(OrbitJumps::Complex(_))
         ));
         for logarithm in [-a.clone(), cnum::one(prec)] {
-            assert!(OrbitJumps::new(&logarithm, &fixed, true, prec)
+            assert!(RealOrbitJumps::new(&logarithm, &fixed, true, prec)
                 .unwrap()
                 .is_none());
+            if let Some(mut jumps) = OrbitJumps::new(&logarithm, &fixed, true, prec).unwrap() {
+                assert!(matches!(&jumps, OrbitJumps::Complex(_)));
+                assert!(jumps.advance(&fixed, None).unwrap().is_none());
+            }
         }
         let (ordinary_a, ordinary_fixed) = parameters(prec, "0.1");
         assert!(OrbitJumps::new(&ordinary_a, &ordinary_fixed, true, prec)

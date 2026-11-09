@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026. Licensed under the Apache License, Version 2.0.
+# Copyright 2026. Licensed under the GNU Affero General Public License, version 3 only (AGPL-3.0-only).
 #
 # chartgen.sh — sweep f(x) = b^^x over real x and emit a CSV of
 #   x, Re f(x), Im f(x)

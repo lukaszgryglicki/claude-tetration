@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026. Licensed under the Apache License, Version 2.0.
+# Copyright 2026. Licensed under the GNU Affero General Public License, version 3 only (AGPL-3.0-only).
 """Dependency-free 3D curve plotter for tetration sweeps (v2).
 
 Renders (x, Re F, Im F) triples from CSV files as an SVG orthographic

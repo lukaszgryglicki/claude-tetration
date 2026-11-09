@@ -97,7 +97,7 @@ its tiny imaginary part is numerical roundoff, not a mathematical imaginary part
   cut-base cases remain unsupported. See [`FAILURE_CASES.md`](FAILURE_CASES.md)
   and [`updates.md`](updates.md); August success claims are historical, not
   current accuracy guarantees.
-* **License:** Apache-2.0.
+* **License:** AGPL-3.0-only.
 
 ---
 
@@ -1362,4 +1362,4 @@ These validation budgets are not application solver limits.
 
 ## 12. License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+GNU Affero General Public License v3.0 only (AGPL-3.0-only) — see [LICENSE](LICENSE).

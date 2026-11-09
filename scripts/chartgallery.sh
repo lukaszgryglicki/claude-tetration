@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026. Licensed under the Apache License, Version 2.0.
+# Copyright 2026. Licensed under the GNU Affero General Public License, version 3 only (AGPL-3.0-only).
 #
 # chartgallery.sh — render the § 5.4 multi-view 3D gallery from the dense
 # sweeps in docs/charts/data/*_dense.csv (produced by chartgen.sh with step

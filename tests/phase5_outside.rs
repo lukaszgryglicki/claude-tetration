@@ -157,23 +157,12 @@ fn t428_boundary_band_real_via_kouznetsov() {
     assert!(matching_digits(&next, &cnum::pow_complex(&b, &dispatched, prec), prec) >= digits);
 }
 
-// ---------- Cases that have no working algorithm (must error out) ----
+// ---------- A negative base: formerly refused, now the two-sided theta mapping ----
 
 #[test]
-fn t423_negative_real_via_wk_search() {
-    let digits = 10;
-    let prec = cnum::digits_to_bits(digits);
-    let error = dispatch::tetrate(
-        &parse("-2", "0", prec),
-        &parse("0.4", "0.1", prec),
-        prec,
-        digits,
-    )
-    .unwrap_err();
-    assert!(
-        error.contains("unsupported case") && error.contains("boundary residual"),
-        "{error}"
-    );
+fn t423_negative_real_base_satisfies_the_functional_equation() {
+    // The Cauchy solver stalled above its residual target here.
+    check_functional_eq("-2", "0", "0.4", "0.1", 15, 12);
 }
 
 #[test]

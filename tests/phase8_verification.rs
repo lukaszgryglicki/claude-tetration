@@ -7,7 +7,7 @@
 
 use rug::{Complex, Float};
 
-use tetration::{cnum, dispatch, kouznetsov, regions, schroder};
+use tetration::{cnum, dispatch, kneser, kouznetsov, regions, schroder};
 
 fn parse(re: &str, im: &str, prec: u64) -> Complex {
     cnum::parse_complex(re, im, prec).unwrap()
@@ -286,16 +286,6 @@ fn t852_unit_circle_bases_functional_eq() {
         for (zr, zi) in &[("0.4", "0"), ("0.5", "0.3"), ("-0.2", "0.1")] {
             let z = parse(zr, zi, prec);
             let z1 = Complex::with_val_64(prec, &z + &one);
-            if numerator == 3 {
-                let error = dispatch::tetrate(&b, &z, prec, digits).unwrap_err();
-                assert!(
-                    error.contains("unsupported case")
-                        && error.contains("boundary residual")
-                        && error.contains("two-sided unwrap retry"),
-                    "{error}"
-                );
-                break;
-            }
             let fz = dispatch::tetrate(&b, &z, prec, digits).unwrap();
             let fz1 = dispatch::tetrate(&b, &z1, prec, digits).unwrap();
             let lhs = cnum::pow_complex(&b, &fz, prec);
@@ -341,7 +331,8 @@ fn t860_schwarz_reflection_conjugate_base() {
     // b=b_re+b_im_pos·i and b=b_re-b_im_pos·i and checks conj symmetry.
     //
     // The old -0.8+0.4i "reference" was a same-family discretization artifact
-    // (FAILURE_CASES.md A.2). This case must refuse, not pass on symmetry alone.
+    // (FAILURE_CASES.md A.2). The two-sided theta mapping gives the value
+    // below on four contours and at 15, 20, 22, 25 and 40 digits.
     let cases = [
         ("1.2", "0.4", "0.5", "0"),   // Shell-Thron interior, quick
         ("1.2", "0.4", "0.5", "0.3"), // complex height
@@ -353,17 +344,16 @@ fn t860_schwarz_reflection_conjugate_base() {
         let h = parse(hr, hi, prec);
         let h_conj = parse(hr, &format!("-{}", hi), prec);
 
-        if *br == "-0.8" {
-            for (base, height) in [(&b_pos, &h), (&b_neg, &h_conj)] {
-                let error = dispatch::tetrate(base, height, prec, digits).unwrap_err();
-                assert!(error.contains("unsupported case")
-                    && (error.contains("residual")
-                        || error.contains("Kouznetsov normalization: no grid seed produced Newton-converged root")),
-                    "{error}");
-            }
-            continue;
-        }
         let f_pos = dispatch::tetrate(&b_pos, &h, prec, digits).unwrap();
+        if *br == "-0.8" {
+            assert_eq!(
+                cnum::format_complex(&f_pos, 20),
+                (
+                    "9.2594824580905586728e-1".to_string(),
+                    "1.3773498986965094780".to_string()
+                )
+            );
+        }
         let f_neg = dispatch::tetrate(&b_neg, &h_conj, prec, digits)
             .unwrap_or_else(|e| panic!("b={}-{}i h={}-{}i failed: {}", br, bi_pos, hr, hi, e));
 
@@ -379,17 +369,19 @@ fn t860_schwarz_reflection_conjugate_base() {
 }
 
 #[test]
-fn t870_parabolic_boundary_refuses_unvalidated_extrapolation() {
-    for digits in [20, 50, 70] {
-        let prec = cnum::digits_to_bits(digits);
-        let b = parse("1.4448", "0", prec);
-        let h = parse("0.5", "0", prec);
-        let error = dispatch::tetrate(&b, &h, prec, digits).unwrap_err();
-        assert!(
-            error.contains("unsupported case") && error.contains("unchecked polynomial"),
-            "{error}"
-        );
-    }
+#[ignore] // Slow (about ten minutes): near-parabolic theta-mapping solve.
+fn t870_near_parabolic_base_matches_independent_contours() {
+    // Formerly refused. Two contours give this value, and it continues the
+    // regular results at 1.4446 and 1.44466 with the same slope in the base.
+    let digits = 20;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("1.4448", "0", prec);
+    let h = parse("0.5", "0", prec);
+    let value = dispatch::tetrate(&b, &h, prec, digits).unwrap();
+    assert_eq!(
+        cnum::format_complex(&value, 20),
+        ("1.2572110255920272276".to_string(), "0".to_string())
+    );
 }
 
 #[test]
@@ -416,37 +408,46 @@ fn t871_very_close_attracting_boundary_preserves_normalization_and_fe() {
 }
 
 #[test]
+#[ignore] // Slow: closer to the parabolic base than t870.
 fn t872_parabolic_complex_heights_do_not_use_a_surrogate() {
     let digits = 25u64;
     let prec = cnum::digits_to_bits(digits);
     let b = parse("1.4447", "0", prec);
-    for height in ["0.5", "1.5"] {
-        let error = dispatch::tetrate(&b, &parse(height, "0.5", prec), prec, digits).unwrap_err();
-        assert!(
-            error.contains("unsupported case") && error.contains("unchecked polynomial"),
-            "{error}"
-        );
-    }
+    let state = kneser::setup_kneser(&b, prec, digits).unwrap();
+    let first = kneser::eval_kneser(&state, &parse("0.5", "0.5", prec), prec, digits).unwrap();
+    let second = kneser::eval_kneser(&state, &parse("1.5", "0.5", prec), prec, digits).unwrap();
+    let advanced = cnum::checked_exp(
+        &Complex::with_val_64(prec, first * cnum::ln_complex(&b, prec)),
+        prec,
+    )
+    .unwrap();
+    assert!(matching_digits(&second, &advanced, prec) >= digits - 2);
 }
 
 #[test]
-#[ignore] // Slow: exercises both continuation and the direct fallback.
-fn t880_parabolic_boundary_rejects_legacy_extrapolation() {
-    // The committed implementation also stalled at the first continuation
-    // step, then returned unchecked Richardson output. Its old "full
-    // precision" reference was neither reproduced nor independently verified.
-    let digits = 20u64;
+fn t880_near_parabolic_base_has_contour_independent_values() {
+    // The former continuation and direct Cauchy solves both stalled at b = 1.46.
+    // Three theta-mapping contours agree on these values to 30 digits.
+    let digits = 25u64;
     let prec = cnum::digits_to_bits(digits);
     let b = parse("1.46", "0", prec);
-    let h = parse("0.5", "0", prec);
-    let error = dispatch::tetrate(&b, &h, prec, digits).unwrap_err();
-    assert!(
-        error.contains("unsupported case")
-            && error.contains("continuation: Kouznetsov Newton did not converge")
-            && error.contains("direct Kouznetsov: Kouznetsov Newton did not converge")
-            && error.contains("unchecked polynomial extrapolation is not a tetration result"),
-        "{error}"
-    );
+    for (re, im, expected_re, expected_im) in [
+        ("0.5", "0", "1.26383460066838162179258037381", "0"),
+        ("1.5", "0", "1.61329885605277397013207798947", "0"),
+        (
+            "0.5",
+            "0.5",
+            "1.29588883631284526116801467989",
+            "0.219297731286338730213135703857",
+        ),
+    ] {
+        let value = dispatch::tetrate(&b, &parse(re, im, prec), prec, digits).unwrap();
+        let expected = parse(expected_re, expected_im, prec);
+        assert!(
+            matching_digits(&value, &expected, prec) >= digits,
+            "h={re}+{im}i"
+        );
+    }
 }
 
 /// t890: deep-parabolic-band complex base must NOT return garbage with Ok.

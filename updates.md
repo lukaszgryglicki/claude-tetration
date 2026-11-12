@@ -1,3 +1,78 @@
+# Status Update — 2026-11-12 (theta-mapping solvers: real, complex, negative and cut bases; inverses)
+
+**Real bases above `e^(1/e)`** are solved by a Kneser theta-mapping iteration
+(`src/kneser.rs`, README § 6.8) instead of the Cauchy rectangle: `F(z) = S(z +
+theta(z))` above the height `y0`, a real Taylor polynomial near the real axis,
+Anderson-accelerated fixed-point steps and a precision ladder. All sizes are
+linear in the digits. `2^^0.5`: 0.3 s at 15 digits (41 s before), equal to the
+independent reference at all 100 digits in 7 s, 200 digits in 42 s, 400 in 7
+minutes (75 s with `TET_MT=8`, bit-identical). Seven contours agree for base
+2, four for base 3 at 30 digits, and nine base-2 heights equal the Cauchy
+solver's 15 digits. Newly reachable: `b=1.6` (0.5 s; over 60 s before), `1.46`
+(both old solvers stalled), `1.4448` (formerly refused; 8 minutes at 20
+digits, two contours), `10^30` … `10^10000` (base continuation), and heights
+of any imaginary part. Real heights return imaginary part exactly 0.
+
+**Complex, negative and cut bases** whose two primary fixed points repel are
+solved by the two-sided form of the same iteration (`src/kneser_complex.rs`,
+README § 6.10): `theta` functions at `−W₀(−ln b)/ln b` above and
+`−W₁(−ln b)/ln b` below, a complex Taylor polynomial between, logarithm
+branches chosen by continuity, sizes and contours adapted when the gates
+fail, continuation in the base when no direct start converges. Evidence: it
+reproduces the Kneser solver on the real axis (25 digits) and the Cauchy
+solver's 15 digits at `2+0.1i`, `2+0.3i`, `3+0.5i`, `3+4i`, `10+5i` (26–52 s
+there, about a second here); three or more contours agree to 30 digits at
+`−2`, `3+4i`, `−1+2i`, `−0.8+0.4i`, `0.04`, `0.01`; a 220-base scan (real
+parts `−1000 … 10^30`, imaginary parts `0 … 10^5`) solved all 182 bases
+outside the Shell–Thron region. Formerly failing or timing out: `−2`, `−0.5`,
+`−0.8+0.4i` (the August artifact base: now the same digits at five
+precisions), `0.5+2i`, `−1+2i`, `3i`. **The cut bases `0 < b < e^−e` are
+computed at the real base itself**: `0.04` in 3 seconds, five contours to 25
+digits, continuous with `0.04 + 10^−10 i`; the ε-walker is only a fallback.
+Bases down to `10^−1000` work (continuation along the cut, two and a half
+minutes; `10^−10` 19 s). An independent mpmath prototype of the iteration,
+continued from a real base through the upper half base-plane, ends at the
+same digits at `−2` and `−0.8+0.4i`: the directly started solutions are the
+analytic continuation of the real Kneser tetration.
+
+**Inverses** (`src/inverse.rs`, README § 6.9): `tet --slog` (alias `--ate`)
+gives the height, `tet --sroot` (alias `--ssrt`) the base. Regular bases use
+the closed form through the Schroder coordinate; real bases above `e^(1/e)`
+solve a reduced real equation or continue from the real axis; complex,
+negative and cut bases continue `F(0) = 1` on the cached two-sided state;
+real super-roots use a bracket in `ln b`, complex ones a continuation that
+passes above singular values. Every result is checked by forward evaluation,
+and conditioning is measured: ill-conditioned answers are recomputed with
+the lost digits added. The default invocation is unchanged.
+
+**Review.** An independent review of the new code found five defects, all
+fixed with regression tests: a digit-count-dependent branch of `--slog` for
+real bases below 1; wrong trailing digits of ill-conditioned inverses (target
+next to a fixed point, tiny heights, the fold of `b^b`); a hang at heights
+like `−10^12`; refused real `--slog` targets such as `−130` or
+`10^(10^15)`; and non-integer heights within the solver's rounding of `−1`,
+`−2`, … taken for integers.
+
+**Audit.** A 576-case probe of the previous paths (12 vs 24 digits,
+functional equation, 30 s budget) was cut short by a reboot at 455 cases; all
+315 that returned values were consistent. No wrong value was found there.
+
+Tests: `tests/phase16_kneser.rs` (9), `tests/phase17_inverse.rs` (9) and
+`tests/phase18_complex_kneser.rs` (8) are new. t880 asserts three
+contour-independent 30-digit values at `b=1.46`; t423, t852 and t860, which
+asserted refusals at `−2`, `e^(3πi/4)` and `−0.8+0.4i`, now check values;
+t960, t961, t963, t964 are no longer ignored; t870/t872 are slow ignored
+positive tests. `TET_CAUCHY=1` selects the Cauchy path for A/B comparison.
+
+Still open: neutral multipliers, including the parabolic base, and the cost
+towards them (`1/(b−η)` on the real axis, `1/ln|λ|` in general); the
+two-fixed-point function inside the Shell–Thron region; complex super-roots at
+non-integer heights are slow (each trial base is solved from scratch);
+`10^100000`; forward-error enclosures; an external reference value for a
+complex base.
+
+---
+
 # Status Update — 2026-10-06 (paired negative-multiplier extension)
 
 Strictly attracting multipliers near `-1` now use guarded paired Taylor

@@ -325,7 +325,7 @@ fn poincare_coefficients(
     Ok(inverse)
 }
 
-fn eval_poincare_series(
+pub(crate) fn eval_poincare_series(
     coefficients: &[Complex],
     coordinate: &Complex,
     radius: &Float,

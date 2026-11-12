@@ -32,6 +32,12 @@ fn silent() -> bool {
     }
 }
 
+/// `TET_CAUCHY=1` makes the dispatcher skip the theta-mapping solvers and use
+/// the Cauchy-integral path, for A/B comparison.
+pub fn cauchy_only() -> bool {
+    std::env::var("TET_CAUCHY").is_ok_and(|v| is_truthy(&v))
+}
+
 fn is_truthy(s: &str) -> bool {
     matches!(
         s.trim().to_ascii_lowercase().as_str(),

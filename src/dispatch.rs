@@ -10,14 +10,17 @@
 //!   * Schröder regular tetration at the principal fixed point — works for
 //!     Shell-Thron interior bases (`|λ| < 0.95`) and for some bases just
 //!     outside the boundary where σ̃ Taylor still reaches `1−L`.
+//!   * Kneser theta mapping for real bases above `e^(1/e)`, and its two-sided
+//!     form for complex, negative and cut bases whose primary fixed points
+//!     both repel.
 //!   * Kouznetsov Cauchy iteration, with real-base and experimental cut-base
-//!     continuation when direct construction fails.
+//!     continuation, when those constructions fail.
 //!
 //! No unchecked polynomial surrogate is returned when these methods fail.
 
 use rug::{Complex, Float};
 
-use crate::{cnum, integer_height, kouznetsov, regions, schroder};
+use crate::{cnum, integer_height, kneser, kneser_complex, kouznetsov, regions, schroder};
 
 fn debug_enabled() -> bool {
     cnum::verbose()
@@ -53,6 +56,30 @@ fn schroder_result_is_canonical(b: &Complex, h: &Complex, v: &Complex, prec: u64
 /// Real-positive base strictly below e^{-e} (the "cut" segment).
 fn is_cut_base(b: &Complex) -> bool {
     b.imag().is_zero() && *b.real() > 0 && *b.real() < cnum::eta_lower(b.real().prec_64())
+}
+
+/// The two-sided theta mapping for a base whose primary fixed points both
+/// repel. Only a failed construction returns `None`; a height it cannot
+/// evaluate (overflow, singularity) is the answer for this base.
+fn tetrate_two_sided(
+    b: &Complex,
+    h: &Complex,
+    prec: u64,
+    digits: u64,
+) -> Option<Result<Complex, String>> {
+    if cnum::cauchy_only() {
+        return None;
+    }
+    dprint("both primary fixed points repel: using the two-sided theta-mapping solver");
+    match kneser_complex::setup_complex_kneser(b, prec, digits) {
+        Ok(state) => Some(kneser_complex::eval_complex_kneser(&state, h, prec, digits)),
+        Err(e) => {
+            dprint(&format!(
+                "two-sided theta mapping unavailable ({e}); trying the Cauchy solver"
+            ));
+            None
+        }
+    }
 }
 
 /// Experimental upper-half-base-plane continuation for `0 < b < e^{-e}`.
@@ -157,8 +184,16 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
     // algorithm fails, propagate the Err so the caller sees an honest failure
     // rather than a wrong-but-plausible C^0 number.
     let regular_base = !b.imag().is_zero() || *b.real() <= cnum::eta_upper(prec);
-    if !regular_base {
-        dprint("real base above eta: regular fixed-point family is not Kneser; using Kouznetsov");
+    if !regular_base && !cnum::cauchy_only() {
+        dprint("real base above eta: regular fixed-point family is not Kneser; using the theta-mapping solver");
+        // Only a failed construction falls back; a height it cannot evaluate
+        // (overflow, singularity) is the answer for this base.
+        match kneser::setup_kneser(b, prec, digits) {
+            Ok(state) => return kneser::eval_kneser(&state, h, prec, digits),
+            Err(e) => dprint(&format!(
+                "Kneser theta-mapping solver failed ({e}); trying Kouznetsov"
+            )),
+        }
     }
     match &region {
         regions::Region::BaseOne | regions::Region::BaseZero => {
@@ -211,6 +246,11 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
                         "Schröder result fails the real-base branch requirements; trying Kouznetsov",
                     ),
                     Err(e) => dprint(&format!("Schröder failed at boundary band: {}", e)),
+                }
+            }
+            if regular_base && d.lambda_abs > 1 {
+                if let Some(result) = tetrate_two_sided(b, h, prec, digits) {
+                    return result;
                 }
             }
             let is_real_base = b.imag().is_zero() && !b.real().is_sign_negative();
@@ -280,6 +320,9 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
                     ),
                     Err(e) => {
                         if is_cut_base(b) {
+                            if let Some(result) = tetrate_two_sided(b, h, prec, digits) {
+                                return result;
+                            }
                             return tetrate_cut_base(b, h, prec, digits, &e);
                         }
                         dprint(&format!(
@@ -355,9 +398,10 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
                 }
                 Err(error) => error,
             };
-            dprint(&format!(
-                "Schröder unavailable ({schroder_err}); trying Newton-Kouznetsov for complex base"
-            ));
+            dprint(&format!("Schröder unavailable ({schroder_err})"));
+            if let Some(result) = tetrate_two_sided(b, h, prec, digits) {
+                return result;
+            }
             match kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits) {
                 Ok(v) => Ok(v),
                 Err(why) => Err(unsupported_msg(

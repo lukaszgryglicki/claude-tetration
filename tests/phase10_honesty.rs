@@ -523,7 +523,9 @@ fn invalid_numerical_environment_overrides_are_errors() {
         ("TET_KOUZ_RESID_DUMP", "", false),
     ] {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_tet"));
-        cmd.args(["--quiet", "10", "2", "0", "0.5", "0"])
+        // TET_CAUCHY selects the Cauchy solver, which reads these overrides.
+        cmd.args(["--quiet", "10", "2", "0.1", "0.5", "0"])
+            .env("TET_CAUCHY", "1")
             .env_remove("TET_KOUZ_NO_EM")
             .env_remove("TET_KOUZ_ANDERSON")
             .env_remove("TET_KOUZ_PICARD")

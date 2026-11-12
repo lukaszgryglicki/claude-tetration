@@ -14,14 +14,16 @@ where it belongs:
   holomorphic Abel functions at complex fixed-point pairs that makes
   "*the*" canonical tetration a well-posed target at all.
 * **Dmitrii Kouznetsov** — the Cauchy-integral construction
-  (Math. Comp. 2009) that is the computational heart of this
-  repository, developed and stress-tested in the open on the forum.
+  (Math. Comp. 2009), developed and stress-tested in the open on the
+  forum: the computational heart of this repository until November 2026,
+  and still its fallback and its independent cross-check.
 * **[sheldonison (Sheldon Levenstein)](https://tetrationforum.org/member.php?action=profile&uid=42)** —
   [fast accurate Kneser sexp algorithm](https://tetrationforum.org/showthread.php?tid=486),
   the [fatou.gp / merged-fixed-point program](https://tetrationforum.org/showthread.php?tid=1017),
   and the [complex-base tetration program](https://tetrationforum.org/showthread.php?tid=729)
   — for years the practical gold standard this project measures
-  itself against.
+  itself against. The theta-mapping solvers of § 6.8 and § 6.10 are
+  built on the idea of those programs.
 * **[mike3](https://tetrationforum.org/member.php?action=profile&uid=56)** —
   the [Cauchy Integral Experiment](https://tetrationforum.org/showthread.php?tid=359)
   and [tetration for ALL bases, real and complex](https://tetrationforum.org/showthread.php?tid=828)
@@ -44,7 +46,8 @@ where it belongs:
   conjectures, and counterexamples shaped what "getting it right"
   means for every regime handled below.
 * **William Paulsen & Samuel Cowgill** — whose complex-base papers
-  grew from and fed back into these community discussions.
+  grew from and fed back into these community discussions; the
+  two-fixed-point formulation used in § 6.10 is the one of those papers.
 
 This repository's companion thread on the forum is
 [Arbitrary Tetration in rust](https://tetrationforum.org/showthread.php?tid=1826)
@@ -61,7 +64,7 @@ Coverage is incomplete, and working precision is not a certified error bound.
 ```console
 $ tet --quiet 50 2 0 0.5 0    # base 2, height 1/2
 1.4587818160364217006839716610385871352966066053309
-1.4385466959000460791684806773926427793264165481517e-69
+0
 
 $ tet --quiet 20 0.5 0 0.5 0  # real base below one; genuinely complex result
 0.62978622839612487196
@@ -69,24 +72,39 @@ $ tet --quiet 20 0.5 0 0.5 0  # real base below one; genuinely complex result
 ```
 
 The solver portfolio attempts the method appropriate to each regime: special cases, Schröder
-regular iteration at the attracting fixed point, Kouznetsov's
-Cauchy-integral construction, warm-started continuation, and an experimental germ-tracked
-ε-continuation walker for the branch-cut segment `0 < b < e^{−e}`.
+regular iteration at the attracting fixed point, a Kneser theta-mapping solver
+for real bases above `e^{1/e}` (§ 6.8), its two-sided form for complex,
+negative and cut bases whose two primary fixed points repel (§ 6.10), and,
+as fallbacks, Kouznetsov's Cauchy-integral construction, warm-started
+continuation and the ε-continuation walker for the cut segment `0 < b < e^{−e}`.
+The inverses in the height (super-logarithm, `--slog`) and in the base
+(super-root, `--sroot`) are built on the same evaluators (§ 6.9).
 Unchecked Richardson and linear-surrogate answers have been removed.
 Finite-value, convergence, normalization and functional-equation checks reject
 known failures. These checks do **not** prove forward accuracy, uniqueness, or
 global canonicality; the functional equation can hold for a wrong reconstruction.
-The 50-digit base-2 example agrees with an independent-method numerical reference;
-its tiny imaginary part is numerical roundoff, not a mathematical imaginary part.
+The base-2 example agrees with an independent-method numerical reference to
+100 digits; real heights of real bases above `e^{1/e}` now return an exactly
+zero imaginary part.
 
 * **Language / deps:** Rust, [`rug`](https://crates.io/crates/rug)
   (GMP/MPFR/MPC bindings) for arbitrary-precision complex arithmetic,
   [`rayon`](https://crates.io/crates/rayon) for parallel kernels.
 * **Interface:** a single CLI binary `tet`, plus a string-in/string-out
-  library API (`tetration::tetrate_str`).
+  library API (`tetration::tetrate_str`, `slog_str`, `sroot_str`).
 * **Definition used:** `F_b(0) = 1`, `F_b(z+1) = b^{F_b(z)}`, with
   method-specific branch and normalization conventions
   (§ [Conventions](#12-conventions-and-normalization)).
+* **Status (November 2026):** real bases above `e^{1/e}` are solved by a
+  theta-mapping iteration whose cost grows linearly with the digits:
+  `2^^0.5` takes 0.3 s at 15 digits (41 s before) and matches the independent
+  reference to 100 digits in 7 s; 400 digits take 7 minutes on one thread.
+  It also reaches bases the Cauchy solver did not: `b = 1.6`, the
+  near-parabolic `1.46` and `1.4448`, and `10^10000`. Its two-sided form
+  solves complex and negative bases outside the Shell–Thron region in about a
+  second at 15 digits (the Cauchy solver needed a minute or failed, e.g. at
+  `−2` and `−0.8+0.4i`) and, for the first time, the cut bases
+  `0 < b < e^{−e}` directly (`0.04`: 3 s). `--slog` and `--sroot` are new.
 * **Status (October 2026):** direct inverse-Poincare series extend strictly
   attracting coverage, including independently checked 100-digit boundary-band
   values, 1000-digit complex-height results and a 100,000-digit native-scale
@@ -124,6 +142,9 @@ its tiny imaginary part is numerical roundoff, not a mathematical imaginary part
    5. [Continuation solver](#65-continuation-solver)
    6. [Retired polynomial fallback](#66-retired-polynomial-fallback)
    7. [The cut-base ε-walker](#67-the-cut-base-ε-walker-0--b--e−e)
+   8. [Kneser theta-mapping solver](#68-kneser-theta-mapping-solver-real-b--e1e)
+   9. [Inverses: super-logarithm and super-root](#69-inverses-super-logarithm-and-super-root)
+   10. [Two-sided theta mapping: complex, negative and cut bases](#610-two-sided-theta-mapping-complex-negative-and-cut-bases-srckneser_complexrs)
 7. [Numerical honesty](#7-numerical-honesty)
 8. [Known limitations](#8-known-limitations)
    1. [Feasibility verdicts for the open gaps](#81-how-hard-would-closing-each-gap-be-feasibility-verdicts)
@@ -188,10 +209,15 @@ Precise statements of what `tet` returns:
   nonexistence theorem about every other possible real interpolation.
 * **`Im(b)<0`:** the dispatcher defines the reflected branch by
   `F_b(h)=conj(F_conj(b)(conj(h)))`.
-* **Cut segment `0<b<e^{−e}`:** the intended experimental convention is
-  continuation from the upper half base-plane. Neither existence of every
-  required boundary limit nor a successful endpoint solve has been
-  established by this audit.
+* **Complex and negative bases:** where the fixed point `−W₀(−ln b)/ln b`
+  attracts, the regular iteration at it; where it repels, the function that
+  tends to the two primary fixed points `−W₀(−ln b)/ln b` and
+  `−W₁(−ln b)/ln b` as `Im z → ±∞` (§ 6.10). The second family continues the
+  Kneser tetration of real `b > e^{1/e}` analytically through the upper half
+  base-plane; it is not the continuation of the first across the boundary.
+* **Cut segment `0<b<e^{−e}`:** the limit of that second family from the
+  upper half base-plane, computed at the real base itself with the same two
+  fixed points. Values at real non-integer heights are complex.
 * **Integer heights:** direct MPFR/MPC tower iteration, not exact symbolic
   arithmetic in general. Exact representable cases such as `2^^3=16`
   remain exact; exponent-range overflow/underflow is an error.
@@ -215,9 +241,9 @@ period-doubling point). The geography drives everything:
 |---|---|---|
 | Shell–Thron interior (`\|λ\| < 1`) | attracting | Schröder linearization |
 | Shell–Thron boundary (`\|λ\| = 1`) | root-of-unity or irrationally neutral | sectorial Fatou coordinates / small-divisor analysis; not generally implemented |
-| outside, real `b > η` | repelling, conjugate FP pair | Kouznetsov Cauchy integral |
-| outside, general complex `b` | repelling fixed points | experimental Kouznetsov pair selection; no global coverage guarantee |
-| real cut `0 < b < e^{−e}` | repelling with `λ < −1` | ε-continuation walker (this repo's construction) |
+| outside, real `b > η` | repelling, conjugate FP pair | Kneser theta mapping (Kouznetsov Cauchy integral as fallback) |
+| outside, general complex `b` | both primary fixed points repel | two-sided theta mapping (Kouznetsov Cauchy integral as fallback) |
+| real cut `0 < b < e^{−e}` | repelling with `λ < −1` | two-sided theta mapping (ε-continuation walker as fallback) |
 
 ---
 
@@ -333,12 +359,18 @@ $ tet 20 0 1 0.5 0      # base i
 
 ```
 tet [--quiet|--silent|-q] <precision_digits> <base_re> <base_im> <height_re> <height_im>
+tet [-q] --slog  <precision_digits> <base_re> <base_im> <value_re> <value_im>
+tet [-q] --sroot <precision_digits> <value_re> <value_im> <height_re> <height_im>
 ```
 
 * `precision_digits` — requested decimal precision (positive integer).
   Internally mapped to MPC binary precision with guard bits.
 * the four remaining arguments are decimal strings for
   `b = base_re + i·base_im` and `h = height_re + i·height_im`.
+* `--slog` (alias `--ate`) prints the height `h` with `F_b(h) = value`;
+  `--sroot` (alias `--ssrt`) prints the base `b` with `F_b(h) = value`.
+  Without a flag the behaviour and output are unchanged. Conventions,
+  domains and costs are in § 6.9.
 
 **Output:** two lines on stdout — `Re F_b(h)`, then `Im F_b(h)`.
 **Exit codes:** `0` success; `1` honest failure (diagnostic on stderr);
@@ -432,6 +464,7 @@ That quadrature witness does not certify the complete tetration construction.
 | variable | effect |
 |---|---|
 | `SILENT=1` | suppress progress diagnostics; fatal errors remain on stderr |
+| `TET_CAUCHY=1` | skip the theta-mapping solvers (§ 6.8, § 6.10) in the forward dispatcher and use the Cauchy path, for A/B comparison; slow, and fails where that path always failed |
 | `TET_KOUZ_ANDERSON=1` / `TET_KOUZ_PICARD=1` | force alternative Kouznetsov iterators (diagnostics) |
 | `TET_KOUZ_NO_EM=1`, `TET_KOUZ_EM_K=<n>` | Euler–Maclaurin correction A/B switches |
 | `TET_KOUZ_CUT_ANCHOR=<ε₀>`, `TET_KOUZ_CUT_RATIO=<r>` | positive anchor (default 2), ratio strictly between 0 and 1 (default 0.72); unaddressable schedules are rejected |
@@ -468,7 +501,25 @@ $ SILENT=1 tet 20 1.4142135623730950488 0 0.5 0   # √2, quiet mode
 1.2436216276685218043
 0
 
-$ tet 20 0.04 0 0.5 0                   # experimental cut walk; may take hours
+$ tet -q 20 0.04 0 0.5 0                # a base on the cut 0 < b < e^-e (3 s)
+6.6383135523147452465e-2
+4.4794486192426514996e-1
+
+$ tet -q 20 -2 0 0.5 0                  # a negative base (2 s)
+1.2349920471100180674
+1.7276518625932047103
+
+$ tet -q --slog 30 2 0 16 0             # super-logarithm: 2^^3 = 16
+3.00000000000000000000000000000
+0
+
+$ tet -q --sroot 30 2 0 2 0             # super square root of 2: b^b = 2
+1.55961046946236934997038876877
+0
+
+$ tet -q --sroot 20 10 0 2.5 0          # the base with b^^2.5 = 10 (about 15 s)
+2.1179975403097240013
+0
 ```
 
 ---
@@ -496,7 +547,10 @@ padding and exponent text do not inflate that significand count.
 
 Lower-level entry points (`dispatch::tetrate`, per-method `setup_*` /
 `eval_*` pairs that amortize per-base work across many heights) are
-public as well; see the module docs in `src/`.
+public as well; see the module docs in `src/`. `kneser::setup_kneser` /
+`kneser::eval_kneser` cache one real base above `e^{1/e}`;
+`tetration::slog_str`, `tetration::sroot_str` and `inverse::{slog, sroot}`
+are the inverse counterparts of `tetrate_str` and `dispatch::tetrate`.
 
 ---
 
@@ -510,17 +564,69 @@ Every row is subject to branch, domain, convergence and resource limits:
 | `b = 0`, `b = 1` | integer / all | exact special case | exact |
 | nondegenerate `b` | integers `h ≥ −1` whose iteration chain fits MPFR | direct iteration | finite-precision arithmetic; exact special cases |
 | strictly attracting regular cases (`\|λ\| < 1`) | tested complex heights | direct inverse-Poincare / Schröder | independent 100-digit fringe, 1000-digit ordinary and 100,000-digit native-scale witnesses; not all-height coverage |
-| real `b > η` | heights within the reconstruction domain | Schwarz-symmetric Kouznetsov | base-2 half-height has an independent 50-digit cross-check |
-| general complex outside ST | case-dependent | experimental Kouznetsov / regular iteration | failures include `−2` and `−0.8+0.4i`; no class-wide accuracy certificate |
+| real `b > η` | all complex heights that do not overflow; integers `≤ −2` are singular | Kneser theta mapping (§ 6.8); Kouznetsov only if that construction fails | `2^^0.5` matches the independent reference to 100 digits and `e^^0.5` to 100; several contours agree; tested from `1.4448` to `10^10000` |
+| inverses `--slog`, `--sroot` | see § 6.9 | closed form (regular bases), Newton continuation on the forward evaluators | every result is checked by forward evaluation |
+| complex and negative bases whose primary fixed points both repel | all complex heights that do not overflow; cuts along the real axis left of `−2` | two-sided theta mapping (§ 6.10); Kouznetsov only if that construction fails | equals the Kneser solver on the real axis and five Cauchy-solver values; three or more contours agree to 30 digits at `−2`, `3+4i`, `−1+2i`, `−0.8+0.4i`; 182 of 182 scanned bases outside the region solved |
 | `Im(b) < 0` | reflected domain | Schwarz convention | same numerical limitations as the reflected case |
-| boundary band `0.95 ≤ \|λ\| ≤ 1.05` | case-dependent | attracting inverse germ; other existing methods outside strict attraction | strict-attractor fringe now covered; b=1.5 has a direct route; genuinely neutral and very slow cases remain |
-| real cut segment `0 < b < e^{−e}` | case-dependent | regular branch where available; experimental ε-walker otherwise | no verified walker endpoint in this audit |
+| boundary band `0.95 ≤ \|λ\| ≤ 1.05` | case-dependent | attracting inverse germ below `\|λ\| = 1`; theta mappings above it | strict-attractor fringe covered; real bases down to `1.4448` and complex bases such as `0.5+2i` (`\|λ\| = 1.004`) covered, at a cost growing like `1/ln\|λ\|`; the parabolic base `η` itself and neutral multipliers remain |
+| real cut segment `0 < b < e^{−e}` | as for complex bases | two-sided theta mapping at the real base; ε-walker only as fallback | `0.04` and `0.01`: three contours agree to 30 digits, a fourth reached by continuation through complex bases agrees, and the values are continuous with `b + 10^{−10}i` |
 | `b=0` outside nonnegative integer heights; nondegenerate `b` at integer `h≤−2` | — | error | base one retains its constant-function convention |
 
 ### 5.1 ✅ Verified
 
 Numerically cross-checked, **not interval-certified**:
 
+* **Complex, negative and cut bases (two-sided theta mapping, November 2026).**
+  At real bases 2, 3 and 1.6 the solver reproduces the Kneser solver to 25
+  digits at real and complex heights. `F_b(0.5)` for `2+0.1i`, `2+0.3i`,
+  `3+0.5i`, `3+4i`, `10+5i` equals the 15 digits printed by the Cauchy solver
+  (26–52 s each; now under a second). For `−2`, `3+4i`, `−1+2i`, `−0.8+0.4i`
+  and the cut bases `0.04`, `0.01`, three contours agree to 30 digits at the
+  heights `0.5`, `−1.5+0.2i`, `1.3−2i`; the default contour, which reaches
+  `0.04` only by continuation through complex bases, gives the same digits.
+  Examples: `F_{−2}(0.5) = 1.23499204711001806741684243512 +
+  1.72765186259320471027645429067i`, `F_{0.04}(0.5) =
+  0.0663831355231474524653734313751 + 0.447944861924265149963222115626i`,
+  `F_{−0.8+0.4i}(0.5) = 0.925948245809055867281877605266 +
+  1.37734989869650947799582166833i` (the same digits at 15, 20, 22, 25 and
+  40 requested digits; the Cauchy solver produced a different artifact at
+  each precision). A scan of 220 bases with real parts from `−1000` to
+  `10^30` and imaginary parts from `0` to `10^5` solved all 182 that lie
+  outside the Shell–Thron region (average 1.8 s, slowest 17.5 s) and
+  rejected the 37 inside it at once. The functional equation holds across
+  both theta lines and through the logarithmic height reduction, values far
+  up and far down equal the two fixed points, and `Im b < 0` is the mirror
+  image (`tests/phase18_complex_kneser.rs`). That the directly started
+  solutions are the analytic continuation of the real Kneser tetration was
+  checked with an independent mpmath prototype of the same iteration: started
+  at the real base `e^{1.5}` and continued through the upper half base-plane,
+  it ends at the 12 digits quoted above for `−2` and `−0.8+0.4i`, as do the
+  two continuation paths to the cut bases.
+* **Real bases above `e^{1/e}` (theta-mapping solver, November 2026).**
+  `2^^0.5` equals the independent `fatou.gp` reference at 15, 50 and all
+  **100 digits**; `e^^0.5` equals the external 100-digit value (that string
+  is truncated: the 110-digit result continues `…2053426578…`). The 60-digit
+  Cauchy-solver fixture `F_2(0.375)` is reproduced exactly, and nine base-2
+  heights (real, complex, negative, both evaluation regions) agree with the
+  previous Cauchy solver to all 15 digits. Seven different contours give the
+  same 15 digits for base 2; four give the same 30 digits for base 3 at seven
+  heights; three give the same 30 digits for `b = 1.46`.
+  `b = 1.4448` (formerly refused) is `1.2572110255920272276` at `h = 0.5` on
+  two contours, on the line through the regular values at `1.4446` and
+  `1.44466`. Large bases: `10^30`, `10^100` and `10^1000` agree on two or three
+  contours (`F(0.5)` = `645.547844724944`, `65637.4795183687`,
+  `278773383556.290`). Real heights return an exactly zero imaginary part, and
+  heights with large imaginary part (formerly "outside the Cauchy contour")
+  are evaluated: `F_2(0.5 + 10^6 i)` is the fixed point to 20 digits.
+  Regressions: [`tests/phase16_kneser.rs`](tests/phase16_kneser.rs) and
+  t880 in [`tests/phase8_verification.rs`](tests/phase8_verification.rs).
+* **Inverses.** `slog_2(16) = 3` and `slog_2(65536) = 4` to 30 digits; round
+  trips `slog_b(F_b(h)) = h` at 25 digits for real and complex heights of the
+  bases `2`, `10`, `1.3`, `√2`, `0.5`, `1.3+0.1i`, `i` and `0.3−0.2i`;
+  `sroot(16, 3) = sroot(65536, 4) = 2`; the super square root matches
+  `exp(W(ln z))` to 40 digits; round trips `sroot(F_b(h), h) = b` at 20 digits
+  for `b` = `2`, `1.3`, `1.2`, `3`, `1.6` and one complex base.
+  Regressions: [`tests/phase17_inverse.rs`](tests/phase17_inverse.rs).
 * Strict attractors near multiplier **`-1`** now have independent
   **20/50/100-digit real/complex-height library** witnesses at
   `b=0.0659880358454` and `b=0.0659880358454+1e-14i`.
@@ -741,8 +847,10 @@ neither the grids nor the reference calculations certify global coverage.
 
 ### 5.2 ⏳ Pending / in progress
 
-The cut-walker endpoint, genuinely neutral/parabolic constructions, difficult
-complex-base contours and validated forward-error bounds remain research work.
+Genuinely neutral/parabolic constructions and validated forward-error bounds
+remain research work. The two-sided theta mapping of § 6.10 replaced the
+cut walker and the Cauchy solver as the first method for bases whose primary
+fixed points repel; those older constructions are kept as fallbacks.
 Real positive and genuinely complex near-neutral attractors now use bounded
 Taylor jumps; paired steps also address strict attraction near `-1`.
 t710/t871 pass without being ignored. Genuinely neutral and other slowly
@@ -753,14 +861,14 @@ part does not guarantee a solvable or accurate near-cut case.
 
 ### 5.3 ❌ Known-bad / missing (by design or documented ceiling)
 
-* **Near-parabolic cases**, including `b=1.4448`: the former fixed-ladder
-  Richardson result had no requested-accuracy contract and is now an error
-  when existing convergent methods fail. The whole routing band is not
-  mathematically parabolic, nor uniformly unsupported.
-  Rebuilding committed revision `26aec7f` also disproved the old `b=1.46`
-  full-precision continuation claim: its first warm step stalls, then the
-  old code returns unchecked extrapolation. t880 now requires honest refusal
-  from both failed solver paths; see [the failure atlas](FAILURE_CASES.md).
+* **Near-parabolic real bases just above `η`:** `b = 1.46` (about 3 s at 15
+  digits) and `b = 1.4448` (about 8 minutes at 20 digits) are now computed by
+  the theta-mapping solver and checked on independent contours; the old
+  Richardson ladder and the stalled continuation are history
+  ([failure atlas](FAILURE_CASES.md)). The cost grows roughly like
+  `1/(b − η)` because each Abel-function evaluation needs that many
+  logarithms; `b = 1.4447` was not finished. **The parabolic base `η` itself
+  is not supported** (needs Fatou coordinates).
 * **Neutral and very slowly attracting multipliers:** the former blanket
   strict-attractor exclusion is removed. In particular, the old deep-band
   garbage witness `b=0.0653281554868594+0.025i, h=48.013` now matches an
@@ -768,32 +876,22 @@ part does not guarantee a solvable or accurate near-cut case.
   root-of-unity or irrationally neutral cases, or guarantee practical runtime
   arbitrarily close to the neutral boundary. Stalled alternative constructions
   still cannot return their old relaxed-gate samples as answers.
-* **Outside-ST bases with unresolved contour/branch obstructions**
-  (discovered on `b = −0.8 + 0.4i`, `|λ| ≈ 1.15`): the LM solve stalls
-  at an O(1) residual that is partly a *phantom* (principal-log
-  branch break on the left edge — the two-sided unwrap drops it
-  1.577 → 9.5e-4) and partly *genuine* (the remaining 9.5e-4 floor is
-  node-count-invariant and spatially broad. A zero or branch obstruction
-  in the strip is a diagnosis to investigate, not a nonexistence proof
-  from a finite residual or a sampled minimum of `|F|`).
-  **There is no independently verified tetration value at such bases
-  yet**: an earlier test-blessed 20-digit value turned out to be a
-  discretization artifact — 20/22/25-digit runs each give a
-  *completely different* `F(0.5)` while all passing the (recurrence-
-  enforced, hence tautological) FE post-check. The honesty gate now
-  rejects all of them and the CLI ERRs cleanly; the regression tests
-  assert the refusal. Principal and two-sided retries may still be expensive;
-  no unchecked extrapolation follows them.
-  Full anatomy: `FAILURE_CASES.md` § A.2.
-  Closing this class needs a non-rectangular (Paulsen-style) contour
-  that avoids the in-strip zero of `F` — a research item (§ 8.1).
+* **Complex bases next to the Shell–Thron boundary from outside:** the
+  two-sided solver needs about `1/ln|λ|` logarithms per sample, where `λ` is
+  the weaker multiplier (`0.5+2i`, `|λ| = 1.004`: 14 s at 15 digits; `0.06`,
+  `λ = −1.007`: 21 s). Neutral multipliers are not covered. The base
+  `−0.8+0.4i`, where the Cauchy solver returned a different artifact at
+  every precision, is now solved (§ 5.1); its anatomy is kept in
+  `FAILURE_CASES.md` § A.2.
+* **Inside the Shell–Thron region only regular iteration is offered.** The
+  two-fixed-point function also exists there but is a different function;
+  the dispatcher does not mix the two families.
 * **`b = 0` at non-integer heights** — no principal-branch value
   exists: honest ERR.
 * **Negative integer heights `h ≤ −2`** for nondegenerate bases: no finite
   value consistent with the recurrence through `F(−1)=0`; honest error.
-* **Paulsen–Cowgill conformal-map machinery** — not implemented;
-  pathological bases that would need it error out cleanly instead of
-  guessing.
+* **Certified enclosures** — not implemented; every gate is a consistency
+  check and the evidence is agreement between independent constructions.
 
 ### 5.4 Gallery: `f(x) = b^^x` near the cut, in 3D
 
@@ -1015,7 +1113,9 @@ Kneser tetration; it is not a general canonicality proof.
 
 ### 6.4 Kouznetsov Cauchy-integral method (outside Shell–Thron) (`src/kouznetsov.rs`)
 
-The main alternative outside the regular-iteration region. The intended
+The first method outside the regular-iteration region until November 2026;
+now the fallback behind the theta mappings (§ 6.8, § 6.10) and, via
+`TET_CAUCHY=1`, an independent cross-check of them. The intended
 branch is sought through a vertical-line boundary problem: sample `F` at `N` uniform nodes on
 `Re z = 1/2`, `t ∈ [−T, T]`, and refine by Cauchy's integral over the
 rectangle `Re ∈ [−1/2, 3/2]`, `Im ∈ [−T, T]` whose four edges are
@@ -1075,8 +1175,11 @@ direct solve (regression: `b=1.5`). If both fail, their causes are reported.
 
 ### 6.7 The cut-base ε-walker (`0 < b < e^{−e}`)
 
-The most delicate regime, and this repository's original
-contribution. On the cut segment the intended branch is a boundary
+Since November 2026 the two-sided theta mapping (§ 6.10) computes cut bases
+at the real base in seconds, with the same fixed-point pair; the walker
+described here runs only if that construction fails. It remains this
+repository's original contribution to the most delicate regime. On the cut
+segment the intended branch is a boundary
 limit from `Im b > 0` (§ 1.2), where that limit exists. The germ of the chosen fixed-point
 pair, continued from the anchor `b + 2i` down to the real axis, is
 `(W₀, W₊₁)` — **both in the closed upper half-plane** (the generic
@@ -1155,6 +1258,186 @@ logs and the failure-mode history are in
 [`FAILURE_CASES.md`](FAILURE_CASES.md) § J. The October audit did not
 rerun these walks or verify their historical intermediate values or endpoint.
 
+### 6.8 Kneser theta-mapping solver (real `b > e^{1/e}`) (`src/kneser.rs`)
+
+The primary method for real bases above `η`. With `a = ln b`, the upper fixed
+point `L`, `λ = aL` and `κ = Log λ`, the Poincaré function `ψ`
+(`ψ(λt) = L(e^{aψ(t)} − 1)`, `ψ'(0) = 1`) is entire, and
+`S(w) = L + ψ(e^{κw})` is the regular superfunction. Kneser's real-analytic
+tetration is
+
+```
+F(z) = S(z + θ(z))   for Im z > 0,      F(conj z) = conj F(z),
+```
+
+with `θ` 1-periodic and containing only the modes `e^{2πikz}`, `k ≥ 0`.
+The solver stores `F` twice: as `θ` for `|Im z| ≥ y0` and as a real Taylor
+polynomial `P` centred at `c` for `|Im z| < y0`. One step of its fixed-point map:
+
+1. sample `θ(z) = α(P(z)) − z` on the line `Im z = y0` over one period, where
+   the Abel function `α = S⁻¹` is evaluated by principal `log_b` steps toward
+   `L` followed by a Newton inversion of the `ψ` series (precision doubled per
+   step);
+2. take the Fourier transform and **discard the negative modes**;
+3. rebuild the Taylor coefficients by Cauchy's formula on `|z − c| = R` (one
+   FFT), using `S(z + θ(z))` where `Im z ≥ y0`, and `b^{P(z−1)}` /
+   `log_b P(z+1)` on the two short arcs near the real axis;
+4. shift so that `F(0) = 1` (or `F(−1) = 0` for contours centred left of `−1/2`).
+
+Plain iteration contracts by about `0.16` per step for base 2; Anderson mixing
+(depth 10) makes it superlinear, about three digits per step. A precision
+ladder (12 digits, then doubling) warm-starts each level. Default contour:
+`c = −1/2`, `R = 1`, `y0 = 1/2`; for `ln b > 16` the contour moves left
+(`c = −1`, `R = 0.7`, `y0 = 0.3`) where the values stay moderate, and if the
+direct start fails the base is reached by continuation, doubling `ln b` per
+hop at the first precision level.
+
+All sizes grow **linearly** with the requested digits `D`: about `0.73 D`
+Fourier modes, `3 D` Taylor terms and `5.7 D` contour nodes, against the
+roughly quadratic node count of the Cauchy rectangle. Measured single-thread
+times for `2^^0.5`: 0.3 s (15 digits), 1 s (40), 7 s (100), 42 s (200),
+7 min (400); `TET_MT=8` is five to six times faster (1.1 s at 100 digits,
+75 s at 400) and bit-identical. Other bases at 15 digits: `10` … `10^6`
+0.3–0.5 s, `1.6` 0.5 s, `1.5` 1 s, `1.46` 3 s, `1.45` 6 s, `10^30` 1.5 s,
+`10^100` 3 s, `10^1000` 9 s, `10^10000` 34 s.
+
+Evaluation uses `S(h + θ(h))` directly for `|Im h| ≥ y0` (any real part that
+does not overflow) and `P` plus exact `b^·` / principal `log_b` steps
+otherwise; real heights are evaluated in real arithmetic. The error
+amplification of every step is tracked, and the state is re-solved at more
+internal digits when a height consumes the six-digit margin (large towers,
+values near the zero at `h = −1`).
+
+A state is accepted only if the fixed-point residual, the discarded negative
+modes, the mismatch between `S(z + θ(z))` and `P(z)` at five junction points,
+the real-axis functional equation `P(1/2) = b^{P(−1/2)}` and the normalization
+all meet the internal target. These are consistency gates, not an enclosure;
+the independent evidence is in § 5.1 (reference values, the former Cauchy
+solver, and agreement between different contours).
+
+Limits: the number of logarithms per Abel evaluation grows like `1/ln|λ|`,
+i.e. like `1/(b − η)` near the parabolic base; `b = η` itself is not covered.
+`10^100000` did not finish in five minutes. Complex, negative and cut bases
+are the subject of § 6.10.
+
+### 6.9 Inverses: super-logarithm and super-root (`src/inverse.rs`)
+
+**`--slog` (`--ate`): `slog_b(z)`, the height `h` with `F_b(h) = z`.**
+
+* *Strictly attracting bases* (regular tetration): the closed form
+  `h = Log(σ(z)/σ(1)) / Log λ`, where `σ` is the Schröder coordinate, obtained
+  from the forward orbit of `z` into the Poincaré disk. The principal `Log`
+  fixes the branch (`slog_b(1) = 0`); for `1 < b < η` real targets below the
+  fixed point give real heights, e.g. `slog_√2(1.5) = 1.3278668758402484092`,
+  and targets between the two real fixed points give
+  `Im h = π / ln λ`. A target whose orbit leaves the basin is an error.
+* *Real `b > η`*: a real target is reduced by `log_b` / `b^·` to `(0, 1]`
+  and the reduced equation is solved (bracketed Newton) and verified there,
+  so towers as large as `10^(10^15)` are no harder than small targets.
+  Complex `z` is reached by Newton steps along a path that does not cross
+  the rays `{x ± i·Im L : x ≤ Re L}`. Targets so negative that the height
+  rounds to the singular `−2` return that rounded value.
+* *Complex, negative and cut bases of § 6.10*: Newton continuation of
+  `F_b(0) = 1` along the segment `1 → z` on the cached solver state.
+* *Other bases*: the same continuation through the dispatcher; as slow as
+  the forward method.
+* `Im(b) < 0` is reflected: `slog_b(z) = conj(slog_conj(b)(conj z))`.
+* The normalization values `slog_b(1) = 0`, `slog_b(0) = −1` and
+  `slog_b(b) = 1` are returned as such. For real bases the imaginary part of
+  `Log(σ(z)/σ(1))` is exactly `0` or `π` on the real axis and is set from the
+  signs, not from rounded arithmetic.
+
+**`--sroot` (`--ssrt`): the base `b` with `F_b(h) = z`.**
+
+* Real `z > 1`, `h > 0`: the unique real `b > 1`, by a bracket in `ln b`
+  (a tower beyond MPFR's range counts as "too large"), Illinois regula falsi
+  at 24 digits and secant steps at full precision. `h = 1` returns `z`;
+  integer `h ≥ 2` are ordinary towers (`sroot(16, 3) = 2`).
+* Other inputs: the real solution for `(|z|, Re h)` is continued first to
+  `z`, then to `h`. This works where the forward function is fast and
+  analytic in the base (integer heights, the regular region). A path that
+  enters complex bases outside the Shell–Thron region is impractically slow
+  today, and a path that would cross the region's boundary fails honestly.
+* Integer heights below 1 do not determine a base: error.
+
+Every inverse is verified before it is printed: the forward image must
+reproduce the target to within the change caused by a few units in the last
+requested digit of the answer (the larger of the two directions, because next
+to a fold one direction leads to the twin root). The same response measures
+the conditioning: when the answer loses `k` digits (a target next to a fixed
+point, a height near 0, a fold of `b ↦ F_b(h)`), the forward evaluations are
+repeated with `k` more digits, the inputs are re-read at that precision, and
+only then are the requested digits printed. A target within `10^{−46}` of the
+fixed point of base `1/2`, or the super square root just above the fold at
+`b = 1/e`, keep all their printed digits when the input is padded with zeros.
+
+### 6.10 Two-sided theta mapping: complex, negative and cut bases (`src/kneser_complex.rs`)
+
+For `Im b ≥ 0` put `a = Log b`. The two primary fixed points of `b^z`,
+
+```
+L₊ = −W₀(−a)/a,        L₋ = −W₁(−a)/a,
+```
+
+are analytic in `b` on the whole upper half-plane, the multiplier `a L₊` has
+argument in `(0, π)`, `a L₋` has argument in `(−π, 0)`, and `L₋` always
+repels (`|W₁| > 1`). Where `L₊` repels too, i.e. outside the Shell–Thron
+region, there is a tetration that tends to `L₊` as `Im z → +∞` and to `L₋` as
+`Im z → −∞`:
+
+```
+F(z) = S₊(z + θ₊(z))   for Im z ≥ y0,      θ₊ has the modes e^{+2πikz}, k ≥ 0,
+F(z) = S₋(z + θ₋(z))   for Im z ≤ −y0,     θ₋ has the modes e^{−2πikz}, k ≥ 0,
+```
+
+with the regular superfunctions `S±` of § 6.8 at the two fixed points. For a
+real base above `e^{1/e}` this is the Kneser tetration (`L₋ = conj L₊`); on the
+real cut `0 < b < e^{−e}` it is the limit from the upper half-plane (`L₊` is
+then the real repelling fixed point, `L₋` a complex one); negative bases are
+the edge `Im a = π`. `Im b < 0` is the mirror image.
+
+The solver is the one of § 6.8 without the symmetry: a complex Taylor
+polynomial between the two lines, both `θ` functions, Cauchy's formula on the
+whole circle, a complex normalizing shift, Anderson mixing on the real and
+imaginary parts, the same precision ladder. Three things are new.
+
+* **Logarithm branches by continuity.** Nothing keeps `F` away from the
+  negative real axis, so the principal logarithm is not the inverse step.
+  On each line all samples take the same number of logarithms, and at every
+  level the branch of each sample is the one nearest to its neighbour (in
+  argument); the last sample is fixed by the first one a level earlier,
+  because `F(z + 1 − n) = F(z − (n − 1))`. The left arc of the contour
+  continues the upper part. Heights left of the Taylor disk are reduced by
+  logarithms whose branches are traced, at 128 bits, down a vertical segment
+  from the nearer line, where no logarithm is needed (the segment is
+  subdivided wherever two neighbours are too far apart); the cuts of `F`
+  therefore run along the real axis to the left of `−2`, and the values on
+  them are the limits from above. Far to the left the chain ends in closed
+  form at the fixed point of its side.
+* **Adaptive sizes and contours.** A complex base can have further zeros of
+  `F`, hence nearer singularities than `−2` (at the cut base `0.04` the
+  Taylor series at `−1/2` converges only to radius about `1.2`). When the
+  consistency gates fail although the iteration converged, the sizes grow by
+  a factor `3/2` for as long as that reduces the defect at least fourfold;
+  smaller contours (`−1/2, 3/4, 0.35` and `−1, 0.7, 0.3`) are tried when the
+  default one fails. The Poincaré radius
+  shrinks near low-order resonances of the multiplier (`λ₊ ≈ −1` on the cut).
+* **Continuation in the base.** If no direct start converges, the base is
+  reached from a real one through a path in the `ln b` plane that stays
+  outside the Shell–Thron region (which lies in `−e ≤ Re ≤ 0.87`,
+  `Im ≤ 2.11` of the strip `0 ≤ Im ln b ≤ π`): straight up from a base above
+  `e^{1/e}` where `Re ln b ≥ 1`, straight from the cut base `e^{−3.2}` where
+  `Re ln b ≤ −3.2`, otherwise through the corridor `Im ln b = 2.6` above the
+  region. A secant predictor in the base lengthens the steps.
+
+Cost: one to two seconds at 15 digits and three to five at 30 for ordinary
+bases; `0.04` 3 s, `0.5+2i` (`|λ₊| = 1.004`) 14 s, `0.06` (`λ₊ = −1.007`)
+21 s. The number of logarithms per sample grows like `1/ln|λ₊|` towards the
+Shell–Thron boundary. Very small bases need the continuation: `10^{−6}` 13 s,
+`10^{−10}` 19 s, `10^{−100}` two minutes. The evidence is listed in § 5.1; the acceptance gates
+(both junctions, the functional equation across the strip, normalization,
+discarded modes) are consistency checks, not an enclosure.
+
 ---
 
 ## 7. Numerical honesty
@@ -1199,25 +1482,32 @@ rerun these walks or verify their historical intermediate values or endpoint.
 
 ## 8. Known limitations
 
-* **Coverage:** some near-parabolic, negative-real, general-complex and
-  cut-base cases still fail. A failed rectangle or seed search is not proof
-  that no alternative mathematical construction exists.
+* **Coverage:** neutral multipliers (the Shell–Thron boundary itself,
+  including the parabolic base `η`) are not covered, and the cost grows
+  without bound towards them from either side. A failed construction is not
+  proof that no alternative mathematical construction exists.
 * **Resources and convergence:** the former 32768/131072-node budgets and
-  fixed iteration/order limits are removed. Base-2 grid sizing requires
-  524288 nodes at 200 digits and 16777216 nodes at 1500 digits; those are
-  required sizes, not new caps or completed-solve evidence. Krylov storage
+  fixed iteration/order limits are removed. For real bases above `η` the
+  theta-mapping solver (§ 6.8) replaces the Cauchy rectangle, whose base-2
+  grid would need 524288 nodes at 200 digits and 16777216 nodes at 1500
+  digits; those sizes now matter only for the fallback. Krylov storage
   and Cauchy continuation resampling can be prohibitive. The earlier bounded
   70-digit probe stopped at its `b=2.35` anchor, not at the requested `b=2`;
   it remains invalid as base-2 accuracy evidence.
-* **Height domain:** off-contour values and unrepresentable shift chains are refused.
+* **Height domain:** unrepresentable shift chains are refused; the Cauchy
+  fallback also refuses heights outside its contour. To the right, a height
+  costs one exponential per unit of its real part (the integer tower and the
+  theta mappings alike), so `Re h = 10^30` finishes only if the tower leaves
+  MPFR's range first; to the left the cost is bounded.
   There is no finite value at `h=−2` consistent with the nondegenerate
   recurrence through `F(−1)=0`. Base zero has only its integer convention;
   base one is the constant-function exception.
 * **Certification:** no interval/ball-arithmetic forward-error enclosure or
   global uniqueness certificate is produced. High working precision and
   residual gates are necessary safeguards, not substitutes for those proofs.
-* **Runtime:** continuation and cut walks can take hours; no completion-time
-  guarantee follows from the existence of an algorithmic path.
+* **Runtime:** near-neutral bases, and the Cauchy and cut-walk fallbacks,
+  can take hours; no completion-time guarantee follows from the existence of
+  an algorithmic path.
 
 ### 8.1 How hard would closing each gap be? (feasibility verdicts)
 
@@ -1229,12 +1519,14 @@ The following remaining directions require separate mathematical work:
 | Direction | Why it is worth investigating | What must be established |
 |---|---|---|
 | Validated numerics | Residuals and same-family agreement do not bound output error | Outward-rounded enclosures for roots, series/tails, quadrature, normalization and inverse operators; explicit domain/branch conditions |
-| Real-base high-precision methods | Large Cauchy grids and conditioning remain expensive after removing fixed node budgets | Resolution/conditioning estimates and independently checked references, not simply larger grids or looser gates |
+| Real-base high-precision methods | Done for real `b > η` by the theta-mapping solver (§ 6.8); 1000 digits is hours, not impossible | Faster polynomial evaluation and a Newton–Krylov outer iteration would cut the cost further |
+| Complex bases outside Shell–Thron | Done by the two-sided theta mapping (§ 6.10) for every scanned base whose primary fixed points both repel | A proof that the iteration converges for every such base; the cost near neutral multipliers |
+| The two-fixed-point function inside Shell–Thron | It exists there as well and differs from regular iteration (Paulsen 2019) | A convention for offering both families; the solver currently requires a repelling upper fixed point |
 | Parabolic/root-of-unity cases | Sectorial Fatou coordinates exist in classical local theory; at λ=−1 use the second iterate | Truncation bounds, sector matching, inversion and the intended global normalization |
-| Near-parabolic continuation | Existing methods work on some points but become costly or stall | Stable parameter continuation and error control across changing contours |
+| Near-parabolic real bases | The theta mapping converges down to `b − η ≈ 10⁻⁴`, at a cost like `1/(b − η)` | Accelerated (jump) iteration of the attracting inverse map, or perturbed Fatou coordinates, for the Abel function |
 | Other rotating near-neutral attractors | Paired steps now address strict attraction near `-1`; other near-resonances still use generic bounds | Further cancellation-aware iterates with local error/branch bounds, not relaxed precision goals |
-| Difficult complex bases | `−0.8+0.4i` remains unresolved; the former strictly attracting deep-band witness is now independently checked | Contours or merged-fixed-point constructions with controlled zeros, logarithmic branches and uniqueness hypotheses |
-| Cut-base limits | Upper-half-plane continuation supplies an intended branch convention | Stable convergence to the actual ε=0 endpoint, rather than quoting a small nonzero-ε value or a polynomial guess |
+| Difficult complex bases | `−0.8+0.4i` is solved (§ 5.1); the former strictly attracting deep-band witness is independently checked | An external reference value for a complex base outside the region, from an unrelated implementation |
+| Cut-base limits | Solved at the real base itself, with contour independence and continuity from the upper half-plane (§ 5.1) | The same external comparison; behaviour as `b → 0⁺` and `b → e^{−e}` |
 
 Do not conflate all `|λ|≈1` cases. A routing band is not the neutral boundary;
 root-of-unity multipliers and irrationally neutral multipliers pose different
@@ -1285,6 +1577,9 @@ src/
   schroder.rs        attracting inverse-Poincare germ; classical reversion, shifts
   schroder_jumps.rs  real Taylor jumps and real/complex dispatch
   schroder_complex_jumps.rs  guarded complex coefficient/error-disk jumps
+  kneser.rs          theta-mapping solver for real bases above e^(1/e) (§ 6.8)
+  kneser_complex.rs  two-sided theta mapping: complex, negative, cut bases (§ 6.10)
+  inverse.rs         super-logarithm and super-root (§ 6.9)
   kouznetsov.rs      Cauchy-integral solver: grids, FFT matvec, LM Newton,
                      EM correction, normalization, continuation,
                      cut-base ε-walker (§ 6.7)
@@ -1292,7 +1587,7 @@ src/
   cnum.rs            complex-number helpers, parsing/formatting, env flags
   integer_height.rs  finite-precision integer towers and exact special cases
   linear_approx.rs   deprecated error-only compatibility entry point
-tests/               phase1…phase14 plus Python plotting/Makefile regressions
+tests/               phase1…phase18 plus Python plotting/Makefile regressions
                      batteries (CLI, regions, Schröder, Kouznetsov,
                      regression witnesses incl. the t860 case)
 FAILURE_CASES.md     current failure contracts + labeled historical observations
@@ -1307,6 +1602,9 @@ $ cargo test --release --lib       # includes high-precision jump cases
 $ TET_MT=2 cargo test --release --test phase12_coverage -- --test-threads=1
 $ TET_MT=2 cargo test --release --test phase13_near_neutral -- --test-threads=1
 $ TET_MT=2 cargo test --release --test phase14_complex_jumps -- --test-threads=1
+$ cargo test --release --test phase16_kneser    # theta-mapping solver (about 40 s)
+$ cargo test --release --test phase17_inverse   # --slog / --sroot (about 70 s)
+$ cargo test --release --test phase18_complex_kneser   # two-sided solver (about 50 s)
 $ cargo test --release --test phase8_verification   # regression witnesses
 $ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_plotting.py'
 $ cargo test --release --doc
@@ -1331,6 +1629,14 @@ was deferred. Native FreeBSD has 148 focused Rust passes; 18 Python tests also
 pass. Exact per-test outcomes and original attempts are preserved in
 `coverage-final-v1/tests-extended-progress.json` in the coverage archive.
 These validation budgets are not application solver limits.
+
+Since November 12 the cases of that ledger that asserted refusals or timed
+out on the Cauchy solver (`t423` at `b = −2`, `t852` on the unit circle,
+`t860` at `−0.8+0.4i`) are positive tests of the two-sided solver and take
+seconds; `t960`, `t961`, `t963` and `t964` are no longer ignored. The
+November run of the default tier (library, phases 1–5, 7–12, 16–18, the
+grid and edge runners) passed; `t870` (8 minutes) passed when run explicitly,
+`t872` and the slow suites 13–15 were not run.
 
 ## 11. References
 

@@ -78,6 +78,17 @@ That code then returned unchecked Richardson output
 was already invalid; t880 now requires explicit refusal from both existing
 solver paths, rather than accepting that surrogate.
 
+**November 12:** real bases above `e^{1/e}` now use the theta-mapping solver
+(README § 6.8) before any Cauchy solve. `b=1.46`, where both older solvers
+stalled, takes about 3 seconds at 15 digits; three contours agree to 30 digits
+(`F(0.5)=1.26383460066838162179258037381`, t880). `b=1.4448` takes about
+8 minutes at 20 digits: `1.2572110255920272276` on two contours, and on the
+line through the regular values `1.2571233116014142057` (`b=1.4446`) and
+`1.2571496273469669777` (`b=1.44466`). The old Richardson output for `1.46`
+(`1.2638346006665197568`) was correct to 12 digits only, the old t880
+reference (`1.2638346032868236084`) to 9. Cost grows like
+`1/(b−η)`; `b=1.4447` was not finished and `b=η` is unsupported.
+
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
 | 1.444667861009766 | 0 | 0.5 | 0 | accelerated regular iteration | t710/t871 pass; independent reference checks through 100 digits in phase13 |
@@ -86,11 +97,11 @@ solver paths, rather than accepting that surrogate.
 | 0.0659880358454 | 0 | 0.5 | 0 / 0.25 | paired Taylor jumps | independent components through 100 digits in phase15 |
 | 0.0659880358454 | 1e-14 | 0.5 | 0 / 0.25 | paired Taylor jumps | independent components through 100 digits in phase15 |
 | 0.0659880358453125370767901876 | 1e-40 | 0.5 | 0 | unverified production value | independent reference exists; preliminary 50-digit CLI exceeded 1800 seconds with no output |
-| 1.4448 | 0 | 0.5 | 0 | unverified, not rerun | t870 retains the no-surrogate contract; its multi-hour run was cancelled |
-| 1.4447 | 0 | 0.5 | 0.5 | unverified, not rerun | t872 retains the no-surrogate contract; its multi-hour run was cancelled |
-| 1.5 | 0 | 0.5 | 0 | numerical success | existing direct method, 10-digit regression |
-| 1.46 | 0 | 0.5 | 0 | ERR | continuation and direct solve stall at 20 digits (t880); old success claim retracted |
-| 1.45 | 0 | 0.5 | 0 | historical only | old continuation claims not independent accuracy evidence |
+| 1.4448 | 0 | 0.5 | 0 | theta mapping | `1.2572110255920272276`, two contours, about 8 minutes (t870, ignored because slow) |
+| 1.4447 | 0 | 0.5 | 0.5 | not finished | t872 (ignored) now requires a value satisfying the functional equation; expected to take hours |
+| 1.5 | 0 | 0.5 | 0 | theta mapping | `1.28087727794027`, about 1 second; equals the mpmath prototype |
+| 1.46 | 0 | 0.5 | 0 | theta mapping | `1.26383460066838162179258037381`, three contours (t880) |
+| 1.45 | 0 | 0.5 | 0 | theta mapping | `1.2594864327497848579`, about 6 seconds |
 | 1.43 / 1.44 | 0 | 0.5 | 0 | historical only | old regular-iteration observations, not current certificates |
 
 ### A.1 Strictly attracting deep-band witness — now independently checked
@@ -127,6 +138,14 @@ stalled Kouznetsov samples. t890 checks the actual reference digits.
 | 0.0653281554868594 | 0.05 | any swept | 0 | historical Schröder sweep, |λ|=0.978 | 1015-point observation, not a current accuracy certificate |
 
 ### A.2 The t860 "canonical value" was a discretization artifact (pseudo-verification uncovered)
+
+**November 12 — solved.** The two-sided theta mapping (README § 6.10) gives
+`F(0.5) = 0.9259482458090558672818776052663824496889 +
+1.377349898696509477995821668326992920743i` for `b = −0.8 + 0.4i`: the same
+digits at 15, 20, 22, 25 and 40 requested digits and on four contours at 30
+digits, in 1.4 s at 15 digits. The lower fixed point is `−1.1704 − 0.0100i`,
+the one the Cauchy solver rejected as too close to the real axis. t860 now
+asserts this value and its mirror image. The anatomy below is history.
 
 Follow-up discovery (2026-08-24) while tuning the § A.1 gate. The regression
 test t860 asserted `F(0.5) = 0.70282898263600754292 + 0.82145795139882997129i`
@@ -178,7 +197,27 @@ research directions, not established repairs for a proven in-strip zero.
 
 ---
 
-## B. Negative real bases (b ∈ ℝ, b < 0) — **NOT generally verified**
+## B. Negative real bases (b ∈ ℝ, b < 0) — **two-sided theta mapping (November 12)**
+
+**November 12.** Negative bases are the edge `Im ln b = π` of the upper
+half-plane and are solved like any complex base (README § 6.10), about two
+seconds each at 15 digits. `b = −2`: three contours agree to 30 digits,
+`F(0.5) = 1.23499204711001806741684243512 + 1.72765186259320471027645429067i`;
+t423 (`h = 0.4 + 0.1i`, formerly a required refusal) now checks the
+functional equation. The Cauchy solver did not finish `b = −2` in 25 minutes
+and failed at `−0.5` after 8.
+
+| b | F_b(0.5), 15 digits |
+|---|---|
+| −0.4 | 0.524672046754290 + 1.45009175176364i |
+| −0.5 | 0.611237217314526 + 1.48633320332353i |
+| −0.8 | 0.806054241447764 + 1.56464362991783i |
+| −1 | 0.904526679067709 + 1.60295813897714i |
+| −2 | 1.23499204711002 + 1.72765186259320i |
+| −3.6 | 1.54416369343679 + 1.84097333234317i |
+| −1000 | 5.90597919030667 + 3.27931958174185i |
+
+Everything below is the history of the Cauchy solver on this class.
 
 October regression: at `b=-2, h=0.4+0.1i`, 10-digit direct attempts stall
 around `1e-9`, above the `1e-13` boundary target, and must return an error.
@@ -202,7 +241,17 @@ independently establish returned accuracy or successful convergence.
 
 ---
 
-## C. Pure-imaginary bases (b = i·y, y ≠ 0) — **PARTIAL numerical coverage**
+## C. Pure-imaginary bases (b = i·y, y ≠ 0) — **regular iteration inside Shell–Thron, theta mapping outside**
+
+**November 12.** Outside the Shell–Thron region (`y ≳ 1.72`) the two-sided
+theta mapping takes about two seconds at 15 digits: `F_{2i}(0.5) =
+1.43175893986135 + 0.908794685856499i`, `F_{3i}(0.5) = 1.65790261147990 +
+0.937237881153346i`, `F_{3.6i}(0.5) = 1.76346022431977 + 0.951658511027643i`,
+`F_{5i}(0.5) = 1.95950649348755 + 0.979857985910872i`; `−3i` is the mirror
+image of `3i`. Inside the region (`y = 1.4`: `1.08532783113677 +
+0.606234807996957i`) the dispatcher returns the regular iteration, which is
+a different function from the two-fixed-point one the Cauchy solver was
+computing in August (`1.243 + 0.888i` below).
 
 Base `i` now has independent 50/70-digit regular-iteration witnesses.
 The following broader August observations were not revalidated as a class:
@@ -226,7 +275,24 @@ The following broader August observations were not revalidated as a class:
 
 ---
 
-## D. Complex bases far from real axis — **historical observations, not class-wide coverage**
+## D. Complex bases far from real axis — **two-sided theta mapping (November 12)**
+
+**November 12.** A scan of 220 bases (real parts `−1000 … 10^30`, imaginary
+parts `0 … 10^5`) solved all 182 outside the Shell–Thron region, on average in
+1.8 s at 15 digits. The Cauchy solver agrees to all printed digits where it
+still converges (`2+0.1i`, `2+0.3i`, `3+0.5i`, `3+4i`, `10+5i` at 15 digits,
+`1.2+3.5i` at 10). The August values in the table below agree with neither
+solver and are superseded:
+
+| b | F_b(0.5), 15 digits |
+|---|---|
+| 1.2+3.5i | 1.80301447273349 + 0.758446089166562i |
+| 0.5+2i | 1.46177225929122 + 0.776175151281838i |
+| −3.6+0.4i | 1.56910293151866 + 1.78132354348639i |
+| −1.2+1.2i | 1.27322999811991 + 1.30541999894135i |
+| −1+i | 1.18206140425322 + 1.28363814455972i |
+| −1+2i | 1.45336611150906 + 1.16828211170583i |
+| 2+5i | 2.03474973368267 + 0.751640175323391i |
 
 `b = a + bi` with large `|Im(b)|` relative to `|Re(b)|`. The Newton-
 Kouznetsov path historically showed quadratic convergence in selected Im(b)≥0 cases once past the
@@ -274,6 +340,21 @@ descent phase grows with b before Newton kicks in).
 | 500 | 0 | 0.5 | 0 | 5.6842… | OK |
 | 1000 | 0 | 0.5 | 0 | 6.3913… | OK |
 
+**November 12:** the theta-mapping solver reproduces these to 20 digits in
+under a second each (`3.6480135102974247023`, `4.2131043841295…`,
+`4.8184545998105586664`, `5.6841886762291272595`, `6.3913243528216…`) and
+continues far beyond, on a contour shifted left for `ln b > 16` and, when the
+direct start fails, by continuation in the base:
+
+| b | F_b(0.5), 15 digits | time | contours agreeing |
+|---|---|---|---|
+| 1e6 | 16.3591261058616 | 0.5 s | 3 |
+| 1e30 | 645.547844724944 | 1.5 s | 3 |
+| 1e100 | 65637.4795183687 | 3 s | 3 |
+| 1e1000 | 278773383556.290 | 9 s | 2 |
+| 1e10000 | 1.34047882293562e23 | 34 s | 1 |
+| 1e100000 | — | not finished in 300 s | — |
+
 ---
 
 ## F. Real base b = 2 — **independent 50-digit witness; high-precision resource costs**
@@ -312,6 +393,17 @@ identically at 110 significant digits, with empirical relative agreement of
 118.35 digits (`limits-post-geometry-high-comparison.json`). These numerical
 cross-checks, unlike a quadrature test alone, directly check returned digits;
 they are still not global forward-error or canonicality certificates.
+
+**November 12:** base 2 is now solved by the theta-mapping iteration. `2^^0.5`
+equals the `fatou.gp` reference at all 100 digits (7 seconds, single thread);
+200 and 400 digits take 42 seconds and 7 minutes. The 60-digit fixture
+`F_2(0.375)` is reproduced exactly, real heights have imaginary part exactly
+zero, and the 20-digit values below are confirmed to about 16 digits (their
+last digits were Cauchy-solver noise): `0.54476412145955673398`,
+`2.7487616545898224907`, `6.7213994941488630369`,
+`1.3232385095217583751+0.86933975675873261759i`,
+`1.6815069453310134039+1.0501317101851206469i`,
+`1.2266228648289182647+0.61198669331965251251i`.
 
 Historical observations: `b=2` sits in the `|λ|≈1.23` regime. Same old seed fix as
 Class E: smooth target_mid cap + LM max_iters=80. Previously rejected
@@ -408,7 +500,37 @@ anchor-validated with a working-precision tolerance before FE validation.
 
 ---
 
-## J. Real bases on the cut segment  0 < b < e^{-e}   — **PARTIAL: ε-continuation walker**
+## J. Real bases on the cut segment  0 < b < e^{-e}   — **SOLVED at the real base (November 12); ε-walker is a fallback**
+
+**November 12.** The limit from the upper half base-plane is computed at the
+real base itself by the two-sided theta mapping with the fixed points
+`−W₀(−ln b)/ln b` (real, `λ < −1`) and `−W₁(−ln b)/ln b` — the pair the
+walker tracks. No walk is needed: `tet 15 0.04 0 0.5 0` takes 3 seconds.
+
+* `b = 0.04`: five contours agree to 25 digits at nine heights (including
+  `−1.5`, `−2.5+0.1i`, `2.5`); three agree to 30 digits. The default contour
+  cannot start at this base and reaches it by continuation through complex
+  bases above the Shell–Thron region; it ends at the same digits.
+  `F(0.5) = 0.0663831355231474524653734313751 +
+  0.447944861924265149963222115626i`.
+* `b = 0.01`: three contours to 30 digits, `F(0.5) =
+  −0.125023808503236713358729653966 + 0.413987966241729684229874554858i`.
+* Continuity from above: `b = 0.04 + 10^{−10}i` agrees with `b = 0.04` to
+  the expected ten digits (t1805).
+* Other bases at 15 digits: `0.06` (`λ = −1.007`, 21 s) `0.133551357296516 +
+  0.444588502619596i`; `0.05` `0.102649474416971 + 0.447040991018417i`;
+  `0.001` `−0.335658584585117 + 0.268881908378586i`.
+* Very small bases are reached by continuation along the cut from `e^−3.2`:
+  `10^−4` (9 s) `−0.438500971524013 + 0.0786239019766715i`, `10^−6` (13 s)
+  `−0.405545233641488 − 0.295259582379654i`, `10^−10` (19 s)
+  `0.170813938896644 − 0.648660777250294i`; the same digits come out of the
+  much longer path through complex bases on another contour. `10^−30` takes
+  49 s, `10^−100` two minutes, `10^−1000` two and a half.
+* The Taylor series of `F` at `−1/2` converges only to radius about 1.2 at
+  `b = 0.04` (a further zero of `F` puts a singularity nearer than `−2`), so
+  the discretization is enlarged automatically and smaller contours are used.
+
+The walker description below is kept for the fallback path and as history.
 
 **Cases:** `tet <digits> 0.04 0 h_re h_im`, `tet <digits> 0.06 0 0.5 0`, …
 (any real base strictly between 0 and η_low = e^{-e} ≈ 0.0659880358…).
@@ -532,5 +654,7 @@ Investigate validated error/conditioning bounds, high-precision real-base
 methods, sectorial parabolic constructions, and controlled complex-base
 contours/limits. Preserve independent references and explicit branch/domain
 contracts. README §8.1 separates promising directions from proven coverage.
-The October 5 strict-attractor inverse germ is implemented; the neutral,
-complex-contour and global certification directions above remain research.
+The October 5 strict-attractor inverse germ is implemented. Since November 12
+the theta mappings cover real bases above `e^{1/e}`, complex and negative
+bases outside the Shell–Thron region and the cut bases; neutral multipliers
+and global certification remain research.

@@ -22,8 +22,7 @@
 //!     `b ∈ (0,1)` where the multiplier `λ < 0` makes `λ^h` genuinely complex.
 //!   * **Schwarz reflection** — `F_b(h̄) = conj(F_b(h))` for real `b > 1`.
 //!
-//! Slow Kouznetsov-heavy cases (base e, large bases, precision scaling, unit
-//! circle) are `#[ignore]`d; run them with
+//! Only the direct Cauchy-solver case t962 is `#[ignore]`d; run it with
 //! `cargo test --release --test phase9_comprehensive -- --ignored`.
 
 use rug::{Complex, Float};
@@ -470,15 +469,15 @@ fn t950_kouznetsov_b2_reality_reference_schwarz() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// 7. Slow Kouznetsov cases (#[ignore]) — external reference, precision scaling,
-//    complex heights, large bases, unit circle.
+// 7. Formerly slow cases — external reference, precision scaling, large bases,
+//    unit circle: a second each since the theta-mapping solvers. Only the
+//    direct Cauchy-solver case t962 is still #[ignore]d.
 //    Run: cargo test --release --test phase9_comprehensive -- --ignored
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Independent fatou.gp numerical reference, gp-tetration values.json
 /// sexp|e|0.5|500; not an interval certificate.
 #[test]
-#[ignore]
 fn t960_reference_e_half_external() {
     let digits = 20u64;
     let prec = cnum::digits_to_bits(digits);
@@ -501,7 +500,6 @@ fn t960_reference_e_half_external() {
 /// Kouznetsov precision scaling: b=2 at 12 vs 20 digits must agree to ≥11
 /// digits. This checks numerical consistency, not a grid-independent limit.
 #[test]
-#[ignore]
 fn t961_kouznetsov_precision_scaling_b2() {
     let lo = 12u64;
     let hi = 20u64;
@@ -558,7 +556,6 @@ fn t962_kouznetsov_b2_complex_heights() {
 /// Large real base regression (cap-clamp basin selection): reality + plausible
 /// magnitude at b=100.
 #[test]
-#[ignore]
 fn t963_large_base_b100_reality() {
     let digits = 12u64;
     let prec = cnum::digits_to_bits(digits);
@@ -579,7 +576,6 @@ fn t963_large_base_b100_reality() {
 /// Additional unit-circle directions missed by the rectangular grid.
 /// This is an availability check, not an independent accuracy certificate.
 #[test]
-#[ignore]
 fn t964_unit_circle_bases() {
     let digits = 12u64;
     let prec = cnum::digits_to_bits(digits);

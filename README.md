@@ -128,6 +128,7 @@ zero imaginary part.
    3. [The base-plane geography: Shell–Thron](#13-the-base-plane-geography-shellthron)
 2. [Building from source](#2-building-from-source)
 3. [Command-line usage](#3-command-line-usage)
+   1. [The inverse modes: super-logarithm and super-root](#31-the-inverse-modes-super-logarithm-and-super-root)
 4. [Library usage](#4-library-usage)
 5. [Coverage map](#5-coverage-map)
    1. [✅ Verified](#51--verified)
@@ -359,20 +360,27 @@ $ tet 20 0 1 0.5 0      # base i
 
 ```
 tet [--quiet|--silent|-q] <precision_digits> <base_re> <base_im> <height_re> <height_im>
-tet [-q] --slog  <precision_digits> <base_re> <base_im> <value_re> <value_im>
-tet [-q] --sroot <precision_digits> <value_re> <value_im> <height_re> <height_im>
+tet [-q] --slog|--ate   <precision_digits> <base_re> <base_im> <value_re> <value_im>
+tet [-q] --sroot|--ssrt <precision_digits> <value_re> <value_im> <height_re> <height_im>
 ```
 
 * `precision_digits` — requested decimal precision (positive integer).
   Internally mapped to MPC binary precision with guard bits.
-* the four remaining arguments are decimal strings for
-  `b = base_re + i·base_im` and `h = height_re + i·height_im`.
-* `--slog` (alias `--ate`) prints the height `h` with `F_b(h) = value`;
-  `--sroot` (alias `--ssrt`) prints the base `b` with `F_b(h) = value`.
-  Without a flag the behaviour and output are unchanged. Conventions,
-  domains and costs are in § 6.9.
+* the four remaining arguments are decimal strings for two complex numbers,
+  each as its real part followed by its imaginary part: without a flag the
+  base `b = base_re + i·base_im` and the height `h = height_re + i·height_im`.
+* `--slog` (alias `--ate`) takes the base and a value and prints the height
+  `h` with `F_b(h) = value`; `--sroot` (alias `--ssrt`) takes a value and
+  the height and prints the base `b` with `F_b(h) = value`. § 3.1 explains
+  the arguments and how to read the results; the methods are in § 6.9.
+  Without a flag the behaviour and output are unchanged.
 
-**Output:** two lines on stdout — `Re F_b(h)`, then `Im F_b(h)`.
+**Output:** two lines on stdout — the real part, then the imaginary part, of
+`F_b(h)` (of the height with `--slog`, of the base with `--sroot`). Each
+number carries the requested count of significant digits. Magnitudes below 1,
+and those too large for that many digits, are written with an exponent:
+`5.0000000000000000000e-1` is `0.5`. An exact zero is printed as `0`.
+
 **Exit codes:** `0` success; `1` honest failure (diagnostic on stderr);
 `2` usage error.
 
@@ -522,6 +530,112 @@ $ tet -q --sroot 20 10 0 2.5 0          # the base with b^^2.5 = 10 (about 15 s)
 0
 ```
 
+### 3.1 The inverse modes: super-logarithm and super-root
+
+All three modes are about one equation, `b^^h = z` (that is, `F_b(h) = z`),
+between a base `b`, a height `h` and a value `z`. Each mode takes two of the
+three and prints the third. The first argument is always the number of
+digits. Then come two complex numbers, each as its real part followed by its
+imaginary part, and the answer is printed the same way: real part on the
+first line, imaginary part on the second.
+
+| mode | command line | you give | it prints | the same thing for powers |
+|---|---|---|---|---|
+| tetration (no flag) | `tet D b_re b_im h_re h_im` | base `b`, height `h` | the value `z = b^^h` | `z = b^h` |
+| super-logarithm: `--slog` or `--ate` | `tet --slog D b_re b_im z_re z_im` | base `b`, value `z` | the height `h` with `b^^h = z` | `h = log_b z` |
+| super-root: `--sroot` or `--ssrt` | `tet --sroot D z_re z_im h_re h_im` | value `z`, height `h` | the base `b` with `b^^h = z` | `b = z^(1/h)` |
+
+`--ate` ("arc-tetration") is a second name for `--slog`, and `--ssrt` for
+`--sroot`; the flags take two dashes, may stand anywhere on the command line
+and combine with `-q`. Note the order for `--sroot`: the **value comes
+first**, the height second. Asking for both inverses at once, or giving a
+wrong number of arguments, is a usage error (exit code 2). An equation with
+no solution that the program can find and verify is an error with exit
+code 1 and a message on stderr. `tet --help` prints the same summary of the
+three modes.
+
+The same equation, three ways:
+
+```console
+$ tet -q 30 2 0 0.5 0                  # base 2, height 0.5: the value
+1.45878181603642170068397166104
+0
+
+$ tet -q --slog 20 2 0 1.45878181603642170068397166104 0     # base 2, that value: the height
+5.0000000000000000000e-1
+0
+
+$ tet -q --sroot 20 1.45878181603642170068397166104 0 0.5 0  # that value, height 0.5: the base (14 s)
+2.0000000000000000000
+0
+```
+
+**Reading `--slog` (`--ate`) results.**
+
+* `tet --slog 20 2 0 16 0` gives `3`: the height at which base 2 reaches
+  16, because `2^^3 = 2^(2^2) = 16`. The definition fixes `slog_b(1) = 0`,
+  `slog_b(b) = 1` and `slog_b(0) = −1` for every base.
+* Any of the four numbers may be non-zero.
+  `tet --slog 15 2 0 1.3232385095217583751 0.86933975675873261759` gives
+  the height `0.5 + i` (printed as `5.00000000000000e-1` and
+  `1.00000000000000`). Complex, negative and cut bases work too:
+  `tet --slog 15 -2 0 5 0` gives `0.441972558639406 − 0.358412886220720i`,
+  and indeed `(−2)^^(0.44197… − 0.35841…i) = 5`.
+* A real value need not have a real height. For a real base above `e^{1/e}`
+  every real value has one, between `−2` and `∞`
+  (`slog_2(−3) = −1.8984455450755269556`; ever more negative values approach
+  the height `−2`). For `1 < b < e^{1/e}` the tetration of a real height
+  stays below the lower fixed point of `b^x` (`2` for `b = √2`): a real
+  value below it has a real height
+  (`slog_√2(1.5) = 1.3278668758402484092`), a value between the two fixed
+  points `2` and `4` has a complex one
+  (`slog_√2(3) = −3.3834692659172140179 − 8.5715740896774235518i`), and a
+  value beyond `4`, which that tetration never takes, has none: error.
+* Tetration can take the same value at several complex heights. `--slog`
+  prints one of them — the principal one, on the branch with
+  `slog_b(1) = 0` (§ 6.9) — and whatever it prints has been confirmed by
+  computing `b^^h` again.
+* The bases `0` and `1` have no super-logarithm: error.
+
+**Reading `--sroot` (`--ssrt`) results.**
+
+* `tet --sroot 20 16 0 3 0` gives `2`: the base whose tower of height 3 is
+  16, `b^(b^b) = 16`. With the height `2` it is the super square root, the
+  solution of `b^b = z`: `tet --sroot 30 2 0 2 0` gives
+  `1.55961046946236934997038876877`. With the height `1` it returns the
+  value itself.
+* The height need not be an integer: `tet --sroot 20 10 0 2.5 0` gives
+  `2.1179975403097240013`, the base whose tetration to the height `2.5` is
+  `10` (13 s). Integer heights `0`, `−1`, … are refused, because `b^^0 = 1`
+  and `b^^(−1) = 0` for every base and so determine none.
+* For a real value above `1` and a real height above `0` the answer is the
+  real base above `1`.
+* For other inputs (a value below `1`, a negative or complex value, a
+  complex height) the answer is in general complex, and the equation can
+  have several solutions; the one printed is the one reached by following
+  the real solution as the value and the height move to those requested
+  (§ 6.9). `tet --sroot 15 -1 0 2 0` gives
+  `1.69038675716359 + 1.86990796402678i` (a solution of `b^b = −1`),
+  `tet --sroot 15 1 1 2 0` gives `1.39401786375297 + 0.577731814002267i`
+  (`b^b = 1 + i`), and `tet --sroot 15 0.75 0 2 0` gives
+  `0.636262939294531`, the solution of `b^b = 0.75` above `1/e` (a second
+  real one lies below).
+* With a non-integer height and a complex answer, remember that this
+  program's tetration is one function for bases inside the Shell–Thron
+  region and another outside it (§ 1.2). The base printed satisfies
+  `b^^h = z` for the function used at that base: feeding it back to `tet`
+  returns the value. `tet --sroot 15 1.3 0.3 0.5 0` gives
+  `1.34643520763314 + 0.718919636140968i` (28 s), and
+  `tet 15 1.34643520763314 0.718919636140968 0.5 0` gives `1.3 + 0.3i` back.
+* Cost: integer heights are immediate. A non-integer height needs a full
+  tetration solve for every trial base: seconds to tens of seconds for real
+  inputs, tens of seconds to minutes for complex ones.
+
+In both modes the digits printed are the digits requested, provided the
+inputs carry them: a value typed with 20 digits cannot fix 30 digits of a
+height. When the answer is ill-conditioned the program works with more
+digits internally and re-reads the inputs at that precision (§ 6.9).
+
 ---
 
 ## 4. Library usage
@@ -535,6 +649,10 @@ fn main() -> Result<(), String> {
     // string-in / string-out, precision in decimal digits
     let (re, im) = tetration::tetrate_str("30", "2", "0", "0.5", "0")?;
     println!("2^^0.5 = {re} + {im} i");
+    // the inverses take their arguments in the order of the CLI modes (§ 3.1)
+    let (height, _) = tetration::slog_str("30", "2", "0", "16", "0")?; // base, value -> 3
+    let (base, _) = tetration::sroot_str("30", "16", "0", "3", "0")?; // value, height -> 2
+    println!("slog_2(16) = {height}, the base with b^^3 = 16 is {base}");
     Ok(())
 }
 ```
@@ -1353,11 +1471,25 @@ are the subject of § 6.10.
   (a tower beyond MPFR's range counts as "too large"), Illinois regula falsi
   at 24 digits and secant steps at full precision. `h = 1` returns `z`;
   integer `h ≥ 2` are ordinary towers (`sroot(16, 3) = 2`).
-* Other inputs: the real solution for `(|z|, Re h)` is continued first to
-  `z`, then to `h`. This works where the forward function is fast and
-  analytic in the base (integer heights, the regular region). A path that
-  enters complex bases outside the Shell–Thron region is impractically slow
-  today, and a path that would cross the region's boundary fails honestly.
+* Other inputs: the real solution for `(|z|, Re h)` is followed first to
+  `z`, then to `h`, by Newton steps with central differences in the base.
+  At integer heights the tower is analytic in the base and this is a genuine
+  continuation. A straight path that meets a singular value (for `h = 2` and
+  real `z < e^{−1/e}`, the fold of `b^b` at `b = 1/e`) is retried along a
+  path above the real axis.
+* At non-integer heights every trial base costs a tetration solve, seconds
+  to minutes in total, and the function followed is the one the dispatcher
+  uses at each base: regular iteration inside the Shell–Thron region, the
+  two-fixed-point function outside it (§ 1.2). These are different
+  functions, and the exterior of the region is only a thin cusp along the
+  real axis just above `e^{1/e}` (`1.73 + 0.15i` and `2 + 0.6i` are already
+  inside), so a search that starts at a real base usually ends in the
+  regular family: `tet --sroot 15 1.3 0.3 0.5 0` gives
+  `1.34643520763314 + 0.718919636140968i`, a base with `|λ| = 0.67`. The
+  printed base always satisfies `b^^h = z` for the tetration this program
+  computes at that base (it is checked), but it is then not an analytic
+  continuation of the real solution; a search that finds no such base fails
+  with an error.
 * Integer heights below 1 do not determine a base: error.
 
 Every inverse is verified before it is printed: the forward image must

@@ -1,3 +1,114 @@
+# Status Update — 2026-11-13 (branch fix in regular iteration; wider domain; rules for every change)
+
+**A wrong logarithm branch in regular iteration (fixed).** The height
+reduction `F(h) = log_b^k F(h+k)` took the principal logarithm at every step.
+That is the right branch only while `F(h+s)` (`s` real) has not gone around 0.
+For a turning multiplier next to the Shell–Thron boundary it has: at
+`b = 1.764630858490303+0.1690076064324368i` (`|λ| = 0.992`) the printed
+`F(h)` jumped along the real axis (`1.4946+0.0535i` at `h=0.54`,
+`1.5688−1.5661i` on `0.56…0.60`, `1.5477+0.0863i` at `0.62`; likewise near
+`−0.43` and `−1.43`), and at `|λ| = 0.995` it was wrong on `0.46…0.76`. The
+functional equation and `F(0)=1` hold on every branch, so no gate saw it.
+The branches are now fixed by continuity along real shifts of the height
+(`Trail` in `src/schroder.rs`, README § 6.3), inside the half-plane
+`|λ^(h+2)| < 1` where the tetration is single-valued; outside it the
+principal logarithms remain the convention, so every value there is
+unchanged. Unchanged too: 200 values of 20 ordinary bases, the 100- and
+1000-digit references, and all values of real bases between 1 and `e^(1/e)`
+at real heights (provably principal; no samples are taken). Regular iteration
+now also works where the wrong branch broke its anchor `F(0)=1`:
+`|λ| = 0.998` gives `1.47919432026926+0.0169457889363597i`.
+
+**The integer tower checks the branches of real heights.** One sample of
+every traced chain sits at an integer height, where the tetration is
+`b^^m`. It must reproduce that value at every level, and once more one
+level below the result, which ties the branch of the result itself to an
+exact value (`Anchor` in `src/schroder.rs`). A refuted chain is repeated
+with more samples; a chain refuted twice at the same place is an error. For
+real heights above `−1` the distances between samples are judged only after
+such a refutation, which makes those chains two to seven times cheaper.
+Complex heights and heights between `−2` and `−1` still rest on the judged
+distances.
+
+**A long inverse series for regular iteration** (README § 6.3). The series
+`ψ` of `F(h) = L + ψ(s₁ λ^h)` was summed on a disk of radius
+`(1−|λ|)/(16 |ln b|)`. It converges up to the coordinate of the height `−2`
+and is one-to-one there, so de Branges' bound `|c_n| ≤ n R^(1−n)` gives its
+tail anywhere inside. For nearly neutral multipliers it is now summed on
+most of that disk, and a height needs tens or hundreds of logarithms where
+it needed thousands: `|λ| = 0.998` (argument 1) 0.3 s instead of 3.5
+minutes, `0.999` 2 s, `0.9999` 45 s (both new:
+`1.47997472280679+0.0134730013469168i` and
+`1.46725728715182+0.00732647326377828i`, the same at 25 digits, and
+`--slog` returns the height), `0.99999` 9 minutes
+(`1.46489833107812+0.00424170610714995i`). The cut side gains as well:
+`0.0665` 0.2 s (0.4 s on November 12), `0.066` 5.5 s (15 s), `0.06599`
+16 s (18 s). Nine 50-digit values equal the short series in every digit.
+Taylor jumps stay
+for real bases below `e^(1/e)` and for bases closer to `e^(−e)` than
+`0.065989`; there the samples of the branch tracing follow the jumps, which
+costs up to twice the time of November 12 (`0.0659881`: 62 s, was 33 s).
+The conditioning estimate of a chain is now the largest product of the
+later factors after any step instead of the sum of all expanding steps,
+which asked for 717 bits at `|λ| = 0.9999`.
+
+**No answers from the other family.** For a base with an attracting fixed
+point a failed regular iteration used to fall through to the Cauchy solver,
+which converges to the two-fixed-point function there (`1.3862+0.0572i` at
+`|λ| = 0.998`, where regular iteration gives `1.4792+0.0169i`). It is now an
+error that says so.
+
+**Rules for every change** are written down in README § 7.1 and at the top
+of `src/lib.rs`: accuracy before speed; a result is a converged value, never
+an approximation, otherwise an error; every intermediate value carries at
+least the requested precision; no machine numbers in the arithmetic. Every
+`f64` and fixed-size MPFR number in `src/` was reviewed: the cost model of
+the long Poincaré series, radii, tolerances, step tests and the branch scout
+of the two-sided solver now run at the working precision; what remains
+(starting values, sizes, exact constants, timing) is listed with its reason
+in a table there.
+
+**Real bases next to `e^(1/e)`** (README § 6.8). The Poincaré series is summed
+on a disk that reaches most of the way to the conjugate fixed point, which
+shortens the logarithmic orbits from `1/ln|λ|` to a fraction of that:
+`1.4448` 13 s at 15 digits (210 s) and 17 s at 20 (8 minutes), `1.4447`
+35 s, `1.44467` 2.6 minutes (both never finished before), `1.45` 1.8 s
+(6 s). 47 values equal the digits of the previous path, and the slope of
+`F_b(0.5)` in `b` is the same on both sides of `e^(1/e)`.
+
+**Heights.** Far to the left regular iteration stops iterating once the
+chain repeats exactly (whole periods are skipped) or, for a real base, once
+the real part is stationary (the vanishing imaginary part follows in closed
+form): `1.3^^(−1000000.5)` in 0.01 s instead of 13 s, same digits. Integer
+towers skip exact periods and continue from `b^0 = 1` after a level below
+MPFR's range: `0.04^^10^30`, `i^^10^50`, `(−10^30)^^3 = 1` are immediate;
+their working precision no longer grows without end. The theta solvers
+treat such levels the same way: `(−100)^^100.5 = 1 + 3.14159265358979e-200 i`.
+
+**Complex bases next to the boundary from outside.** The two-sided solver
+took the slow spiral of its logarithmic orbits for a failure and then tried
+to reach the base through the region. It now compares closest approaches:
+`|λ| = 1.001` at argument 1 takes 30 s (was a timeout), `0.5+2i` 5 s (12 s).
+
+**Inverses.** `--slog`: real targets of cut bases (the path passes below the
+real fixed point, as the limit of complex bases does), targets like `10^100`
+(geometric traversal of the path), targets behind an image of the cut
+(detours), and targets whose height rounds to a singular height of a regular
+base (`slog_0.5(−100)`), which are returned as the limit of their neighbours.
+`--sroot`: real roots for heights in `(−1, 0)` and `(−2, −1)`; complex
+searches follow their path with 14-digit forward values and polish the end
+at full precision (2 to 4 times faster, same digits); every solve above
+`e^(1/e)` starts from the previous base.
+
+**Still open.** Cut bases from `0.065` to `e^(−e)` and repelling multipliers
+within `10^(−4)` of the unit circle (minutes to hours; the long series is
+not yet built into the two-sided solver); attracting multipliers closer
+than `10^(−5)` (ten to thirty times the cost per factor of ten);
+`b − e^(1/e) < 10^(−7)`; the base `e^(1/e)` itself; super-roots whose path
+meets the Shell–Thron boundary; a branch check for complex heights; the
+branch convention of regular iteration outside `|λ^(h+2)| < 1` and on its
+cut (principal logarithms, as before).
+
 # Status Update — 2026-11-12 (theta-mapping solvers: real, complex, negative and cut bases; inverses)
 
 **Real bases above `e^(1/e)`** are solved by a Kneser theta-mapping iteration

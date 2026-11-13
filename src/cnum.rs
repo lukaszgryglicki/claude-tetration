@@ -289,6 +289,83 @@ pub fn eta_upper(prec: u64) -> Float {
     Float::with_val_64(prec, 1).exp().recip().exp()
 }
 
+/// `exp(z)`, or `None` when its modulus lies below MPFR's exponent range: the
+/// next level of a tower is then `b^0 = 1` at every precision.
+pub(crate) fn exp_or_vanishing(z: &Complex, prec: u64) -> Result<Option<Complex>, String> {
+    if is_finite(z) && *z.real() < exponent_range().0 {
+        return Ok(None);
+    }
+    checked_exp(z, prec).map(Some)
+}
+
+/// Detection of an exactly repeating iteration (Brent): the iterate is
+/// compared with one kept from an earlier power-of-two count.
+pub(crate) struct Recurrence<T> {
+    run: Integer,
+    checkpoint: Option<(Complex, Integer, T)>,
+}
+
+impl<T: Clone> Recurrence<T> {
+    pub(crate) fn new() -> Self {
+        Recurrence {
+            run: Integer::new(),
+            checkpoint: None,
+        }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.run = Integer::new();
+        self.checkpoint = None;
+    }
+
+    /// Count one step that led to `value`. When `value` equals the kept
+    /// iterate, returns the period and the data kept with it.
+    pub(crate) fn step(
+        &mut self,
+        value: &Complex,
+        data: impl FnOnce() -> T,
+    ) -> Option<(Integer, T)> {
+        self.run += 1;
+        if let Some((earlier, count, kept)) = &self.checkpoint {
+            if value == earlier {
+                return Some((Integer::from(&self.run - count), kept.clone()));
+            }
+        }
+        if self.run.is_power_of_two() {
+            self.checkpoint = Some((value.clone(), self.run.clone(), data()));
+        }
+        None
+    }
+}
+
+/// The positive root of `orbit x^3 - series x - setup`, the minimum of the
+/// cost `orbit x + series / x + setup / (2 x^2)` of a method with a free
+/// parameter `x`. Newton's iteration descends to it from an upper bound.
+pub(crate) fn cost_balance(orbit: &Float, series: &Float, setup: &Float) -> Float {
+    let prec = orbit.prec_64();
+    let mut x = Float::with_val_64(prec, series / orbit).sqrt()
+        + Float::with_val_64(prec, setup / orbit).cbrt();
+    loop {
+        let cube_rate = Float::with_val_64(prec, orbit * x.clone().square());
+        let value = Float::with_val_64(prec, &cube_rate * &x)
+            - Float::with_val_64(prec, series * &x)
+            - setup;
+        let slope = cube_rate * 3u32 - series;
+        let next = Float::with_val_64(prec, &x - value / slope);
+        if !(next.is_finite() && next > 0) {
+            return x;
+        }
+        let settled =
+            Float::with_val_64(prec, &next - &x).abs() <= Float::with_val_64(prec, &next >> 40u32);
+        x = next;
+        if settled {
+            return x;
+        }
+    }
+}
+
+pub(crate) const VANISHING: &str = "exponential underflow: a finite exponential cannot be zero";
+
 pub fn checked_exp(z: &Complex, prec: u64) -> Result<Complex, String> {
     let (min, max) = exponent_range();
     check_precision(prec)?;
@@ -300,7 +377,7 @@ pub fn checked_exp(z: &Complex, prec: u64) -> Result<Complex, String> {
         return Err("exponential overflow: result exceeds MPFR's exponent range".into());
     }
     if *z.real() < min {
-        return Err("exponential underflow: a finite exponential cannot be zero".into());
+        return Err(VANISHING.into());
     }
 
     // MPC's exp can loop on component underflow and allocate precision proportional

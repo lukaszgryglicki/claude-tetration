@@ -332,6 +332,132 @@ fn t1708_real_targets_far_from_the_origin() {
 }
 
 #[test]
+fn t1709_slog_of_cut_bases_long_paths_and_detours() {
+    let wide_digits = 30u64;
+    let wide = cnum::digits_to_bits(wide_digits);
+    for (base, target, expected, round_trip) in [
+        // A real fixed point of the cut base lies on the segment 1 -> z; the
+        // limit of bases in the upper half-plane passes below it.
+        (
+            ("0.04", "0"),
+            "0.1",
+            ("-1.01343950923799", "1.34822863318788e-1"),
+            12,
+        ),
+        (
+            ("0.04", "0"),
+            "-0.5",
+            ("-9.10477245538674e-1", "-3.83301303043979e-1"),
+            12,
+        ),
+        // The straight path meets an image of the cut of the tetration.
+        (
+            ("0", "3"),
+            "-3",
+            ("9.06956866310467e-1", "-1.69518476458942"),
+            12,
+        ),
+        // A long path is traversed geometrically.
+        (
+            ("3", "4"),
+            "1e100",
+            ("2.47017034675853", "-5.13254077845973e-1"),
+            9,
+        ),
+    ] {
+        let found = tetration::slog_str("15", base.0, base.1, target, "0").unwrap();
+        assert_eq!(
+            (found.0.as_str(), found.1.as_str()),
+            expected,
+            "b={base:?} z={target}"
+        );
+        let image = dispatch::tetrate(
+            &parse(base.0, base.1, wide),
+            &parse(&found.0, &found.1, wide),
+            wide,
+            wide_digits,
+        )
+        .unwrap();
+        assert!(
+            agreement(&image, &parse(target, "0", wide), wide) >= round_trip,
+            "b={base:?} z={target}: {image}"
+        );
+    }
+}
+
+#[test]
+fn t1710_slog_next_to_the_singular_heights_of_regular_bases() {
+    // The orbit of the target passes 0 within the working precision: the
+    // height rounds to a singular height, with the convention of its
+    // neighbours (-30 is still verified by forward evaluation).
+    let limit = (
+        "7.50119449840629e-1".to_string(),
+        "-9.68029912394000e-1".to_string(),
+    );
+    for target in ["-30", "-60", "-100"] {
+        assert_eq!(
+            tetration::slog_str("15", "0.5", "0", target, "0").unwrap(),
+            limit,
+            "z={target}"
+        );
+    }
+    assert_eq!(
+        tetration::slog_str("15", "1.3", "0", "-1e30", "0")
+            .unwrap()
+            .0,
+        "-2.00000000000000"
+    );
+    // Off the principal branch there is no such height.
+    let error = tetration::slog_str("15", "0.5", "0.5", "-100", "0").unwrap_err();
+    assert!(error.contains("principal branch"), "{error}");
+}
+
+#[test]
+fn t1711_sroot_at_negative_heights_and_complex_targets() {
+    // As b grows, F_b(h) falls from 1 to 0 on -1 < h < 0 and rises from
+    // -inf to 0 on -2 < h < -1.
+    for (value, height, expected) in [
+        ("0.5", "-0.5", "2.68778856702334"),
+        ("-1", "-1.5", "1.75033148344121"),
+    ] {
+        assert_eq!(
+            tetration::sroot_str("15", value, "0", height, "0").unwrap(),
+            (expected.to_string(), "0".to_string()),
+            "z={value} h={height}"
+        );
+    }
+    let digits = 20u64;
+    let high = cnum::digits_to_bits(HIGH_DIGITS);
+    for (base, height) in [("2", "-0.5"), ("3", "-1.5")] {
+        let value = forward((base, "0"), (height, "0"));
+        let found = inverse::sroot(&value, &parse(height, "0", high), high, digits).unwrap();
+        assert!(
+            agreement(&found, &parse(base, "0", high), high) >= digits,
+            "b={base} h={height}: {found}"
+        );
+    }
+    // A complex target: the path is followed at reduced accuracy and its end
+    // polished at full precision.
+    let found = tetration::sroot_str("15", "1", "1", "0.5", "0").unwrap();
+    assert_eq!(
+        (found.0.as_str(), found.1.as_str()),
+        ("2.98515676693044e-1", "1.76387940838634")
+    );
+    let wide = cnum::digits_to_bits(30);
+    let image = dispatch::tetrate(
+        &parse(&found.0, &found.1, wide),
+        &parse("0.5", "0", wide),
+        wide,
+        30,
+    )
+    .unwrap();
+    assert!(
+        agreement(&image, &parse("1", "1", wide), wide) >= 13,
+        "{image}"
+    );
+}
+
+#[test]
 fn t1705_cli_flags() {
     let run = |arguments: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_tet"))

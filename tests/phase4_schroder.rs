@@ -192,3 +192,146 @@ fn t360_precision_scaling() {
         da
     );
 }
+
+#[test]
+fn t380_far_left_heights_end_in_closed_form() {
+    // One principal logarithm per unit of height until the orbit is
+    // stationary: the vanishing imaginary part of a real base then follows in
+    // closed form, and exact cycles are skipped by whole periods. The
+    // expected digits are those of the plain loop.
+    assert_eq!(
+        tetration::tetrate_str("15", "1.3", "0", "-1000000.5", "0").unwrap(),
+        (
+            "7.85706535116432".to_string(),
+            "2.31452068032643e-314164".to_string()
+        )
+    );
+    let cycle = ("-1.14012370876".to_string(), "7.06579007931e-1".to_string());
+    for height in ["-1000.5", "-1000000000000.5"] {
+        assert_eq!(
+            tetration::tetrate_str("12", "0", "1", height, "0").unwrap(),
+            cycle,
+            "h={height}"
+        );
+    }
+    assert_eq!(
+        tetration::tetrate_str("15", "0.3", "0.3", "-1000000.5", "0").unwrap(),
+        (
+            "-1.21065168093612".to_string(),
+            "3.22367768947075e-1".to_string()
+        )
+    );
+    // An imaginary part below MPFR's range is an error, not a zero.
+    let error = tetration::tetrate_str("15", "1.3", "0", "-1000000000000000000000000000000.5", "0")
+        .unwrap_err();
+    assert!(error.contains("exponent range"), "{error}");
+}
+
+#[test]
+fn t390_logarithm_branches_follow_the_tetration_continuously() {
+    // |lambda| = 0.992 with a turning multiplier: the curve s -> F(h + s)
+    // winds around 0, so the logarithms of the height reduction are not the
+    // principal ones. Those gave a discontinuous function of the real height
+    // here (1.5688 - 1.5661i between 0.56 and 0.60).
+    let (re, im) = ("1.764630858490303", "0.1690076064324368");
+    let prec = cnum::digits_to_bits(15);
+    let values: Vec<Complex> = ["0.52", "0.54", "0.56", "0.58", "0.60", "0.62"]
+        .iter()
+        .map(|height| {
+            let (value_re, value_im) = tetration::tetrate_str("15", re, im, height, "0").unwrap();
+            parse(&value_re, &value_im, prec)
+        })
+        .collect();
+    assert_eq!(
+        tetration::tetrate_str("15", re, im, "0.60", "0").unwrap(),
+        (
+            "1.53538151660357".to_string(),
+            "7.81658334622440e-2".to_string()
+        )
+    );
+    // Third differences of an analytic function at this spacing are tiny;
+    // across a jump they are of the order of the jump.
+    for window in values.windows(4) {
+        let third = Complex::with_val_64(prec, &window[3] - &window[0])
+            - Complex::with_val_64(prec, &window[2] - &window[1]) * 3u32;
+        assert!(abs(&third, prec) < 1e-3, "third difference {third}");
+    }
+    // Outside the half-plane |lambda^(h+2)| < 1, where the regular tetration
+    // is single-valued, the height reduction keeps its principal logarithms.
+    assert_eq!(
+        tetration::tetrate_str("15", "0.2", "0.4", "2.5", "-1").unwrap(),
+        (
+            "2.01498533063010".to_string(),
+            "-9.63361309384064e-1".to_string()
+        )
+    );
+}
+
+#[test]
+fn t391_long_inverse_series_for_nearly_neutral_multipliers() {
+    // lambda = -0.9986. The short series of the attracting disk and its chain
+    // of 7500 logarithms give these 50 digits as well; the long series is
+    // summed on most of the disk whose boundary holds the coordinate of the
+    // height -2, about a hundred levels above the height.
+    let prec = cnum::digits_to_bits(50);
+    let state = |re: &str| {
+        let base = parse(re, "0", prec);
+        let fp = match regions::classify(&base, prec).unwrap() {
+            regions::Region::ShellThronInterior(fp) | regions::Region::ShellThronBoundary(fp) => fp,
+            other => panic!("expected an attracting base, got {other:?}"),
+        };
+        schroder::setup_schroder(&base, &fp, prec).unwrap()
+    };
+    let near = state("0.0665");
+    assert!(near.univalent);
+    assert_eq!(near.prec, prec);
+    assert!(near.inverse_radius.as_ref().unwrap() > &near.safe_radius);
+    assert!(!state("1.4142135623730951").univalent);
+    assert_eq!(
+        tetration::tetrate_str("50", "0.0665", "0", "0.5", "0").unwrap(),
+        (
+            "3.6762381657683836609365798186519960013603167802599e-1".to_string(),
+            "3.3901837390606446623420497690676123803623304409316e-2".to_string()
+        )
+    );
+    // Heights outside the half-plane of the series keep their values.
+    assert_eq!(
+        tetration::tetrate_str("15", "0.0665", "0", "-1000000.5", "0").unwrap(),
+        (
+            "3.66828727476977e-1".to_string(),
+            "-4.81788392990710e-2".to_string()
+        )
+    );
+    // |lambda| = 0.998 at argument 1: the digits of the chain of 6400 traced
+    // levels that the short series needs (three and a half minutes).
+    assert_eq!(
+        tetration::tetrate_str("15", "1.76873553494", "0.164701833467", "0.5", "0").unwrap(),
+        (
+            "1.47919432026926".to_string(),
+            "1.69457889363597e-2".to_string()
+        )
+    );
+    // |lambda| = 0.999: the same digits at two precisions, and the
+    // super-logarithm, which follows the orbit of exponentials and inverts
+    // the series on a smaller disk, returns the height.
+    let (re, im) = ("1.76941482678", "0.163978190153");
+    let value = tetration::tetrate_str("25", re, im, "0.5", "0").unwrap();
+    assert_eq!(
+        value,
+        (
+            "1.479974722806787003598171".to_string(),
+            "1.347300134691683414106475e-2".to_string()
+        )
+    );
+    assert_eq!(
+        tetration::tetrate_str("15", re, im, "0.5", "0").unwrap(),
+        (
+            "1.47997472280679".to_string(),
+            "1.34730013469168e-2".to_string()
+        )
+    );
+    let height = tetration::slog_str("15", re, im, &value.0, &value.1).unwrap();
+    let small = cnum::digits_to_bits(15);
+    let miss = Complex::with_val_64(small, parse(&height.0, &height.1, small) - 0.5f32);
+    assert!(abs(&miss, small) < 1e-13, "slog returned {height:?}");
+}

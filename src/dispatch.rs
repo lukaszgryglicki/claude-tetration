@@ -201,25 +201,10 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
             unreachable!()
         }
         regions::Region::ShellThronInterior(d) => {
-            // Schröder is the primary method for |λ| < 0.95. For bases very
-            // close to η (typically b ≳ 1.437 for real bases), the σ̃⁻¹ series
-            // can diverge at |s1| even though |s1| < safe_radius (the heuristic
-            // safe_radius estimate is too large near the parabolic boundary). In
-            // those cases the anchor check in setup_schroder catches the failure.
-            // Try the existing Kouznetsov construction if regular iteration fails.
-            match schroder::tetrate_schroder_at_digits(b, h, d, prec, digits) {
-                Ok(v) => return Ok(v),
-                Err(e) => dprint(&format!(
-                    "Schröder failed in Shell-Thron interior ({}); falling back to Kouznetsov",
-                    e
-                )),
-            }
-            kouznetsov::tetrate_kouznetsov(b, h, d, prec, digits).map_err(|kouz_err| {
-                format!(
-                    "Schröder failed and Kouznetsov fallback also failed: {}",
-                    kouz_err
-                )
-            })
+            // Regular iteration at the attracting fixed point defines the
+            // function here: a failure is final (see `regular_only`).
+            schroder::tetrate_schroder_at_digits(b, h, d, prec, digits)
+                .map_err(|error| regular_only(&error))
         }
         regions::Region::ShellThronBoundary(d) => {
             // Near |λ|=1, regular iteration can converge very slowly
@@ -237,15 +222,17 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
             // For complex bases on the boundary, |arg(λ)| can already be large,
             // so direct Kouznetsov often works; we keep the original order.
             if regular_base {
-                match schroder::tetrate_schroder_at_digits(b, h, d, prec, digits) {
+                let failure = match schroder::tetrate_schroder_at_digits(b, h, d, prec, digits) {
                     Ok(v) if schroder_result_is_canonical(b, h, &v, prec) => {
                         dprint("Schröder succeeded at boundary band");
                         return Ok(v);
                     }
-                    Ok(_) => dprint(
-                        "Schröder result fails the real-base branch requirements; trying Kouznetsov",
-                    ),
-                    Err(e) => dprint(&format!("Schröder failed at boundary band: {}", e)),
+                    Ok(_) => "the value fails the real-base branch requirements".to_string(),
+                    Err(e) => e,
+                };
+                dprint(&format!("Schröder failed at boundary band: {failure}"));
+                if d.lambda_abs < 1 {
+                    return Err(regular_only(&failure));
                 }
             }
             if regular_base && d.lambda_abs > 1 {
@@ -415,6 +402,18 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
             }
         }
     }
+}
+
+/// A failed regular iteration at an attracting fixed point is final: the
+/// two-fixed-point constructions compute a different function there.
+fn regular_only(reason: &str) -> String {
+    unsupported_msg(
+        "attracting fixed point",
+        &format!(
+            "regular iteration failed ({reason}); the two-fixed-point tetration is a \
+             different function inside the Shell-Thron region and is not substituted"
+        ),
+    )
 }
 
 /// Single source for the "this case isn't implemented" error message. Caller

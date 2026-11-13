@@ -95,16 +95,191 @@ pub(crate) fn nats(prec: u64) -> Float {
 #[derive(Clone)]
 struct Model {
     prec: u64,
+    /// Precision of the fixed-point data and of the series, `>= prec`.
+    work: u64,
     ln_b: Float,
     l: Complex,
     kappa: Complex,
     psi: Vec<Complex>,
     psi_radius: Float,
+    /// With a long series: an orbit point `w` is inverted through it once
+    /// `|w - L| <= reach |w - conj L|`.
+    reach: Option<Float>,
 }
 
 impl Model {
-    fn new(base: &Float, seed: Option<&Complex>, prec: u64) -> Result<Model, String> {
+    fn new(
+        base: &Float,
+        seed: Option<&Complex>,
+        prec: u64,
+        donor: Option<&Model>,
+    ) -> Result<Model, String> {
+        if let Some(donor) = donor {
+            cnum::check_precision(prec)?;
+            return Ok(donor.lowered(prec));
+        }
+        Self::build(base, seed, prec, false)?.ok_or_else(|| "Kneser: no Poincare series".into())
+    }
+
+    /// The model of the last precision level when it uses the long series:
+    /// the lower levels share its coefficients.
+    fn donor(base: &Float, seed: Option<&Complex>, prec: u64) -> Result<Option<Model>, String> {
+        Self::build(base, seed, prec, true)
+    }
+
+    fn build(
+        base: &Float,
+        seed: Option<&Complex>,
+        prec: u64,
+        long_only: bool,
+    ) -> Result<Option<Model>, String> {
         cnum::check_precision(prec)?;
+        let (ln_b, l, lambda, kappa) = Self::fixed_point(base, seed, prec)?;
+        let gap = cnum::abs(&Complex::with_val_64(prec, &lambda - 1u32), prec);
+        let psi_radius =
+            (gap / Float::with_val_64(prec, &ln_b * 2u32)).min(&cnum::decimal("0.25", prec));
+        if !psi_radius.is_finite() || psi_radius <= 0 {
+            return Err("Kneser: degenerate Poincare radius".into());
+        }
+        match Self::long_series(base, &l, &kappa, &psi_radius, prec) {
+            Ok(Some(model)) => return Ok(Some(model)),
+            Ok(None) => {}
+            Err(reason) => {
+                if cnum::verbose() {
+                    eprintln!("kneser: long Poincare series unavailable ({reason})");
+                }
+            }
+        }
+        if long_only {
+            return Ok(None);
+        }
+        let psi = Self::psi_series(&ln_b, &lambda, &psi_radius, prec, None)?;
+        Ok(Some(Model {
+            prec,
+            work: prec,
+            ln_b,
+            l,
+            kappa,
+            psi,
+            psi_radius,
+            reach: None,
+        }))
+    }
+
+    /// Near `e^(1/e)` an orbit takes about `1/ln|lambda|` logarithms to come
+    /// within the short series. `log_b` maps the upper half-plane into itself,
+    /// so its Koenigs function at `L` is analytic there: `psi` maps `|t| < r`
+    /// into the half-plane for `r` close to `2 Im L`, and its terms decay like
+    /// `(|t|/r)^k`. A series of `K` terms on `|t| <= r e^(-x)`, with `K x` of
+    /// the order of the precision, leaves `x/ln|lambda|` logarithms; `x`
+    /// balances the two costs.
+    fn long_series(
+        base: &Float,
+        l: &Complex,
+        kappa: &Complex,
+        short: &Float,
+        prec: u64,
+    ) -> Result<Option<Model>, String> {
+        let rate = Float::with_val_64(prec, kappa.real());
+        let balance = Self::balance(&nats(prec), &rate);
+        let ratio = Float::with_val_64(prec, -&balance).exp();
+        let radius = Float::with_val_64(prec, l.imag() * 2u32) * &ratio;
+        if !radius.is_finite() || radius <= Float::with_val_64(prec, short * 2u32) {
+            return Ok(None);
+        }
+        // The predicted coordinate of an accepted point is off by a multiple
+        // of the rotation angle.
+        let retreat =
+            Float::with_val_64(prec, kappa.imag()).min(&(Float::with_val_64(prec, 1) >> 5u32));
+        // Rounding grows with the length of an orbit and with the partial
+        // sums of the series; both stay below 4/ln|lambda|.
+        let guard = (Float::with_val_64(prec, 4u32) / &rate).log2().ceil() + 8u32;
+        let guard = guard
+            .to_integer()
+            .and_then(|guard| guard.to_u64())
+            .ok_or("Kneser: guard precision is not finite")?;
+        let work = prec
+            .checked_add(guard)
+            .ok_or("Kneser: precision count overflow")?;
+        cnum::check_precision(work)?;
+        let (ln_b, l, lambda, kappa) = Self::fixed_point(base, Some(l), work)?;
+        let radius = Float::with_val_64(work, l.imag() * 2u32) * &ratio;
+        let expected = to_count(nats(work + 8) / &balance, "Poincare series length")?;
+        let limit = expected
+            .checked_mul(2)
+            .and_then(|limit| limit.checked_add(64))
+            .ok_or("Kneser: Poincare series length is not addressable")?;
+        let psi = Self::psi_series_long(&ln_b, &lambda, &radius, work, limit)?;
+        Ok(Some(Model {
+            prec,
+            work,
+            ln_b,
+            l,
+            kappa,
+            psi,
+            psi_radius: radius,
+            reach: Some(ratio * (1u32 - retreat)),
+        }))
+    }
+
+    /// The long series of a higher precision level, cut to `prec` bits.
+    fn lowered(&self, prec: u64) -> Model {
+        let work = prec + (self.work - self.prec);
+        if work >= self.work {
+            return self.clone();
+        }
+        let shift = usize::try_from(work).unwrap_or(usize::MAX - 8);
+        let radius = Float::with_val_64(work, &self.psi_radius);
+        let tolerance = radius.clone() >> (shift + 8);
+        let mut power = Float::with_val_64(work, 1);
+        let mut small = 0u32;
+        let mut length = self.psi.len();
+        for (n, coefficient) in self.psi.iter().enumerate().skip(1) {
+            power *= &radius;
+            small = if cnum::abs(coefficient, work) * &power < tolerance {
+                small + 1
+            } else {
+                0
+            };
+            if small >= 3 && n >= 8 {
+                length = n + 1;
+                break;
+            }
+        }
+        Model {
+            prec,
+            work,
+            ln_b: Float::with_val_64(work, &self.ln_b),
+            l: Complex::with_val_64(work, &self.l),
+            kappa: Complex::with_val_64(work, &self.kappa),
+            psi: self.psi[..length]
+                .iter()
+                .map(|coefficient| Complex::with_val_64(work, coefficient))
+                .collect(),
+            psi_radius: radius,
+            reach: self.reach.clone(),
+        }
+    }
+
+    /// The `x` that minimizes the modelled cost of a solve: about 2000 orbit
+    /// evaluations of `x/rate` logarithms and an inversion of `K = nats/x`
+    /// terms each, and `K^2/2` products for the coefficients. The weights are
+    /// measured costs relative to one logarithm; they affect speed only.
+    fn balance(nats: &Float, rate: &Float) -> Float {
+        let prec = rate.prec_64();
+        let weight = |text: &str| cnum::decimal(text, prec);
+        let orbit = weight("2000") / rate;
+        let series = weight("600") * nats;
+        let setup = weight("0.1") * nats.clone().square();
+        cnum::cost_balance(&orbit, &series, &setup)
+    }
+
+    /// `ln b`, the upper fixed point `L`, `lambda = L ln b` and `kappa = Log lambda`.
+    fn fixed_point(
+        base: &Float,
+        seed: Option<&Complex>,
+        prec: u64,
+    ) -> Result<(Float, Complex, Complex, Complex), String> {
         let ln_b = Float::with_val_64(prec, base.ln_ref());
         let ln_b_complex = Complex::with_val_64(prec, (&ln_b, 0));
         let seed = match seed {
@@ -129,21 +304,7 @@ impl Model {
         if *kappa.real() <= 0 || *kappa.imag() <= 0 {
             return Err("Kneser: the upper fixed point is not repelling".into());
         }
-        let gap = cnum::abs(&Complex::with_val_64(prec, &lambda - 1u32), prec);
-        let psi_radius =
-            (gap / Float::with_val_64(prec, &ln_b * 2u32)).min(&cnum::decimal("0.25", prec));
-        if !psi_radius.is_finite() || psi_radius <= 0 {
-            return Err("Kneser: degenerate Poincare radius".into());
-        }
-        let psi = Self::psi_series(&ln_b, &lambda, &psi_radius, prec)?;
-        Ok(Model {
-            prec,
-            ln_b,
-            l,
-            kappa,
-            psi,
-            psi_radius,
-        })
+        Ok((ln_b, l, lambda, kappa))
     }
 
     fn psi_series(
@@ -151,6 +312,7 @@ impl Model {
         lambda: &Complex,
         radius: &Float,
         prec: u64,
+        limit: Option<usize>,
     ) -> Result<Vec<Complex>, String> {
         let shift = usize::try_from(prec).map_err(|_| "Kneser precision is not addressable")?;
         let tolerance = Float::with_val_64(prec, radius) >> (shift + 8);
@@ -160,6 +322,9 @@ impl Model {
         let mut small = 0u32;
         loop {
             let n = psi.len();
+            if limit.is_some_and(|limit| n > limit) {
+                return Err("Kneser: the long Poincare series does not converge".into());
+            }
             cnum::check_complex_storage(n as u128 * 2 + 2, prec)?;
             powers.push(Complex::with_val_64(prec, &powers[n - 1] * lambda));
             let mut sum = cnum::zero(prec);
@@ -189,8 +354,66 @@ impl Model {
         }
     }
 
+    /// `psi_series` for the long series: one product per term of the
+    /// convolution, summed in fixed blocks so that threads do not change it.
+    fn psi_series_long(
+        ln_b: &Float,
+        lambda: &Complex,
+        radius: &Float,
+        prec: u64,
+        limit: usize,
+    ) -> Result<Vec<Complex>, String> {
+        const BLOCK: usize = 256;
+        let shift = usize::try_from(prec).map_err(|_| "Kneser precision is not addressable")?;
+        let tolerance = Float::with_val_64(prec, radius) >> (shift + 8);
+        let mut psi = vec![cnum::zero(prec), cnum::one(prec)];
+        // weighted[k] = k psi_k, scaled[k] = psi_k lambda^k.
+        let mut weighted = psi.clone();
+        let mut scaled = vec![cnum::zero(prec), lambda.clone()];
+        let mut power = lambda.clone();
+        let mut radius_power = radius.clone();
+        let mut small = 0u32;
+        loop {
+            let n = psi.len();
+            if n > limit {
+                return Err("Kneser: the long Poincare series does not converge".into());
+            }
+            cnum::check_complex_storage(n as u128 * 4 + 4, prec)?;
+            power *= lambda;
+            let blocks: Vec<usize> = (1..n).step_by(BLOCK).collect();
+            let partial = map_points(&blocks, |&first| {
+                let mut sum = cnum::zero(prec);
+                for k in first..(first + BLOCK).min(n) {
+                    sum += &weighted[k] * &scaled[n - k];
+                }
+                Ok(sum)
+            })?;
+            let mut sum = cnum::zero(prec);
+            for part in &partial {
+                sum += part;
+            }
+            let denominator = Complex::with_val_64(prec, &power - lambda) * Integer::from(n);
+            if cnum::is_zero(&denominator) {
+                return Err(format!("Kneser: Poincare resonance at order {n}"));
+            }
+            let coefficient = Complex::with_val_64(prec, sum * ln_b) / denominator;
+            if !cnum::is_finite(&coefficient) {
+                return Err(format!("Kneser: Poincare coefficient {n} is not finite"));
+            }
+            radius_power *= radius;
+            let term = cnum::abs(&coefficient, prec) * &radius_power;
+            small = if term < tolerance { small + 1 } else { 0 };
+            weighted.push(Complex::with_val_64(prec, &coefficient * Integer::from(n)));
+            scaled.push(Complex::with_val_64(prec, &coefficient * &power));
+            psi.push(coefficient);
+            if small >= 3 && n >= 8 {
+                return Ok(psi);
+            }
+        }
+    }
+
     fn psi_value(&self, t: &Complex) -> (Complex, Complex) {
-        self.psi_value_at(t, self.prec)
+        self.psi_value_at(t, self.work)
     }
 
     /// `psi(t)` and `psi'(t)` with the arithmetic rounded to `prec` bits.
@@ -211,9 +434,21 @@ impl Model {
 }
 
 impl Model {
+    /// `psi(t)` with the arithmetic rounded to `prec` bits.
+    fn psi_only_at(&self, t: &Complex, prec: u64) -> Complex {
+        let mut terms = self.psi[1..].iter().rev();
+        let leading = terms.next().expect("linear Poincare coefficient");
+        let mut quotient = Complex::with_val_64(prec, leading);
+        for coefficient in terms {
+            quotient *= t;
+            quotient += coefficient;
+        }
+        quotient * t
+    }
+
     /// `S(w)` and `S'(w)`.
     fn superfunction(&self, w: &Complex) -> Result<(Complex, Complex), String> {
-        let prec = self.prec;
+        let prec = self.work;
         let exponent = Complex::with_val_64(prec, &self.kappa * w);
         if !cnum::is_finite(&exponent) {
             return Err("Kneser: superfunction argument is not finite".into());
@@ -231,7 +466,10 @@ impl Model {
         let turns = Complex::with_val_64(prec, &self.kappa * &steps);
         let reduced = Complex::with_val_64(prec, &exponent - &turns);
         if *reduced.real() < -(nats(prec) + 64u32) {
-            return Ok((self.l.clone(), cnum::zero(prec)));
+            return Ok((
+                Complex::with_val_64(self.prec, &self.l),
+                cnum::zero(self.prec),
+            ));
         }
         let t = exp_complex(&reduced, prec)?;
         let (psi, slope) = self.psi_value(&t);
@@ -247,25 +485,46 @@ impl Model {
         if !cnum::is_finite(&value) || !cnum::is_finite(&derivative) {
             return Err("Kneser: superfunction value exceeds MPFR's range".into());
         }
-        Ok((value, derivative))
+        Ok((
+            Complex::with_val_64(self.prec, value),
+            Complex::with_val_64(self.prec, derivative),
+        ))
     }
 
     /// The Abel coordinate `alpha(w)` with `S(alpha(w)) = w`, for `Im w > 0`.
     fn abel(&self, w: &Complex) -> Result<Complex, String> {
-        let prec = self.prec;
+        let prec = self.work;
         if !cnum::is_finite(w) || *w.imag() <= 0 {
             return Err(
                 "Kneser: Abel coordinate needs a point in the open upper half-plane".into(),
             );
         }
         let target = Float::with_val_64(prec, &self.psi_radius / 4u32);
-        let mut point = w.clone();
+        let mut reach = self.reach.clone();
+        let mut point = Complex::with_val_64(prec, w);
         let mut steps = Integer::new();
         let mut checkpoint = point.clone();
-        let displacement = loop {
+        let t = loop {
             let displacement = Complex::with_val_64(prec, &point - &self.l);
-            if cnum::abs(&displacement, prec) <= target {
-                break displacement;
+            match &mut reach {
+                None => {
+                    if cnum::abs(&displacement, prec) <= target {
+                        break self.invert_psi(&displacement)?;
+                    }
+                }
+                Some(reach) => {
+                    let partner = self.partner(&displacement);
+                    let bound = cnum::abs(&partner, prec) * &*reach;
+                    if cnum::abs(&displacement, prec) <= bound {
+                        if let Some(t) = self.invert_long(&displacement, &partner)? {
+                            break t;
+                        }
+                        // The predicted coordinate was too small: come closer first.
+                        *reach *= 1u32
+                            - Float::with_val_64(prec, self.kappa.imag())
+                                .min(&(Float::with_val_64(prec, 1) >> 5u32));
+                    }
+                }
             }
             point = cnum::ln_complex(&point, prec) / &self.ln_b;
             steps += 1;
@@ -276,14 +535,105 @@ impl Model {
                 checkpoint = point.clone();
             }
         };
-        let t = self.invert_psi(&displacement)?;
-        Ok(cnum::ln_complex(&t, prec) / &self.kappa + steps)
+        Ok(Complex::with_val_64(
+            self.prec,
+            cnum::ln_complex(&t, prec) / &self.kappa + steps,
+        ))
+    }
+
+    /// `w - conj L` for `w = L + displacement`.
+    fn partner(&self, displacement: &Complex) -> Complex {
+        let prec = self.work;
+        let span = Complex::with_val_64(prec, (0, Float::with_val_64(prec, self.l.imag() * 2u32)));
+        Complex::with_val_64(prec, displacement + span)
+    }
+
+    /// The `t` with `psi(t) = displacement` for the long series, or `None`
+    /// when it lies outside the disk of the series. The Cayley image
+    /// `psi/(psi + L - conj L)` of the half-plane is close to
+    /// `t/(L - conj L)` on the whole disk, so Newton's method is applied to it.
+    fn invert_long(
+        &self,
+        displacement: &Complex,
+        partner: &Complex,
+    ) -> Result<Option<Complex>, String> {
+        let prec = self.work;
+        if cnum::is_zero(displacement) {
+            return Err("Kneser: Abel coordinate is singular at the fixed point".into());
+        }
+        let span = Complex::with_val_64(prec, partner - displacement);
+        // The Newton correction and the size of the Cayley residual, with
+        // the slope of an earlier, less precise iterate when one is given.
+        let step = |t: &Complex,
+                    work: u64,
+                    slope: Option<&Complex>|
+         -> Result<(Complex, Float, Complex), String> {
+            let (value, slope) = match slope {
+                Some(slope) => (self.psi_only_at(t, work), slope.clone()),
+                None => self.psi_value_at(t, work),
+            };
+            let image = Complex::with_val_64(work, &value + &span);
+            let scale = Complex::with_val_64(work, &slope * partner);
+            if cnum::is_zero(&scale) || cnum::is_zero(&image) {
+                return Err("Kneser: Poincare inversion has a zero derivative".into());
+            }
+            let residual = Complex::with_val_64(work, value - displacement);
+            let error = cnum::abs(&residual, work) / cnum::abs(&image, work);
+            Ok((residual * image / scale, error, slope))
+        };
+        let mut work = prec.min(64);
+        let mut t = Complex::with_val_64(work, displacement * &span) / partner;
+        let mut best: Option<(Float, Complex)> = None;
+        let mut slope = loop {
+            let (change, error, slope) = step(&t, work, None)?;
+            if let Some((previous, argument)) = &best {
+                if error >= *previous {
+                    t = argument.clone();
+                    break slope;
+                }
+            }
+            if error.is_zero() {
+                break slope;
+            }
+            let next = Complex::with_val_64(work, &t - change);
+            best = Some((error, std::mem::replace(&mut t, next)));
+        };
+        if cnum::abs(&t, work) > self.psi_radius {
+            return Ok(None);
+        }
+        // Each level doubles the accuracy.
+        let mut ladder = vec![prec];
+        while ladder[ladder.len() - 1] > work {
+            ladder.push((ladder[ladder.len() - 1] + 16) / 2);
+        }
+        for &level in ladder.iter().rev() {
+            if level <= work {
+                continue;
+            }
+            work = level;
+            let (change, _, fresh) = step(&t, work, None)?;
+            t = Complex::with_val_64(work, &t - change);
+            slope = fresh;
+        }
+        // The residual needs the value only.
+        let (_, error, _) = step(&t, prec, Some(&slope))?;
+        let shift =
+            usize::try_from(self.prec.saturating_sub(24)).map_err(|_| "precision overflow")?;
+        if error > (cnum::abs(displacement, prec) / cnum::abs(partner, prec)) >> shift {
+            return Err("Kneser: Poincare inversion missed working accuracy".into());
+        }
+        Ok(Some(t))
     }
 
     /// The `t` with `psi(t) = displacement`, for a displacement well inside
     /// the Poincare disk.
     fn invert_psi(&self, displacement: &Complex) -> Result<Complex, String> {
-        let prec = self.prec;
+        let prec = self.work;
+        if self.reach.is_some() {
+            return self
+                .invert_long(displacement, &self.partner(displacement))?
+                .ok_or_else(|| "Kneser: Poincare inversion left the disk of the series".into());
+        }
         if cnum::is_zero(displacement) {
             return Err("Kneser: Abel coordinate is singular at the fixed point".into());
         }
@@ -337,12 +687,15 @@ impl Model {
         displacement: &Complex,
         steps: &Integer,
     ) -> Result<(Complex, Complex), String> {
-        let prec = self.prec;
+        let prec = self.work;
         let exponent = -Complex::with_val_64(prec, &self.kappa * steps);
         if !cnum::is_finite(&exponent) || *exponent.real() < -(nats(prec) + 64u32) {
-            return Ok((self.l.clone(), cnum::zero(prec)));
+            return Ok((
+                Complex::with_val_64(self.prec, &self.l),
+                cnum::zero(self.prec),
+            ));
         }
-        let t = self.invert_psi(displacement)?;
+        let t = self.invert_psi(&Complex::with_val_64(prec, displacement))?;
         let scale = exp_complex(&exponent, prec)?;
         let (_, before) = self.psi_value(&t);
         let (psi, after) = self.psi_value(&Complex::with_val_64(prec, &t * &scale));
@@ -350,8 +703,8 @@ impl Model {
             return Err("Kneser: Poincare inversion has a zero derivative".into());
         }
         Ok((
-            Complex::with_val_64(prec, &self.l + psi),
-            scale * after / before,
+            Complex::with_val_64(self.prec, &self.l + psi),
+            Complex::with_val_64(self.prec, scale * after / before),
         ))
     }
 
@@ -417,7 +770,7 @@ impl Default for KneserGeometry {
 impl KneserGeometry {
     /// Large bases need a contour further left, where the values stay moderate.
     pub fn for_base(base: &Float) -> KneserGeometry {
-        if *base > Float::with_val_64(64, LARGE_BASE_LOG).exp() {
+        if *base > Float::with_val_64(base.prec_64(), LARGE_BASE_LOG).exp() {
             KneserGeometry {
                 centre: "-1".into(),
                 radius: "0.7".into(),
@@ -471,18 +824,23 @@ pub(crate) fn to_count(value: Float, what: &str) -> Result<usize, String> {
 }
 
 impl Level {
+    fn precision(digits: u64) -> Result<u64, String> {
+        cnum::checked_digits_to_bits(
+            digits
+                .checked_add(8)
+                .ok_or("Kneser: precision count overflow")?,
+        )
+    }
+
     fn new(
         base: &Float,
         geometry: &KneserGeometry,
         digits: u64,
         seed: Option<&Complex>,
+        donor: Option<&Model>,
     ) -> Result<Level, String> {
-        let prec = cnum::checked_digits_to_bits(
-            digits
-                .checked_add(8)
-                .ok_or("Kneser: precision count overflow")?,
-        )?;
-        let model = Model::new(base, seed, prec)?;
+        let prec = Self::precision(digits)?;
+        let model = Model::new(base, seed, prec, donor)?;
         let centre = cnum::parse_float(&geometry.centre, prec)?;
         let radius = cnum::parse_float(&geometry.radius, prec)?;
         let height = cnum::parse_float(&geometry.height, prec)?;
@@ -497,7 +855,7 @@ impl Level {
         let arc = (radius.clone().square() + 1u32
             - Float::with_val_64(prec, &radius * 2u32) * cosine)
             .sqrt();
-        let segment = (height.clone().square() + 0.25f64).sqrt();
+        let segment = (height.clone().square() + (one.clone() >> 2u32)).sqrt();
         let used = arc.max(&segment);
         if used >= reach || used > radius {
             return Err("Kneser: contour geometry leaves the Taylor disk".into());
@@ -957,7 +1315,7 @@ fn initial_taylor(ln_b: &Float, centre: &Float, order: usize, prec: u64) -> Vec<
     let rate = Float::with_val_64(prec, ln_b.ln_ref());
     let position = Float::with_val_64(prec, centre + 1u32);
     let mut taylor = Vec::with_capacity(order + 1);
-    if rate.clone().abs() < 1e-6 {
+    if rate.clone().abs() < cnum::epsilon(6, prec) {
         taylor.push(position);
         taylor.push(Float::with_val_64(prec, 1));
         taylor.resize(order + 1, Float::new_64(prec));
@@ -1024,8 +1382,13 @@ fn solve(
         Some(start) => (start.digits.min(target), Some(start.taylor), start.seed),
         None => (FIRST_LEVEL_DIGITS.min(target), None, None),
     };
+    let donor = if digits < target {
+        Model::donor(base, seed.as_ref(), Level::precision(target)?)?
+    } else {
+        None
+    };
     loop {
-        let level = Level::new(base, geometry, digits, seed.as_ref())?;
+        let level = Level::new(base, geometry, digits, seed.as_ref(), donor.as_ref())?;
         let prec = level.prec();
         if cnum::verbose() {
             eprintln!(
@@ -1165,11 +1528,21 @@ impl KneserState {
             let steps = shift.clone().abs();
             while done < steps {
                 if shift > 0 {
-                    value = cnum::checked_exp(
-                        &Complex::with_val_64(prec, &value * &self.model.ln_b),
-                        prec,
-                    )
-                    .map_err(|e| format!("Kneser height {}: {e}", DisplayFloat(z.real())))?;
+                    let exponent = Complex::with_val_64(prec, &value * &self.model.ln_b);
+                    value = match cnum::exp_or_vanishing(&exponent, prec)
+                        .map_err(|e| format!("Kneser height {}: {e}", DisplayFloat(z.real())))?
+                    {
+                        Some(value) => value,
+                        // Below MPFR's range: the next level is b^0 = 1 at every precision.
+                        None if Integer::from(&done + 1u32) < steps => cnum::zero(prec),
+                        None => {
+                            return Err(format!(
+                                "Kneser height {}: {}",
+                                DisplayFloat(z.real()),
+                                cnum::VANISHING
+                            ))
+                        }
+                    };
                     let factor = Complex::with_val_64(prec, &value * &self.model.ln_b);
                     sensitivity *= cnum::abs(&factor, prec);
                     derivative *= factor;
@@ -1282,6 +1655,34 @@ pub fn setup_kneser_with_geometry(
         .map_err(|error| format!("Kneser: direct start: {direct}; base continuation: {error}"))
 }
 
+/// As `setup_kneser`, warm-started from the solution of a nearby base on
+/// the same contour.
+pub(crate) fn setup_kneser_near(
+    b: &Complex,
+    prec: u64,
+    digits: u64,
+    near: &KneserState,
+) -> Result<KneserState, String> {
+    crate::mt::init_pool()?;
+    cnum::require_precision(prec, digits)?;
+    let base = real_base(b, prec)?;
+    let geometry = KneserGeometry::for_base(&base);
+    let target = digits
+        .checked_add(GUARD_DIGITS)
+        .ok_or("Kneser: precision count overflow")?;
+    if geometry == near.geometry {
+        let start = Start {
+            taylor: near.taylor.clone(),
+            digits: FIRST_LEVEL_DIGITS.min(target),
+            seed: None,
+        };
+        if let Ok(state) = solve(&base, &geometry, target, Some(start)) {
+            return Ok(state);
+        }
+    }
+    setup_kneser(b, prec, digits)
+}
+
 /// Reach a large base through a chain of smaller ones, each warm-started
 /// from its predecessor at the first precision level.
 fn continue_in_base(
@@ -1363,7 +1764,8 @@ pub fn eval_kneser(
     loop {
         let current = refined.as_ref().unwrap_or(state);
         let (value, _, log_amplification) = current.evaluate(h)?;
-        let lost = (log_amplification / Float::with_val_64(64, 10).ln()).ceil();
+        let decade = Float::with_val_64(log_amplification.prec_64(), 10).ln();
+        let lost = (log_amplification / decade).ceil();
         let lost = lost
             .to_integer()
             .and_then(|lost| lost.to_u64())

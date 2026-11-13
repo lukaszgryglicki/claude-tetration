@@ -244,3 +244,47 @@ fn t091_bad_number_errors() {
     assert!(tetrate_str("30", "not_a_number", "0", "1", "0").is_err());
     assert!(tetrate_str("30", "2", "xyz", "1", "0").is_err());
 }
+
+// --------------------------------------------------------------------------
+// Integer towers far beyond the heights that can be iterated one by one
+// --------------------------------------------------------------------------
+
+#[test]
+fn t100_towers_that_cycle_or_vanish() {
+    // A tower that repeats exactly is not iterated to the end: each value
+    // must still be the image of its predecessor.
+    let digits = 15u64;
+    let prec = cnum::digits_to_bits(40);
+    for (re, im, zeros, expected) in [
+        ("0.04", "0", 30usize, "7.49451269593934e-1"),
+        ("1.3", "0", 100, "1.47098896009015"),
+        ("0", "1", 50, "4.38282936727032e-1"),
+        ("0.5", "0", 6, "6.41185744504986e-1"),
+    ] {
+        let height = format!("1{}", "0".repeat(zeros));
+        let next = format!("1{}1", "0".repeat(zeros - 1));
+        let value = tet("15", re, im, &height, "0");
+        assert_eq!(value.0, expected, "b={re}+{im}i");
+        let after = tet("15", re, im, &next, "0");
+        let base = cnum::parse_complex(re, im, prec).unwrap();
+        let image = cnum::pow_complex(
+            &base,
+            &cnum::parse_complex(&value.0, &value.1, prec).unwrap(),
+            prec,
+        );
+        let after = cnum::parse_complex(&after.0, &after.1, prec).unwrap();
+        let error = cnum::abs(&Complex::with_val_64(prec, image - &after), prec);
+        assert!(
+            error < cnum::epsilon(digits - 2, prec) * cnum::abs(&after, prec),
+            "b={re}+{im}i: {error}"
+        );
+    }
+    // A level below MPFR's range is followed by b^0 = 1 at every precision;
+    // the vanishing level itself stays an error.
+    assert!(tetrate_str("15", "-1e30", "0", "2", "0").is_err());
+    assert_eq!(
+        tet("15", "-1e30", "0", "3", "0"),
+        ("1.00000000000000".to_string(), "0".to_string())
+    );
+    assert_eq!(tet("15", "-1e30", "0", "4", "0").0, "-1.00000000000000e30");
+}

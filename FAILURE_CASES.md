@@ -89,6 +89,49 @@ line through the regular values `1.2571233116014142057` (`b=1.4446`) and
 reference (`1.2638346032868236084`) to 9. Cost grows like
 `1/(b−η)`; `b=1.4447` was not finished and `b=η` is unsupported.
 
+**November 13:** next to `e^{1/e}` the theta-mapping solver sums the Poincaré
+series on a disk that reaches most of the way to the conjugate fixed point
+(README § 6.8). Same digits as before, at a cost like `(b−η)^(−1/2…−2/3)`:
+`1.4448` 13 s at 15 digits (210 s) and 17 s at 20 (8 minutes); `1.4447`
+`1.2571671704399650301` in 35 s; `1.44467` `1.2571540131755165475` in 2.6
+minutes; `1.444668` `1.2571531360127560364` in 13 minutes.
+With `1.2571530750541725636` at `b=1.444667861009766+1e-15i` (regular
+iteration) these lie on one line of slope `0.438` in `b`: the two solvers
+meet across `η`.
+
+**November 13, complex bases on the ray `b = exp(t·e^{−t})`, `t = r·e^{i}`,
+height `0.5`** (15 digits; bases given to 12 digits, values to 10):
+
+| `r = \|λ\|` | b | before | now |
+|---|---|---|---|
+| 0.99 | `1.76325171225+0.17042904825i` | `1.461036997+0.04239393851i` (regular) | same |
+| 0.992 | `1.76463085849+0.169007606432i` | regular, but discontinuous in the height: `1.5688−1.5661i` on `0.56…0.60` | `1.535381517+0.07816583346i` at `0.60`; continuous (§ I.5) |
+| 0.995 | `1.76668937045+0.166862470066i` | `1.523673266−1.536641996i` (wrong branch on `0.46…0.76`) | `1.472187315+0.02903216044i` |
+| 0.998 | `1.76873553494+0.164701833467i` | `1.386200173+0.05716750805i`: the two-fixed-point function (§ I.4) | `1.479194320+0.01694578894i` (regular; 0.3 s) |
+| 0.999 | `1.76941482678+0.163978190153i` | the two-fixed-point function | `1.479974723+0.01347300135i` (regular; 2 s) |
+| 0.9999 | `1.77002500256+0.163325448409i` | `1.386596989+0.05664930179i`: the two-fixed-point function (100 s) | `1.467257287+0.007326473264i` (regular; 45 s) |
+| 0.99999 | `1.77008595817+0.163260098103i` | not tried | `1.464898331+0.004241706107i` (regular; 9 minutes) |
+| 1.0001 | `1.77016044416+0.163180206721i` | timeout | more than ten minutes |
+| 1.001 | `1.77076924149+0.162525774232i` | timeout | `1.386825937+0.05634871966i` (30 s) |
+| 1.005 | `1.7734612812+0.159600507187i` | timeout (150 s) | `1.387653600+0.05525220253i` (7 s) |
+| 1.01 | `1.77679451634+0.155905852021i` | `1.388677408+0.05387391870i` | same |
+
+Inside, the rows from `0.99` to `0.998` were first computed with the short
+inverse series and chains of up to 6400 traced levels (`0.998`: 3.5
+minutes); the long series of README § 6.3 gives the same digits in a
+fraction of a second and reaches `0.999` and `0.9999`, where the 15- and
+25-digit results agree and `--slog` returns the height `0.5` to 25 digits,
+and `0.99999`. Other arguments at 15 digits: `|λ| = 0.999` at argument 2
+(`0.452995041531+1.95805392380i`) `1.22588546629+1.19464891798i` and at
+argument 0.3 (`1.46911361352+0.00269860383680i`)
+`1.22843150003+0.0670942796200i`, half a second each; `|λ| = 0.9999` at
+argument 2.5 (`−0.247756897566+0.416984023274i`)
+`1.02750968310+1.60411872078i`, two minutes.
+Outside, the direct start of the two-sided solver was rejected by a test
+that took the slow spiral of the logarithmic orbits for a failure to
+approach the fixed point, and the continuation in the base then ran into the
+region; the test now compares closest approaches (README § 6.10).
+
 | b_re | b_im | h_re | h_im | mode | result |
 |---|---|---|---|---|---|
 | 1.444667861009766 | 0 | 0.5 | 0 | accelerated regular iteration | t710/t871 pass; independent reference checks through 100 digits in phase13 |
@@ -97,11 +140,11 @@ reference (`1.2638346032868236084`) to 9. Cost grows like
 | 0.0659880358454 | 0 | 0.5 | 0 / 0.25 | paired Taylor jumps | independent components through 100 digits in phase15 |
 | 0.0659880358454 | 1e-14 | 0.5 | 0 / 0.25 | paired Taylor jumps | independent components through 100 digits in phase15 |
 | 0.0659880358453125370767901876 | 1e-40 | 0.5 | 0 | unverified production value | independent reference exists; preliminary 50-digit CLI exceeded 1800 seconds with no output |
-| 1.4448 | 0 | 0.5 | 0 | theta mapping | `1.2572110255920272276`, two contours, about 8 minutes (t870, ignored because slow) |
+| 1.4448 | 0 | 0.5 | 0 | theta mapping, long Poincaré series | `1.2572110255920272276`, two contours; 17 s since November 13 (t870) |
 | 1.4447 | 0 | 0.5 | 0.5 | not finished | t872 (ignored) now requires a value satisfying the functional equation; expected to take hours |
 | 1.5 | 0 | 0.5 | 0 | theta mapping | `1.28087727794027`, about 1 second; equals the mpmath prototype |
 | 1.46 | 0 | 0.5 | 0 | theta mapping | `1.26383460066838162179258037381`, three contours (t880) |
-| 1.45 | 0 | 0.5 | 0 | theta mapping | `1.2594864327497848579`, about 6 seconds |
+| 1.45 | 0 | 0.5 | 0 | theta mapping | `1.2594864327497848579`, about 2 seconds, two contours (t1609) |
 | 1.43 / 1.44 | 0 | 0.5 | 0 | historical only | old regular-iteration observations, not current certificates |
 
 ### A.1 Strictly attracting deep-band witness — now independently checked
@@ -497,6 +540,77 @@ solution): `b^L=L` makes the functional-equation check pass trivially,
 so a separate anchor check `F(0)=1` is required to detect this.
 Resolved at `schroder.rs:tetrate_schroder` — every result is now
 anchor-validated with a working-precision tolerance before FE validation.
+
+### I.4 Two-fixed-point values for attracting bases — now ERR
+
+Where regular iteration failed for a base with an attracting fixed point,
+the dispatcher went on to the Cauchy solver. That solver converges there,
+but to the function with two fixed points, which inside the Shell–Thron
+region is a different function (README § 1.2). The rows `0.998` and
+`0.9999` of the table in § A show the effect: values that continue the
+exterior function and differ from regular iteration by `0.09 − 0.04i`,
+returned with exit code 0. Since November 13 a failed regular iteration is
+final: `unsupported case: attracting fixed point — regular iteration failed
+(…); the two-fixed-point tetration is a different function inside the
+Shell-Thron region and is not substituted`.
+
+### I.5 Wrong logarithm branch in the height reduction — fixed
+
+Regular iteration computes `F(h) = log_b^k F(h+k)` and took the principal
+logarithm at each of the `k` steps. `F(h+s)` is continuous in the real shift
+`s`, so the right branch changes whenever `F(h+s)` crosses the negative real
+axis; next to the Shell–Thron boundary, with a turning multiplier, it does.
+At `b = 1.764630858490303+0.1690076064324368i` (`|λ| = 0.992`):
+
+| h | before | now |
+|---|---|---|
+| 0.54 | `1.49462006762+0.0535217886000i` | same |
+| 0.56 | `1.56884…−1.56608…i` | `1.50876266888+0.0616079638776i` |
+| 0.60 | `1.58902944374−1.57832424633i` | `1.53538151660+0.0781658334622i` |
+| 0.62 | `1.54771257676+0.0862704600435i` | same |
+| −0.42 | `1.13975545306−1.55864814493i` | `0.729031668194−0.0414735321435i` |
+| −1.42 | `0.851954368008−1.78295441118i` | `−0.550446473280−0.00745588081966i` |
+
+Every branch satisfies the functional equation and `F(0)=1` is only tested
+at one height, so no existing gate saw it. A scan of 37 bases found the
+jumps only at `|λ| ≥ 0.992` on that ray (`r = 0.995`: wrong on `0.46…0.76`);
+for `|λ| ≥ 0.998` the same error made the anchor `F(0)=1` fail, which was
+reported as "Poincare normalization failed". The branches are now fixed by
+continuity along the real shifts (README § 6.3) inside the half-plane
+`|λ^{h+2}| < 1`, where the tetration is single-valued; outside it the
+principal logarithms remain the convention. 200 values of 20 ordinary bases
+are unchanged, and so are the 100- and 1000-digit references.
+
+At real heights the traced branches are also compared with the integer
+tower, level by level and once more below the result (README § 6.3). A
+branch forced wrong at the last step of the chain for this base, or one
+and five levels before it, ends in `the logarithm branches of this height
+contradict the integer tower`; at `|λ| = 0.9999` the tower refutes the
+first chain, sampled nine times per unit of height, and the denser repeat
+passes.
+
+### I.6 Bases just above `e^{−e}` (multiplier next to −1)
+
+15 digits, height `0.5`; "before" is the binary of November 12.
+
+| b | before | now |
+|---|---|---|
+| 0.0665 | `0.367623816576838+0.0339018373906064i`, 0.4 s | same digits, 0.2 s (long series, 1054 terms) |
+| 0.0661 | 7.0 s | same digits, 1.8 s |
+| 0.066 | `0.367873311806215+0.00520321138081477i`, 15 s | same digits, 5.5 s (5414 terms) |
+| 0.06599 | `0.367878434246886+0.00210845265075503i`, 18 s | same digits, 16 s (10918 terms) |
+| 0.065989 | `0.367878946861275+0.00147725133341689i`, 23 s | same digits, 25 s (14267 terms) |
+| 0.0659881 | `0.367879408277819+0.000381065906287679i`, 33 s | same digits, 62 s (Taylor jumps, samples follow them) |
+| 0.06598804 | `0.367879439041224+0.0000969740320825670i`, 45 s | same digits, 75 s |
+
+With the branches traced but the short series kept, `0.066` took 142 s and
+`0.06599` 270 s: after the Taylor jumps tens of thousands of single steps
+remain, each with its samples. Closer to `e^{−e}` than `0.065989` the
+estimated length of the long series exceeds 32768 terms and the jumps are
+kept; a sample
+at an integer height is then evaluated exactly there, because the paired
+jumps of a real base refuse a value whose imaginary part is rounding noise
+(`0.06598804` failed on that for a while).
 
 ---
 

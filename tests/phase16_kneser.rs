@@ -269,6 +269,34 @@ fn t1608_far_left_and_near_integer_heights() {
 }
 
 #[test]
+fn t1609_bases_next_to_the_parabolic_base() {
+    // Next to e^(1/e) the Poincare series is summed on a disk reaching most
+    // of the way to the other fixed point, which keeps the logarithmic orbits
+    // short. Independent contours agree and satisfy the recurrence.
+    let digits = 20u64;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("1.45", "0", prec);
+    let ln_b = cnum::ln_complex(&b, prec);
+    for geometry in [contour("-0.5", "1", "0.5"), contour("-0.5", "1", "0.3")] {
+        let state = kneser::setup_kneser_with_geometry(&b, prec, digits, &geometry).unwrap();
+        let eval =
+            |re: &str, im: &str| kneser::eval_kneser(&state, &parse(re, im, prec), prec, digits);
+        let value = eval("0.5", "0").unwrap();
+        assert_eq!(
+            cnum::format_complex(&value, digits as usize).0,
+            "1.2594864327497848579"
+        );
+        let before = eval("-0.5", "0.25").unwrap();
+        let image = cnum::checked_exp(&Complex::with_val_64(prec, before * &ln_b), prec).unwrap();
+        assert!(agreement(&eval("0.5", "0.25").unwrap(), &image, prec) >= digits - 1);
+    }
+    assert_eq!(
+        tetration::tetrate_str("15", "1.445", "0", "0.5", "0").unwrap(),
+        ("1.25729872483980".to_string(), "0".to_string())
+    );
+}
+
+#[test]
 fn t1607_cli_is_real_and_serial_mt_identical() {
     let run = |threads: Option<&str>, arguments: &[&str]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tet"));
@@ -293,6 +321,7 @@ fn t1607_cli_is_real_and_serial_mt_identical() {
         ["40", "3", "0", "0.5", "0.25"],
         ["40", "3", "0", "-1.5", "2"],
         ["25", "1e30", "0", "0.5", "0"],
+        ["15", "1.46", "0", "0.5", "0.25"],
     ] {
         assert_eq!(
             run(None, &arguments),

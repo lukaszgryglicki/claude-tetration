@@ -88,9 +88,15 @@ fn tetrate_integer_once(b: &Complex, n: &Float, prec: u64) -> Result<(Complex, F
     }
     let ln_b = cnum::ln_complex(b, prec);
     let log_ln_b = cnum::log_magnitude(&ln_b, prec);
-    let mut log_amplification = no_loss;
+    // A relative error made at one level grows by the product of the later
+    // `|F ln b|`: `growth` is the logarithm of that product over all levels
+    // so far, `lowest` its smallest value on the way.
+    let mut growth = no_loss.clone();
+    let mut lowest = no_loss;
     let mut acc = Complex::with_val_64(prec, b);
     let mut level = Integer::from(2);
+    let mut evaluated = Integer::new();
+    let mut recurrence = cnum::Recurrence::<Float>::new();
     while *n >= level {
         if cnum::verbose() && (level == 2 || level.is_divisible_u(1024)) {
             eprintln!(
@@ -98,12 +104,41 @@ fn tetrate_integer_once(b: &Complex, n: &Float, prec: u64) -> Result<(Complex, F
                 cnum::DisplayFloat(n)
             );
         }
-        let amplification = cnum::log_magnitude(&acc, prec) + &log_ln_b;
-        log_amplification += amplification.max(&Float::new_64(prec));
+        if cnum::is_zero(&acc) {
+            // b^0 = 1 does not depend on the earlier levels.
+            growth = Float::new_64(prec);
+            lowest = Float::new_64(prec);
+        } else {
+            growth += cnum::log_magnitude(&acc, prec) + &log_ln_b;
+            lowest = lowest.min(&growth);
+        }
         let argument = Complex::with_val_64(prec, &ln_b * &acc);
-        acc = cnum::checked_exp(&argument, prec)
-            .map_err(|e| format!("integer tower at height {}: {}", level, e))?;
+        acc = match cnum::exp_or_vanishing(&argument, prec)
+            .map_err(|e| format!("integer tower at height {}: {}", level, e))?
+        {
+            Some(value) => value,
+            // Below MPFR's range: the next level is b^0 = 1 at every precision.
+            None if *n > level => cnum::zero(prec),
+            None => {
+                return Err(format!(
+                    "integer tower at height {level}: {}",
+                    cnum::VANISHING
+                ))
+            }
+        };
+        evaluated += 1;
+        if let Some((period, earlier)) = recurrence.step(&acc, || growth.clone()) {
+            // The tower repeats exactly: whole periods change nothing.
+            let rest = Float::with_val_64(prec, n - &level)
+                .to_integer()
+                .ok_or("integer tetration height is not finite")?;
+            let periods = Integer::from(&rest / &period);
+            growth += Float::with_val_64(prec, &growth - earlier) * &periods;
+            lowest = lowest.min(&growth);
+            level += periods * period;
+        }
         level += 1;
     }
+    let log_amplification = growth - lowest + Float::with_val_64(prec, evaluated + 1u32).ln();
     Ok((acc, log_amplification))
 }

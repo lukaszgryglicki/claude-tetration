@@ -5,6 +5,28 @@
 //!
 //! See `dispatch::tetrate` for the algorithm-selection entry point. The CLI in
 //! `main.rs` is a thin wrapper around `tetrate_str`.
+//!
+//! # Numerical contract
+//!
+//! Binding for every change to this crate (README § 7.1):
+//!
+//! * Accuracy comes before speed: a faster method must return the same digits.
+//! * A result is a value the algorithm has converged to at the requested
+//!   precision. Interpolations, extrapolations, truncated asymptotics, values
+//!   of another solution family and other approximations are never returned;
+//!   where nothing better is available the answer is an `Err`.
+//! * Approximations may only start or steer an iteration that then converges
+//!   by itself; its last steps and the final check run at the full working
+//!   precision.
+//! * Every number that enters a result is an MPFR/MPC value with at least the
+//!   requested digits plus guard digits, and more where digits are lost: the
+//!   loss is measured and the computation repeated at a higher precision.
+//!   Real quantities are `rug::Float`, complex ones `rug::Complex`, at the
+//!   working precision, also where they only steer the computation. An `f64`
+//!   or a fixed-size float needs a reason (a starting value, or a proof that
+//!   no digit depends on it) and a line in the table of README § 7.1.
+//! * No fixed cap on iterations, series lengths or grid sizes may limit the
+//!   accuracy silently.
 
 pub mod cnum;
 pub mod dispatch;

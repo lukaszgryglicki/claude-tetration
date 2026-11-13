@@ -77,6 +77,17 @@ fn integer_towers_reject_overflow_and_underflow() {
 }
 
 #[test]
+fn attracting_bases_never_get_the_two_fixed_point_function() {
+    // Where the fixed point attracts, regular iteration defines b^^h: when it
+    // cannot deliver a height, the Cauchy construction (which converges to
+    // the two-fixed-point function there) must not answer in its place.
+    let error =
+        tetrate_str("15", "1.3", "0", "-1000000000000000000000000000000.5", "0").unwrap_err();
+    assert!(error.contains("regular iteration failed"), "{error}");
+    assert!(error.contains("not substituted"), "{error}");
+}
+
+#[test]
 fn finite_numbers_outside_f64_range_are_preserved() {
     let prec = cnum::digits_to_bits(50);
     for re in ["1e1000", "1e-1000", "-1e1000"] {

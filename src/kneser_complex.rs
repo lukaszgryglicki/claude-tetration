@@ -25,7 +25,7 @@
 
 use std::collections::VecDeque;
 
-use rug::{float::Constant, Complex, Float, Integer};
+use rug::{float::Constant, ops::Pow, Complex, Float, Integer};
 
 use crate::kneser::{
     exp_complex, map_points, nats, solve_linear, theta_value, to_count, KneserGeometry,
@@ -34,10 +34,11 @@ use crate::kneser::{
 use crate::{cnum, fft, kneser, lambertw};
 use cnum::DisplayFloat;
 
-/// Largest change of argument, in turns, between a value and the neighbour
-/// that fixes the branch of its logarithm.
-const BRANCH_TOLERANCE: f64 = 0.4;
-/// Working precision of the branch search for heights left of the Taylor disk.
+/// Largest change of argument, as a fraction of a turn, between a value and
+/// the neighbour that fixes the branch of its logarithm.
+const BRANCH_TOLERANCE: (u32, u32) = (2, 5);
+/// Precision of the path planning in the `ln b` plane and of fixed-point
+/// seeds: both only start iterations that converge at the working precision.
 const SCOUT_BITS: u64 = 128;
 
 /// `P(z)` and `P'(z)` for complex coefficients.
@@ -78,7 +79,7 @@ fn nearest_branch(
     // factor next to a zero.
     let branch = ratio.real().clone().round();
     let miss = Float::with_val_64(prec, ratio.real() - &branch).abs();
-    if miss > BRANCH_TOLERANCE {
+    if miss * BRANCH_TOLERANCE.1 > BRANCH_TOLERANCE.0 {
         return Err("ambiguous logarithm branch (values are not continuous)".into());
     }
     let branch = branch
@@ -506,7 +507,7 @@ impl Level {
         let arc = (radius.clone().square() + 1u32
             - Float::with_val_64(prec, &radius * 2u32) * cosine)
             .sqrt();
-        let segment = (height.clone().square() + 0.25f64).sqrt();
+        let segment = (height.clone().square() + (one.clone() >> 2u32)).sqrt();
         let used = arc.max(&segment);
         if used >= reach || used > radius {
             return Err("contour geometry leaves the Taylor disk".into());
@@ -514,7 +515,7 @@ impl Level {
         let mut goal =
             Float::with_val_64(prec, digits + GUARD_DIGITS) * Float::with_val_64(prec, 10).ln();
         for _ in 0..escalation {
-            goal *= 1.5f64;
+            goal = goal * 3u32 / 2u32;
         }
         let two_pi = Float::with_val_64(prec, Constant::Pi) * 2u32;
         let modes = to_count(
@@ -660,6 +661,9 @@ impl Level {
         })?;
         let target = Float::with_val_64(prec, &side.psi_radius / 4u32);
         let mut levels = Integer::new();
+        // The closest approach since the last checkpoint and in the stretch
+        // before it: orbits spiral, so single distances are not monotonic.
+        let mut closest: Option<Float> = None;
         let mut checkpoint: Option<Float> = None;
         loop {
             let worst = points.iter().fold(Float::new_64(prec), |worst, w| {
@@ -671,11 +675,17 @@ impl Level {
             if worst <= target {
                 break;
             }
+            let nearest = match closest.take() {
+                Some(seen) => seen.min(&worst),
+                None => worst,
+            };
             if levels >= 16 && levels.is_power_of_two() {
-                if checkpoint.as_ref().is_some_and(|last| worst >= *last) {
+                if checkpoint.as_ref().is_some_and(|last| nearest >= *last) {
                     return Err("logarithmic orbits do not approach the fixed point".into());
                 }
-                checkpoint = Some(worst);
+                checkpoint = Some(nearest);
+            } else {
+                closest = Some(nearest);
             }
             let wrap = points[0].clone();
             let mut next = map_points(&points, |w| {
@@ -1085,7 +1095,7 @@ fn initial_taylor(
     }
     let position = Float::with_val_64(prec, centre + 1u32);
     let mut taylor = Vec::with_capacity(order + 1);
-    if cnum::abs(&rate, prec) < 1e-6 {
+    if cnum::abs(&rate, prec) < cnum::epsilon(6, prec) {
         taylor.push(Complex::with_val_64(prec, (&position, 0)));
         taylor.push(cnum::one(prec));
         taylor.resize(order + 1, cnum::zero(prec));
@@ -1260,7 +1270,7 @@ fn continuation_paths(ln_b: &Complex) -> Vec<Vec<Complex>> {
         return vec![vec![point(&re, &zero), point(&re, &im)]];
     }
     let mut paths = Vec::new();
-    let cut = Float::with_val_64(prec, -3.2);
+    let cut = cnum::decimal("-3.2", prec);
     if re <= cut {
         paths.push(vec![point(&cut, &zero), point(&re, &im)]);
     }
@@ -1513,7 +1523,7 @@ impl ComplexKneserState {
     /// list ends early once the whole segment lies in the Poincare disk of
     /// the fixed point on its own branch: the rest is a contraction.
     fn scout(&self, argument: &Complex, steps: &Integer) -> Result<Vec<Integer>, String> {
-        let prec = SCOUT_BITS.min(self.prec);
+        let prec = self.prec;
         let lower = argument.imag().is_sign_negative() && !argument.imag().is_zero();
         let (side, theta) = if lower {
             (&self.lower, &self.theta_dn)
@@ -1631,13 +1641,39 @@ impl ComplexKneserState {
             let steps = shift.clone().abs();
             let mut done = Integer::new();
             if shift > 0 {
+                let mut recurrence = cnum::Recurrence::<(Complex, Float)>::new();
                 while done < steps {
-                    value = cnum::checked_exp(&Complex::with_val_64(prec, &value * ln_b), prec)
-                        .map_err(|e| format!("height {}: {e}", DisplayFloat(z.real())))?;
+                    let exponent = Complex::with_val_64(prec, &value * ln_b);
+                    value = match cnum::exp_or_vanishing(&exponent, prec)
+                        .map_err(|e| format!("height {}: {e}", DisplayFloat(z.real())))?
+                    {
+                        Some(value) => value,
+                        // Below MPFR's range: the next level is b^0 = 1 at every precision.
+                        None if Integer::from(&done + 1u32) < steps => cnum::zero(prec),
+                        None => {
+                            return Err(format!(
+                                "height {}: {}",
+                                DisplayFloat(z.real()),
+                                cnum::VANISHING
+                            ))
+                        }
+                    };
                     let factor = Complex::with_val_64(prec, &value * ln_b);
                     sensitivity *= cnum::abs(&factor, prec);
                     derivative *= factor;
                     done += 1;
+                    let kept = || (derivative.clone(), sensitivity.clone());
+                    if let Some((period, (slope, weight))) = recurrence.step(&value, kept) {
+                        // The values repeat exactly: whole periods only scale the derivative.
+                        let periods = Integer::from(&steps - &done) / &period;
+                        if periods > 0 && !cnum::is_zero(&slope) && !weight.is_zero() {
+                            let multiplier = Complex::with_val_64(prec, &derivative / &slope);
+                            derivative *= multiplier.pow(&periods);
+                            sensitivity *=
+                                Float::with_val_64(prec, &sensitivity / &weight).pow(&periods);
+                        }
+                        done += periods * period;
+                    }
                 }
             } else if shift < 0 {
                 let branches = self.scout(&argument, &steps)?;
@@ -1716,7 +1752,8 @@ pub fn eval_complex_kneser(
     loop {
         let current = refined.as_ref().unwrap_or(state);
         let (value, _, log_amplification) = current.evaluate(h)?;
-        let lost = (log_amplification / Float::with_val_64(64, 10).ln()).ceil();
+        let decade = Float::with_val_64(log_amplification.prec_64(), 10).ln();
+        let lost = (log_amplification / decade).ceil();
         let lost = lost
             .to_integer()
             .and_then(|lost| lost.to_u64())

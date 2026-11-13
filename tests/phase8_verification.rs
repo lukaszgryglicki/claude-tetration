@@ -369,10 +369,11 @@ fn t860_schwarz_reflection_conjugate_base() {
 }
 
 #[test]
-#[ignore] // Slow (about ten minutes): near-parabolic theta-mapping solve.
 fn t870_near_parabolic_base_matches_independent_contours() {
-    // Formerly refused. Two contours give this value, and it continues the
-    // regular results at 1.4446 and 1.44466 with the same slope in the base.
+    // Formerly refused. Two contours gave this value with the short Poincare
+    // series (eight minutes); the long series reproduces it in seconds. It
+    // continues the regular results at 1.4446 and 1.44466 with the same slope
+    // in the base.
     let digits = 20;
     let prec = cnum::digits_to_bits(digits);
     let b = parse("1.4448", "0", prec);
@@ -408,7 +409,6 @@ fn t871_very_close_attracting_boundary_preserves_normalization_and_fe() {
 }
 
 #[test]
-#[ignore] // Slow: closer to the parabolic base than t870.
 fn t872_parabolic_complex_heights_do_not_use_a_surrogate() {
     let digits = 25u64;
     let prec = cnum::digits_to_bits(digits);

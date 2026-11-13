@@ -339,3 +339,46 @@ fn t1806_heights_next_to_the_singularities_and_scope() {
         .unwrap();
     assert!(error.contains("not repelling"), "{error}");
 }
+
+#[test]
+fn t1808_a_level_below_the_exponent_range_restarts_the_tower() {
+    // A level of this tower lies below MPFR's range, so the following ones
+    // are 1, b, b^b, b^b^b at every precision; with b^b = 10^-200 the tower
+    // then repeats with period 3 far beyond the printed digits.
+    assert_eq!(
+        tetration::tetrate_str("15", "-100", "0", "100.5", "0").unwrap(),
+        tetration::tetrate_str("15", "-100", "0", "3", "0").unwrap()
+    );
+    assert_eq!(
+        tetration::tetrate_str("15", "-100", "0", "100.5", "0").unwrap(),
+        (
+            "1.00000000000000".to_string(),
+            "3.14159265358979e-200".to_string()
+        )
+    );
+}
+
+#[test]
+fn t1809_a_nearly_neutral_multiplier_starts_directly() {
+    // |lambda| = 1.005 at the upper fixed point: the logarithmic orbits spiral
+    // in slowly, which must not be taken for a failure to approach it.
+    let digits = 15u64;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("1.7734612812", "0.159600507187", prec);
+    let ln_b = cnum::ln_complex(&b, prec);
+    let state = kneser_complex::setup_complex_kneser(&b, prec, digits).unwrap();
+    let eval = |re: &str, im: &str| {
+        kneser_complex::eval_complex_kneser(&state, &parse(re, im, prec), prec, digits).unwrap()
+    };
+    let value = eval("0.5", "0");
+    assert_eq!(
+        cnum::format_complex(&value, digits as usize),
+        (
+            "1.38765359983500".to_string(),
+            "5.52522025324407e-2".to_string()
+        )
+    );
+    let image =
+        cnum::checked_exp(&Complex::with_val_64(prec, eval("-0.5", "0") * &ln_b), prec).unwrap();
+    assert!(agreement(&value, &image, prec) >= digits - 1);
+}

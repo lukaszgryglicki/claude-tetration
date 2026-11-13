@@ -34,7 +34,11 @@
 //!     inside the σ̃⁻¹ Taylor disk, then iterate `b^·` (`k<0`) or `log_b`
 //!     (`k>0`) back.
 
-use rug::{float::Round, ops::Pow, Complex, Float, Integer};
+use rug::{
+    float::{Constant, Round},
+    ops::Pow,
+    Complex, Float, Integer,
+};
 
 use crate::{cnum, regions::FixedPointData, schroder_jumps::OrbitJumps};
 use cnum::{DisplayComplex, DisplayFloat};
@@ -67,6 +71,10 @@ pub struct SchroderState {
     /// Conservative analytic disk for the attracting inverse germ. This
     /// controls truncation, not all floating-point or continuation errors.
     pub inverse_radius: Option<Float>,
+    /// With a long series (`LongSeries`): `inverse_radius` is the radius of
+    /// the largest disk on which the inverse germ is analytic and one-to-one,
+    /// and the series is long enough for `safe_radius`.
+    pub univalent: bool,
     /// MPC bit precision the state was built at — must match the precision
     /// used for per-cell evaluation.
     pub prec: u64,
@@ -259,6 +267,7 @@ pub fn setup_schroder(
         safe_radius,
         sigma_inner_radius,
         inverse_radius: None,
+        univalent: false,
         prec,
     };
 
@@ -325,10 +334,15 @@ fn poincare_coefficients(
     Ok(inverse)
 }
 
+/// `psi(t)` and `psi'(t)` on the disk of radius `radius`. With `univalent`,
+/// `psi` is one-to-one on that disk and the tail follows from
+/// `|c_n| <= n radius^(1-n)` (de Branges); otherwise `radius` is the
+/// conservative disk of `setup_poincare`.
 pub(crate) fn eval_poincare_series(
     coefficients: &[Complex],
     coordinate: &Complex,
     radius: &Float,
+    univalent: bool,
     prec: u64,
 ) -> Result<(Complex, Complex), String> {
     let magnitude = cnum::abs(coordinate, prec);
@@ -363,19 +377,245 @@ pub(crate) fn eval_poincare_series(
     let ratio = Float::with_val_64(prec, &magnitude / radius);
     let log_radius = radius.clone().ln();
     let log_ratio = cnum::log_magnitude(coordinate, prec) - &log_radius;
-    let log_tail = log_radius
-        + Float::with_val_64(prec, 2).ln()
-        + log_ratio * Integer::from(coefficients.len())
-        - (Float::with_val_64(prec, 1) - ratio).ln();
+    let terms = Integer::from(coefficients.len());
+    let margin = (Float::with_val_64(prec, 1) - ratio).ln();
+    let log_tail = if univalent {
+        log_radius + Float::with_val_64(prec, &terms).ln() + log_ratio * terms - margin * 2u32
+    } else {
+        log_radius + Float::with_val_64(prec, 2).ln() + log_ratio * terms - margin
+    };
     if log_tail > goal || roundoff.ln() > goal {
         return Err("Poincare inverse tail or roundoff estimate misses working accuracy".into());
     }
     Ok((value, derivative))
 }
 
+/// A normalization orbit of at least this many steps makes the long inverse
+/// series worth its coefficients.
+const LONG_SERIES_STEPS: u32 = 256;
+/// Next to `lambda = 1` Taylor jumps are cheaper than a series longer than
+/// this, next to `lambda = -1` than one eight times as long.
+const LONG_SERIES_TERMS: u32 = 4096;
+
+/// The plan of a long inverse series for a nearly neutral multiplier.
+///
+/// `psi(t / lambda) = log_b(L + psi(t)) - L` continues the inverse germ to
+/// the disk whose boundary holds the coordinate of the height -2: `L + psi`
+/// vanishes only at the coordinate of the height -1. On that disk `psi` is
+/// one-to-one, the Schroder function of the basin being its inverse, so its
+/// coefficients obey `|c_n| <= n R^(1-n)` (de Branges). That bounds the tail
+/// of the series on `|t| <= R e^(-x)`, where about `nats / x` terms replace
+/// all but `x / |ln lambda|` logarithms of a height reduction.
+struct LongSeries {
+    x: Float,
+    /// Guard of the longer coefficient recursion, in nats.
+    gain: Float,
+}
+
+impl LongSeries {
+    fn plan(b: &Complex, fp: &FixedPointData, prec: u64) -> Result<Option<LongSeries>, String> {
+        let gap = Float::with_val_64(prec, 1) - &fp.lambda_abs;
+        let rate = -Float::with_val_64(prec, fp.lambda_abs.ln_ref());
+        if !gap.is_finite() || gap <= 0 || !rate.is_finite() || rate <= 0 {
+            return Ok(None);
+        }
+        let ln_b = cnum::ln_complex(b, prec);
+        let short = Float::with_val_64(prec, &gap / (cnum::abs(&ln_b, prec) * 16u32));
+        let start = cnum::abs(&Complex::with_val_64(prec, &fp.fixed_point - 1u32), prec);
+        let steps = (start * 64u32 / short).ln() / &rate;
+        if !steps.is_finite() || steps < LONG_SERIES_STEPS {
+            return Ok(None);
+        }
+        // Taylor jumps cross the whole orbit next to `lambda = 1`; next to
+        // `lambda = -1` a tail of single steps remains, and a turning
+        // multiplier leaves them only the end of the orbit.
+        let l = Complex::with_val_64(prec, &fp.fixed_point);
+        let lambda = Complex::with_val_64(prec, &l * &ln_b);
+        let near = |distance: Complex| cnum::abs(&distance, prec) * 32u32 <= 1u32;
+        let limit = if near(Complex::with_val_64(prec, &lambda - 1u32)) {
+            Some(LONG_SERIES_TERMS)
+        } else if near(Complex::with_val_64(prec, &lambda + 1u32)) {
+            Some(LONG_SERIES_TERMS * 8)
+        } else {
+            None
+        };
+        let mut jumps = false;
+        for logarithm in [false, true] {
+            match OrbitJumps::new(&ln_b, &l, logarithm, prec)? {
+                Some(OrbitJumps::Real(_)) => return Ok(None),
+                Some(OrbitJumps::Complex(_)) => jumps = true,
+                None => {}
+            }
+        }
+        // The cost of a call, in products: `K^2 / 2` for `K = nats / x`
+        // coefficients, the series at about a hundred samples of each of its
+        // three logarithm chains, and `x / rate` logarithms of each sample.
+        // The weights affect speed only.
+        let nats = Float::with_val_64(prec, prec) * Float::with_val_64(prec, 2).ln()
+            - Float::with_val_64(prec, gap.ln_ref()) * 4u32;
+        let orbit = Float::with_val_64(prec, 16384) / &rate;
+        let series = Float::with_val_64(prec, 2048) * &nats;
+        let setup = nats.clone().square();
+        let x = cnum::cost_balance(&orbit, &series, &setup);
+        if !x.is_finite() || x <= 0 {
+            return Ok(None);
+        }
+        let terms = Float::with_val_64(prec, &nats / &x) * 2u32;
+        if jumps && limit.is_some_and(|limit| terms > limit) {
+            return Ok(None);
+        }
+        let gain = terms.ln() * 4u32
+            - Float::with_val_64(prec, x.ln_ref()).min(&Float::new_64(prec)) * 3u32;
+        Ok(Some(LongSeries { x, gain }))
+    }
+
+    /// The number of terms whose tail stays below the working resolution on
+    /// `|t| <= R e^(-x)`.
+    fn order(&self, work: u64) -> Result<usize, String> {
+        let x = Float::with_val_64(work, &self.x);
+        let ratio = Float::with_val_64(work, -&x).exp();
+        // `(N + 1) q^N <= eps (1 - q)^2 / 256` puts the de Branges tail below
+        // `eps / 64` of the smallest value of `psi` on `|t| = q R`.
+        let base = Float::with_val_64(work, 256).ln()
+            - cnum::working_epsilon(work).ln()
+            - (Float::with_val_64(work, 1) - ratio).ln() * 2u32;
+        let mut order = Float::with_val_64(work, &base / &x).ceil();
+        loop {
+            if !order.is_finite() {
+                return Err("its length is not finite".into());
+            }
+            let next = ((order.clone() + 1u32).ln() + &base) / &x;
+            let next = next.ceil();
+            if next <= order {
+                break;
+            }
+            order = next;
+        }
+        order
+            .to_integer()
+            .and_then(|order| order.to_usize())
+            .ok_or_else(|| "its length is not addressable".into())
+    }
+
+    /// The coefficients, the radius of the disk of `psi` and the radius on
+    /// which the series is summed.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        &self,
+        ln_b: &Complex,
+        l: &Complex,
+        lambda: &Complex,
+        lam_abs: &Float,
+        s1: &Complex,
+        short: &Float,
+        prec: u64,
+        work: u64,
+    ) -> Result<(Vec<Complex>, Float, Float), String> {
+        let size = Float::with_val_round_64(work, s1.abs_ref(), Round::Down).0;
+        let square = Float::with_val_round_64(work, lam_abs.square_ref(), Round::Up).0;
+        let disk = Float::with_val_round_64(work, &size / &square, Round::Down).0;
+        let ratio = Float::with_val_64(work, -&self.x).exp();
+        let reach = Float::with_val_round_64(work, &disk * &ratio, Round::Down).0;
+        if !reach.is_finite() || reach <= Float::with_val_64(work, short * 4u32) {
+            return Err("it reaches no further than the short one".into());
+        }
+        let order = self.order(work)?;
+        if cnum::verbose() {
+            eprintln!(
+                "Poincare setup: long series of {order} terms on {} of its disk of radius {}",
+                DisplayFloat(&ratio),
+                DisplayFloat(&disk)
+            );
+        }
+        let inverse = poincare_long_coefficients(ln_b, lambda, work, order)?;
+        // The coefficients are as good as the functional equation of their
+        // series where it is summed.
+        let tolerance = cnum::working_epsilon(prec) >> 10u32;
+        let pi = Float::with_val_64(work, Constant::Pi);
+        let unit = Complex::with_val_64(work, s1 / &size);
+        for part in 0..8u32 {
+            let angle = Float::with_val_64(work, &pi * part) / 4u32;
+            let phase = Complex::with_val_64(work, (angle.cos_ref(), angle.sin_ref()));
+            let outer = Complex::with_val_64(work, &unit * phase) * &reach;
+            let inner = Complex::with_val_64(work, &outer * lambda);
+            let (value, _) = eval_poincare_series(&inverse, &outer, &disk, true, work)?;
+            let (image, _) = eval_poincare_series(&inverse, &inner, &disk, true, work)?;
+            let exponent = Complex::with_val_64(work, value * ln_b);
+            let expected =
+                Complex::with_val_64(work, cnum::checked_exp(&exponent, work)? - 1u32) * l;
+            let miss = cnum::abs(&Complex::with_val_64(work, &image - expected), work);
+            if !miss.is_finite()
+                || miss > Float::with_val_64(work, &tolerance * cnum::abs(&image, work))
+            {
+                return Err("its functional equation fails where it is summed".into());
+            }
+        }
+        Ok((inverse, disk, reach))
+    }
+}
+
+/// `poincare_coefficients` with one product per term of the convolution.
+fn poincare_long_coefficients(
+    ln_b: &Complex,
+    lambda: &Complex,
+    prec: u64,
+    order: usize,
+) -> Result<Vec<Complex>, String> {
+    cnum::check_complex_storage((order as u128 + 1) * 3, prec)?;
+    let mut inverse = vec![cnum::zero(prec), cnum::one(prec)];
+    // weighted[k] = k c_k, scaled[k] = c_k lambda^k.
+    let mut weighted = inverse.clone();
+    let mut scaled = vec![cnum::zero(prec), lambda.clone()];
+    let mut power = lambda.clone();
+    for n in 2..=order {
+        power *= lambda;
+        let mut sum = cnum::zero(prec);
+        for k in 1..n {
+            sum += &weighted[k] * &scaled[n - k];
+        }
+        let denominator = Complex::with_val_64(prec, &power - lambda) * Integer::from(n);
+        if cnum::is_zero(&denominator) || cnum::is_zero(&power) {
+            return Err(format!("Poincare resonance at order {n}"));
+        }
+        let coefficient = Complex::with_val_64(prec, sum * ln_b) / denominator;
+        if !cnum::is_finite(&coefficient) {
+            return Err(format!("Poincare coefficient {n} exceeded MPFR's range"));
+        }
+        if cnum::verbose() && (n.is_power_of_two() || n == order) {
+            eprintln!("Poincare coefficients: {n}/{order}");
+        }
+        weighted.push(Complex::with_val_64(prec, &coefficient * Integer::from(n)));
+        scaled.push(Complex::with_val_64(prec, &coefficient * &power));
+        inverse.push(coefficient);
+    }
+    Ok(inverse)
+}
+
 fn setup_poincare(b: &Complex, fp: &FixedPointData, prec: u64) -> Result<SchroderState, String> {
+    if let Some(plan) = LongSeries::plan(b, fp, prec)? {
+        match setup_poincare_with(b, fp, prec, Some(&plan)) {
+            Ok(state) => return Ok(state),
+            Err(reason) => {
+                if cnum::verbose() {
+                    eprintln!("Poincare setup: long series unavailable ({reason})");
+                }
+            }
+        }
+    }
+    setup_poincare_with(b, fp, prec, None)
+}
+
+fn setup_poincare_with(
+    b: &Complex,
+    fp: &FixedPointData,
+    prec: u64,
+    plan: Option<&LongSeries>,
+) -> Result<SchroderState, String> {
     let gap = Float::with_val_64(prec, 1) - &fp.lambda_abs;
-    let gain = -gap.ln() * 4 + Float::with_val_64(prec, prec).ln() * 2;
+    let mut gain = -gap.ln() * 4 + Float::with_val_64(prec, prec).ln() * 2;
+    if let Some(plan) = plan {
+        gain += &plan.gain;
+    }
     let work_prec =
         cnum::conditioned_precision(&gain, &cnum::working_epsilon(prec), prec)?.unwrap_or(prec);
     let fp_prec = work_prec
@@ -481,7 +721,8 @@ fn setup_poincare(b: &Complex, fp: &FixedPointData, prec: u64) -> Result<Schrode
     let mut coordinate = displacement.clone();
     let local_goal = cnum::working_epsilon(work_prec) * cnum::abs(&displacement, work_prec);
     loop {
-        let (value, derivative) = eval_poincare_series(&inverse, &coordinate, &radius, work_prec)?;
+        let (value, derivative) =
+            eval_poincare_series(&inverse, &coordinate, &radius, false, work_prec)?;
         let residual = Complex::with_val_64(work_prec, value - &displacement);
         let error = cnum::abs(&residual, work_prec);
         if error <= local_goal {
@@ -498,7 +739,9 @@ fn setup_poincare(b: &Complex, fp: &FixedPointData, prec: u64) -> Result<Schrode
             if candidate == coordinate {
                 return Err("Poincare normalization stalled at working precision".into());
             }
-            if let Ok((value, _)) = eval_poincare_series(&inverse, &candidate, &radius, work_prec) {
+            if let Ok((value, _)) =
+                eval_poincare_series(&inverse, &candidate, &radius, false, work_prec)
+            {
                 if cnum::abs(
                     &Complex::with_val_64(work_prec, value - &displacement),
                     work_prec,
@@ -511,6 +754,14 @@ fn setup_poincare(b: &Complex, fp: &FixedPointData, prec: u64) -> Result<Schrode
             damping /= 2;
         }
     }
+    let s1 = Complex::with_val_64(work_prec, coordinate / power);
+    let (inverse, radius, target) = match plan {
+        Some(plan) => plan.build(&ln_b, &l, &lambda, &lam_abs, &s1, &radius, prec, work_prec)?,
+        None => {
+            let target = Float::with_val_64(work_prec, &radius / 4);
+            (inverse, radius, target)
+        }
+    };
     let mut state = SchroderState {
         base: b.clone(),
         l,
@@ -518,10 +769,11 @@ fn setup_poincare(b: &Complex, fp: &FixedPointData, prec: u64) -> Result<Schrode
         ln_b,
         lam_abs,
         sigma_inv: inverse,
-        s1: Complex::with_val_64(work_prec, coordinate / power),
-        safe_radius: Float::with_val_64(work_prec, &radius / 4),
-        sigma_inner_radius: Float::with_val_64(work_prec, &radius / 4),
+        s1,
+        safe_radius: target.clone(),
+        sigma_inner_radius: target,
         inverse_radius: Some(radius),
+        univalent: plan.is_some(),
         prec: work_prec,
     };
     let anchor = eval_schroder_raw(&state, &cnum::zero(work_prec))?;
@@ -647,8 +899,14 @@ fn eval_schroder_raw(state: &SchroderState, h: &Complex) -> Result<Complex, Stri
 
 fn eval_inverse(state: &SchroderState, coordinate: &Complex) -> Result<Complex, String> {
     match &state.inverse_radius {
-        Some(radius) => eval_poincare_series(&state.sigma_inv, coordinate, radius, state.prec)
-            .map(|(value, _)| value),
+        Some(radius) => eval_poincare_series(
+            &state.sigma_inv,
+            coordinate,
+            radius,
+            state.univalent,
+            state.prec,
+        )
+        .map(|(value, _)| value),
         None => eval_series_checked(&state.sigma_inv, coordinate, state.prec),
     }
 }
@@ -718,11 +976,16 @@ fn eval_schroder_with_conditioning(
     // This handles bases near η where σ̃⁻¹ has a small effective radius even
     // when sigma_inner_radius reports otherwise.
     let mut initial_target = state.sigma_inner_radius.clone().min(&state.safe_radius);
-    if state
-        .inverse_radius
-        .as_ref()
-        .is_none_or(|radius| log_t_abs < radius.clone().ln())
-    {
+    // A long series is summed up to its target, a short one inside its disk.
+    let direct = if state.univalent {
+        log_t_abs <= initial_target.clone().ln()
+    } else {
+        state
+            .inverse_radius
+            .as_ref()
+            .is_none_or(|radius| log_t_abs < radius.clone().ln())
+    };
+    if direct {
         match inverse_coordinate(state, h) {
             Ok(t) => {
                 initial_target = initial_target.min(&cnum::abs(&t, prec));
@@ -741,8 +1004,12 @@ fn eval_schroder_with_conditioning(
         }
     }
 
-    let mut effective_target: Float = initial_target / 2;
-    let (k, mut f, mut log_amplification) = loop {
+    let mut effective_target: Float = if state.univalent {
+        initial_target
+    } else {
+        initial_target / 2
+    };
+    let (k, f, log_amplification) = loop {
         if !effective_target.is_finite() || effective_target <= 0 {
             return Err("Schröder height-shift target exceeded MPFR's exponent range".into());
         }
@@ -808,71 +1075,787 @@ fn eval_schroder_with_conditioning(
         Ok(())
     };
     let forward_log = k > 0;
-    let shifts = k.abs();
-    let mut step = Integer::new();
+    let shifts = k.clone().abs();
     let log_ln_b = cnum::log_magnitude(&state.ln_b, prec);
-    let mut jumps = OrbitJumps::new(&state.ln_b, &state.l, forward_log, prec)?;
-    let mut jump_count = Integer::new();
-    let mut updates = Integer::new();
-    let mut jump_error_log = Float::new_64(prec);
-    while shifts > step {
-        if cnum::verbose() && (step == 0 || step.is_divisible_u(1024)) {
-            eprintln!(
-                "schröder unwind: step {step} of {:.8}",
-                DisplayFloat(&shifts)
+    // A real base with a positive multiplier keeps the real heights above -1
+    // on the positive real axis: none of their logarithms can change branch.
+    let real_curve = h.imag().is_zero()
+        && state.ln_b.imag().is_zero()
+        && state.l.imag().is_zero()
+        && *state.ln_b.real() > 0
+        && *state.l.real() > 0;
+    // `F(h + k + offset)` and `|dF/ds|` there, at the top of the chain.
+    let top = |offset: &Float| -> Result<Sample, String> {
+        let mut height = Complex::with_val_64(prec, h + offset);
+        if height.imag().is_zero() {
+            // A sample within the rounding of that sum of an integer height
+            // is taken there: a real base has real values at those heights,
+            // and its Taylor jumps need them exactly real.
+            let whole = height.real().clone().round();
+            let scale = whole.clone().abs().max(&Float::with_val_64(prec, 1));
+            let shift =
+                usize::try_from(prec.saturating_sub(8)).map_err(|_| "precision overflow")?;
+            if Float::with_val_64(prec, &whole - height.real()).abs() <= scale >> shift {
+                height = Complex::with_val_64(prec, whole);
+            }
+        }
+        let coordinate = if has_real_negative_multiplier(state) {
+            real_negative_coordinate(state, &height, &k)?
+        } else {
+            inverse_coordinate(state, &Complex::with_val_64(prec, &height + &k))?
+        };
+        match &state.inverse_radius {
+            Some(radius) => {
+                let (displacement, slope) = eval_poincare_series(
+                    &state.sigma_inv,
+                    &coordinate,
+                    radius,
+                    state.univalent,
+                    prec,
+                )?;
+                let rate = Complex::with_val_64(prec, slope * &coordinate) * &state.ln_lambda;
+                Ok((
+                    Complex::with_val_64(prec, &state.l + displacement),
+                    Some(cnum::abs(&rate, prec)),
+                ))
+            }
+            None => {
+                let displacement = eval_series_checked(&state.sigma_inv, &coordinate, prec)?;
+                Ok((Complex::with_val_64(prec, &state.l + displacement), None))
+            }
+        }
+    };
+    let traced = forward_log && !real_curve;
+    let start = (f, log_amplification);
+    let start_speed = if traced {
+        top(&Float::new_64(prec))?.1
+    } else {
+        None
+    };
+    let mut offsets = Trail::offsets(state);
+    let mut anchor = if traced { Anchor::new(h, prec) } else { None };
+    let mut own = None;
+    if let Some(anchor) = &anchor {
+        if !offsets.contains(&anchor.offset) {
+            offsets.push(anchor.offset.clone());
+            offsets.sort_by(|a, b| a.partial_cmp(b).expect("finite trail offsets"));
+            own = Some(anchor.offset.clone());
+        }
+    }
+    // The integer tower checks every branch of a real height above -1, the
+    // final value included (see `Anchor`): the distances of neighbouring
+    // samples are then judged only once it has refuted a chain. Other heights
+    // depend on that judgement.
+    let mut judged = anchor.as_ref().is_none_or(|anchor| anchor.ceiling < 0);
+    loop {
+        let (mut f, mut log_amplification) = start.clone();
+        let mut speed = start_speed.clone();
+        let mut step = Integer::new();
+        // A long series starts its chains far from the fixed point.
+        let mut jumps = if state.univalent {
+            None
+        } else {
+            OrbitJumps::new(&state.ln_b, &state.l, forward_log, prec)?
+        };
+        let mut jump_count = Integer::new();
+        let mut updates = Integer::new();
+        let mut jump_error_log = Float::new_64(prec);
+        let mut recurrence = cnum::Recurrence::<()>::new();
+        let mut trail: Option<Trail> = None;
+        if traced && jumps.is_some() {
+            // The samples follow every Taylor jump from the top.
+            let built = Trail::new(&offsets, &top)?;
+            if let Some(anchor) = &mut anchor {
+                let left = shifts
+                    .to_integer()
+                    .ok_or("Schröder height shift is not finite")?;
+                if anchor.holds(&built, &left, state)? == Some(false) {
+                    return Err(Anchor::SERIES.into());
+                }
+            }
+            trail = Some(built);
+        }
+        let mut missing: Vec<Float> = Vec::new();
+        // An error made at one step grows by the product of the later
+        // factors: `net` is the logarithm of the product of all factors so
+        // far, `lowest` its smallest value on the way, `expanding` the sum of
+        // the factors above 1 alone.
+        let mut net = Float::new_64(prec);
+        let mut lowest = Float::new_64(prec);
+        let mut expanding = Float::new_64(prec);
+        // The chain is repeated once samples are missing: go on collecting
+        // them for as many steps again, no further.
+        let mut flagged: Option<Integer> = None;
+        while shifts > step {
+            if !missing.is_empty() {
+                let since = flagged.get_or_insert_with(|| step.clone());
+                if step > Integer::from(&*since * 2u32) + 64u32 {
+                    break;
+                }
+            }
+            if cnum::verbose() && (step == 0 || step.is_divisible_u(1024)) {
+                eprintln!(
+                    "schröder unwind: step {step} of {:.8}",
+                    DisplayFloat(&shifts)
+                );
+            }
+            let mut jump = match &mut jumps {
+                Some(cache) => {
+                    let remaining = Float::with_val_round_64(prec, &shifts - &step, Round::Down).0;
+                    cache.advance(&f, Some(&remaining))?
+                }
+                None => None,
+            };
+            if trail.is_some() {
+                // The samples have to make the jump as well. Where one of
+                // them cannot, shorter jumps are tried, and after the
+                // shortest the chain goes on in single steps.
+                let mut refused = false;
+                while let Some(candidate) = &jump {
+                    let mut followed = trail.clone();
+                    let made = followed.as_mut().is_some_and(|samples| {
+                        samples.descend(&candidate.steps, &mut jumps, state).is_ok()
+                    });
+                    if made {
+                        trail = followed;
+                        break;
+                    }
+                    refused = true;
+                    let shorter = Float::with_val_64(prec, Integer::from(&candidate.steps >> 1u32));
+                    jump = match &mut jumps {
+                        Some(cache) => cache.advance(&f, Some(&shorter))?,
+                        None => None,
+                    };
+                }
+                if refused && jump.is_none() {
+                    jumps = None;
+                }
+            }
+            if let Some(jump) = jump {
+                check_chain(&f, &step)?;
+                let input_scale = cnum::log_magnitude(&f, prec).max(&Float::new_64(prec));
+                f = jump.value;
+                check_chain(&f, &step)?;
+                let output_scale = cnum::log_magnitude(&f, prec).max(&Float::new_64(prec));
+                let amplification = jump.derivative.clone().ln() + input_scale - &output_scale;
+                net += &amplification;
+                lowest = lowest.min(&net);
+                expanding += amplification.max(&Float::new_64(prec));
+                let error_log = jump.error.ln() - cnum::working_epsilon(prec).ln() - output_scale;
+                jump_error_log = jump_error_log.max(&error_log);
+                if let Some(speed) = &mut speed {
+                    *speed *= &jump.derivative;
+                }
+                step += jump.steps;
+                jump_count += 1;
+                recurrence.reset();
+                if cnum::verbose() && jump_count.is_power_of_two() {
+                    eprintln!("schroder unwind: {jump_count} Taylor jumps, {step} steps");
+                }
+            } else if forward_log {
+                check_chain(&f, &step)?;
+                let input_scale = -cnum::log_magnitude(&f, prec).min(&Float::new_64(prec));
+                let ln_f = cnum::ln_complex(&f, prec);
+                let mut next = Complex::with_val_64(prec, &ln_f / &state.ln_b);
+                // Where |lambda^(h+2)| < 1 the Schroder coordinate of the height
+                // lies inside the first singularity of the inverse: the
+                // tetration is single-valued there, and continuity along the
+                // real shifts of the height fixes the branch. Outside, the
+                // logarithms are the principal ones.
+                let beyond = Complex::with_val_64(prec, h + &shifts) - &step + 1u32;
+                let inside = Complex::with_val_64(prec, beyond * &state.ln_lambda)
+                    .real()
+                    .is_sign_negative();
+                let continuous = traced && inside;
+                if continuous {
+                    let left = (shifts.clone() - &step)
+                        .to_integer()
+                        .ok_or("Schröder height shift is not finite")?;
+                    if trail.is_none() {
+                        let mut built = Trail::new(&offsets, &top)?;
+                        built.descend(&step, &mut jumps, state)?;
+                        if let Some(anchor) = &mut anchor {
+                            if anchor.holds(&built, &left, state)? == Some(false) {
+                                return Err(Anchor::SERIES.into());
+                            }
+                        }
+                        trail = Some(built);
+                    }
+                    if let Some(samples) = &mut trail {
+                        samples.step(&f, &speed, &mut next, &state.ln_b, judged, &mut missing)?;
+                        if let Some(anchor) = &mut anchor {
+                            let left = Integer::from(&left - 1u32);
+                            if anchor.holds(samples, &left, state)? == Some(false) {
+                                anchor.refute(&step, samples, &mut missing)?;
+                                judged = true;
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(speed) = &mut speed {
+                        *speed /= cnum::abs(&f, prec) * cnum::abs(&state.ln_b, prec);
+                    }
+                } else {
+                    trail = None;
+                }
+                let amplification = input_scale
+                    - &log_ln_b
+                    - cnum::log_magnitude(&next, prec).max(&Float::new_64(prec));
+                net += &amplification;
+                lowest = lowest.min(&net);
+                expanding += amplification.max(&Float::new_64(prec));
+                step += 1;
+                let remaining = Float::with_val_64(prec, &shifts - &step)
+                    .to_integer()
+                    .ok_or("Schröder height shift is not finite")?;
+                if !continuous {
+                    if let Some((period, ())) = recurrence.step(&next, || ()) {
+                        // The logarithms repeat exactly: whole periods change nothing.
+                        step += Integer::from(&remaining / &period) * &period;
+                    }
+                    if remaining > 0 && state.ln_b.imag().is_zero() && next.real() == f.real() {
+                        if let Some((settled, growth)) =
+                            settle_imaginary(&next, state.ln_b.real(), &remaining, prec)?
+                        {
+                            // Once the real part is stationary and the imaginary
+                            // part is below its resolution, each logarithm divides
+                            // the latter by `Re(f) ln b`.
+                            net += &growth;
+                            expanding += growth;
+                            f = settled;
+                            step += &remaining;
+                            break;
+                        }
+                    }
+                }
+                f = next;
+            } else {
+                let amplification =
+                    cnum::log_magnitude(&f, prec).max(&Float::new_64(prec)) + &log_ln_b;
+                net += &amplification;
+                lowest = lowest.min(&net);
+                expanding += amplification.max(&Float::new_64(prec));
+                let exponent = Complex::with_val_64(prec, &f * &state.ln_b);
+                f = cnum::checked_exp(&exponent, prec)?;
+                check_chain(&f, &step)?;
+                step += 1;
+            }
+            updates += 1;
+        }
+        if missing.is_empty() {
+            // One level further down, the samples from the anchor up are
+            // continued from the final value itself: the tower value there
+            // confirms its branch. Where that cannot be checked, the samples
+            // have to be judged.
+            let verdict = match (&mut anchor, &trail) {
+                (Some(anchor), Some(samples)) if anchor.ceiling >= 0 => {
+                    let verdict = anchor.confirms(samples, &f, state)?;
+                    if verdict == Some(false) {
+                        anchor.refute(&step, samples, &mut missing)?;
+                    }
+                    verdict
+                }
+                _ => None,
+            };
+            if verdict != Some(true) && !judged {
+                judged = true;
+                if missing.is_empty() {
+                    continue;
+                }
+            }
+            judged |= verdict == Some(false);
+        }
+        if !missing.is_empty() {
+            // Some neighbours were too far apart to fix a branch: add samples
+            // between them and repeat the chain.
+            offsets.extend(missing);
+            offsets.sort_by(|a, b| a.partial_cmp(b).expect("finite trail offsets"));
+            offsets.dedup();
+            if cnum::verbose() {
+                eprintln!(
+                    "schröder unwind: branches by continuity need {} samples per unit of height",
+                    offsets.len()
+                );
+            }
+            continue;
+        }
+        check_chain(&f, &step)?;
+        // The largest growth of an error made at any step, with one rounding
+        // per step; never more than the sum of the expanding steps.
+        let rounded = Float::with_val_64(prec, Integer::from(&updates + 1u32)).ln();
+        log_amplification += expanding.min(&(net - lowest + rounded));
+        log_amplification -= cnum::log_magnitude(&f, prec).min(&Float::new_64(prec));
+        if jump_count > 0 {
+            log_amplification += jump_error_log + Float::with_val_64(prec, updates + 1).ln();
+            if matches!(&jumps, Some(OrbitJumps::Complex(_))) {
+                // Complex error disks must protect each returned component, not just |F|.
+                log_amplification += component_conditioning(&f, prec);
+            }
+        }
+        if let Some(own) = &own {
+            offsets.retain(|offset| offset != own);
+        }
+        Trail::remember(state, &offsets);
+        return Ok((f, log_amplification));
+    }
+}
+
+thread_local! {
+    /// The sample offsets that the last logarithm chain of this thread needed,
+    /// with the fixed point of its base: other heights of that base start
+    /// from them instead of finding them again. They only set how densely
+    /// the curve is sampled, never a value.
+    static TRAIL_OFFSETS: std::cell::RefCell<Option<(Complex, Vec<Float>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The integer tower is kept this far up for the check of `Anchor`.
+const ANCHOR_TOWER: usize = 1 << 16;
+
+/// For a real height: the sample of a `Trail` at the next integer above the
+/// chain point. The tetration there is a value of the integer tower, which
+/// the traced branches have to reproduce at every level.
+struct Anchor {
+    offset: Float,
+    /// The height of that sample at the end of the chain.
+    ceiling: Integer,
+    /// `b^^m` for `m = -1, 0, 1, ...`.
+    tower: Vec<Complex>,
+    /// The step of the last disagreement.
+    refuted: Option<Integer>,
+}
+
+impl Anchor {
+    const SERIES: &str = "Schröder: the series of this base contradicts its integer tower";
+
+    fn new(h: &Complex, prec: u64) -> Option<Anchor> {
+        if !h.imag().is_zero() {
+            return None;
+        }
+        let mut ceiling = h.real().clone().ceil();
+        if ceiling == *h.real() {
+            ceiling += 1u32;
+        }
+        let offset = Float::with_val_64(prec, &ceiling - h.real());
+        if !offset.is_finite() || offset <= 0 || offset > 1 {
+            return None;
+        }
+        Some(Anchor {
+            offset,
+            ceiling: ceiling.to_integer()?,
+            tower: Vec::new(),
+            refuted: None,
+        })
+    }
+
+    fn index(&self, trail: &Trail) -> Option<usize> {
+        trail
+            .offsets
+            .iter()
+            .position(|offset| *offset == self.offset)
+    }
+
+    /// Whether the samples `left` levels above the end of the chain hold the
+    /// value of the integer tower; `None` above the part of the tower kept.
+    fn holds(
+        &mut self,
+        trail: &Trail,
+        left: &Integer,
+        state: &SchroderState,
+    ) -> Result<Option<bool>, String> {
+        let Some(index) = self.index(trail) else {
+            return Ok(None);
+        };
+        let level = Integer::from(&self.ceiling + left);
+        self.matches(&trail.values[index], &level, state)
+    }
+
+    /// As `holds`, one level below the end of the chain, whose final value
+    /// `point` is the sample at offset 1 there: a wrong branch of `point`
+    /// would move the sample at the anchor with it.
+    fn confirms(
+        &mut self,
+        trail: &Trail,
+        point: &Complex,
+        state: &SchroderState,
+    ) -> Result<Option<bool>, String> {
+        let Some(index) = self.index(trail) else {
+            return Ok(None);
+        };
+        let value = trail.below(point, index, &state.ln_b)?;
+        let level = Integer::from(&self.ceiling - 1u32);
+        self.matches(&value, &level, state)
+    }
+
+    /// A chain that the tower has refuted is repeated with twice the samples,
+    /// unless the chain before it failed no earlier.
+    fn refute(
+        &mut self,
+        step: &Integer,
+        trail: &Trail,
+        missing: &mut Vec<Float>,
+    ) -> Result<(), String> {
+        if self.refuted.as_ref().is_some_and(|last| step <= last) {
+            return Err(
+                "Schröder: the logarithm branches of this height contradict the integer tower"
+                    .into(),
             );
         }
-        let jump = match &mut jumps {
-            Some(cache) => {
-                let remaining = Float::with_val_round_64(prec, &shifts - &step, Round::Down).0;
-                cache.advance(&f, Some(&remaining))?
-            }
-            None => None,
+        if cnum::verbose() {
+            eprintln!("schröder unwind: step {step} contradicts the integer tower");
+        }
+        self.refuted = Some(step.clone());
+        trail.halve(missing)
+    }
+
+    /// Whether `value` is `b^^level`.
+    fn matches(
+        &mut self,
+        value: &Complex,
+        level: &Integer,
+        state: &SchroderState,
+    ) -> Result<Option<bool>, String> {
+        let prec = state.prec;
+        // The tower starts at `b^^(-1)`.
+        let Some(position) = Integer::from(level + 1u32).to_usize() else {
+            return Ok(None);
         };
-        if let Some(jump) = jump {
-            check_chain(&f, &step)?;
-            let input_scale = cnum::log_magnitude(&f, prec).max(&Float::new_64(prec));
-            f = jump.value;
-            check_chain(&f, &step)?;
-            let output_scale = cnum::log_magnitude(&f, prec).max(&Float::new_64(prec));
-            let amplification = jump.derivative.ln() + input_scale - &output_scale;
-            log_amplification += amplification.max(&Float::new_64(prec));
-            let error_log = jump.error.ln() - cnum::working_epsilon(prec).ln() - output_scale;
-            jump_error_log = jump_error_log.max(&error_log);
-            step += jump.steps;
-            jump_count += 1;
-            if cnum::verbose() && jump_count.is_power_of_two() {
-                eprintln!("schroder unwind: {jump_count} Taylor jumps, {step} steps");
-            }
-        } else if forward_log {
-            check_chain(&f, &step)?;
-            let input_scale = -cnum::log_magnitude(&f, prec).min(&Float::new_64(prec));
-            let ln_f = cnum::ln_complex(&f, prec);
-            f = Complex::with_val_64(prec, &ln_f / &state.ln_b);
-            let amplification =
-                input_scale - &log_ln_b - cnum::log_magnitude(&f, prec).max(&Float::new_64(prec));
-            log_amplification += amplification.max(&Float::new_64(prec));
-            step += 1;
+        if position >= ANCHOR_TOWER {
+            return Ok(None);
+        }
+        if self.tower.is_empty() {
+            self.tower.push(cnum::zero(prec));
+        }
+        while self.tower.len() <= position {
+            let exponent =
+                Complex::with_val_64(prec, &self.tower[self.tower.len() - 1] * &state.ln_b);
+            self.tower.push(cnum::checked_exp(&exponent, prec)?);
+        }
+        let apart = cnum::abs(
+            &Complex::with_val_64(prec, value - &self.tower[position]),
+            prec,
+        );
+        // Neighbouring branches lie `2 pi / |ln b|` apart.
+        let spacing = Float::with_val_64(prec, Constant::Pi) / cnum::abs(&state.ln_b, prec);
+        Ok(Some(apart * 2u32 <= spacing))
+    }
+}
+
+/// A value of the tetration and, where known, `|dF/ds|` along real shifts `s`.
+type Sample = (Complex, Option<Float>);
+
+/// Samples of the curve `s -> F(h + s)`, `s` real, over one unit of height
+/// above the current point of a logarithm chain: offsets `0 < u <= 1`, the
+/// values there and, where known, the speeds `|dF/ds|`.
+///
+/// The tetration is continuous along that curve, so the logarithm of every
+/// sample lies on the branch next to that of its neighbour, and the sample at
+/// `u = 1` of the level below is the chain point of this level, which takes
+/// no logarithm. This fixes the branches without assuming that they are the
+/// principal ones: next to the Shell-Thron boundary the curve winds around 0.
+#[derive(Clone)]
+struct Trail {
+    offsets: Vec<Float>,
+    values: Vec<Complex>,
+    speeds: Vec<Option<Float>>,
+}
+
+impl Trail {
+    /// Eight samples per unit of height, or those remembered for this base.
+    fn offsets(state: &SchroderState) -> Vec<Float> {
+        let prec = state.prec;
+        let remembered = TRAIL_OFFSETS.with(|kept| {
+            kept.borrow().as_ref().and_then(|(fixed, offsets)| {
+                let apart = cnum::abs(&Complex::with_val_64(prec, fixed - &state.l), prec);
+                (apart <= cnum::abs(&state.l, prec) >> 20u32).then(|| offsets.clone())
+            })
+        });
+        match remembered {
+            Some(offsets) => offsets
+                .iter()
+                .map(|offset| Float::with_val_64(prec, offset))
+                .collect(),
+            None => (1..=8u32)
+                .map(|part| Float::with_val_64(prec, part) >> 3u32)
+                .collect(),
+        }
+    }
+
+    fn remember(state: &SchroderState, offsets: &[Float]) {
+        if offsets.len() > 8 {
+            TRAIL_OFFSETS.with(|kept| {
+                *kept.borrow_mut() = Some((state.l.clone(), offsets.to_vec()));
+            });
+        }
+    }
+
+    fn new(
+        offsets: &[Float],
+        top: &dyn Fn(&Float) -> Result<Sample, String>,
+    ) -> Result<Trail, String> {
+        let mut values = Vec::with_capacity(offsets.len());
+        let mut speeds = Vec::with_capacity(offsets.len());
+        for offset in offsets {
+            let (value, speed) = top(offset)?;
+            values.push(value);
+            speeds.push(speed);
+        }
+        Ok(Trail {
+            offsets: offsets.to_vec(),
+            values,
+            speeds,
+        })
+    }
+
+    /// Take every sample `steps` logarithms down without its neighbours: by
+    /// Taylor jumps, or by principal logarithms where the sample is closer to
+    /// the fixed point than half the distance of the latter from the cut.
+    fn descend(
+        &mut self,
+        steps: &Integer,
+        jumps: &mut Option<OrbitJumps>,
+        state: &SchroderState,
+    ) -> Result<(), String> {
+        let prec = state.prec;
+        let reach = if state.l.real().is_sign_negative() {
+            Float::with_val_64(prec, state.l.imag().abs_ref())
         } else {
-            let amplification = cnum::log_magnitude(&f, prec).max(&Float::new_64(prec)) + &log_ln_b;
-            log_amplification += amplification.max(&Float::new_64(prec));
-            let exponent = Complex::with_val_64(prec, &f * &state.ln_b);
-            f = cnum::checked_exp(&exponent, prec)?;
-            check_chain(&f, &step)?;
-            step += 1;
+            cnum::abs(&state.l, prec)
+        };
+        let ln_b_size = cnum::abs(&state.ln_b, prec);
+        for (value, speed) in self.values.iter_mut().zip(self.speeds.iter_mut()) {
+            let mut left = steps.clone();
+            while left > 0 {
+                let jump = match jumps {
+                    Some(cache) => cache.advance(value, Some(&Float::with_val_64(prec, &left)))?,
+                    None => None,
+                };
+                if let Some(jump) = jump {
+                    if let Some(speed) = speed {
+                        *speed *= &jump.derivative;
+                    }
+                    *value = jump.value;
+                    left -= jump.steps;
+                    continue;
+                }
+                let distance = cnum::abs(&Complex::with_val_64(prec, &*value - &state.l), prec);
+                if distance * 2u32 > reach {
+                    return Err(
+                        "Schröder: a logarithm branch cannot be fixed by continuity after Taylor jumps"
+                            .into(),
+                    );
+                }
+                if let Some(speed) = speed {
+                    *speed /= cnum::abs(value, prec) * &ln_b_size;
+                }
+                *value = cnum::ln_complex(value, prec) / &state.ln_b;
+                left -= 1;
+            }
         }
-        updates += 1;
+        Ok(())
     }
-    check_chain(&f, &step)?;
-    log_amplification -= cnum::log_magnitude(&f, prec).min(&Float::new_64(prec));
-    if jump_count > 0 {
-        log_amplification += jump_error_log + Float::with_val_64(prec, updates + 1).ln();
-        if matches!(&jumps, Some(OrbitJumps::Complex(_))) {
-            // Complex error disks must protect each returned component, not just |F|.
-            log_amplification += component_conditioning(&f, prec);
+
+    /// The sample at `index` one level further down, continued from the
+    /// chain point `point` of this level.
+    fn below(&self, point: &Complex, index: usize, ln_b: &Complex) -> Result<Complex, String> {
+        let prec = point.prec_64().0;
+        let mut value = point.clone();
+        for position in (index..self.values.len() - 1).rev() {
+            if cnum::is_zero(&self.values[position]) {
+                return Err("Schröder: logarithm of zero while tracing a branch".into());
+            }
+            let mut candidate = cnum::ln_complex(&self.values[position], prec) / ln_b;
+            continue_branch(&mut candidate, &value, ln_b, prec)?;
+            value = candidate;
         }
+        Ok(value)
     }
-    Ok((f, log_amplification))
+
+    /// Offsets halfway between all neighbours.
+    fn halve(&self, missing: &mut Vec<Float>) -> Result<(), String> {
+        let prec = self.offsets[0].prec_64();
+        let shift = usize::try_from(prec / 2).map_err(|_| "precision overflow")?;
+        let floor = Float::with_val_64(prec, 1) >> shift;
+        let mut below = Float::new_64(prec);
+        let mut added = false;
+        for offset in &self.offsets {
+            let gap = Float::with_val_64(prec, offset - &below);
+            if gap >= floor {
+                missing.push(Float::with_val_64(prec, &below + gap / 2u32));
+                added = true;
+            }
+            below = offset.clone();
+        }
+        if !added {
+            return Err(
+                "Schröder: the logarithm branches of this height cannot be fixed by continuity"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// One logarithm of the chain point `point` (speed `speed`), whose
+    /// principal value divided by `ln b` is `next`: moves `next` and the
+    /// samples to their continuous branches. With `judged`, offsets between
+    /// neighbours that are too far apart to decide are added to `missing`.
+    fn step(
+        &mut self,
+        point: &Complex,
+        speed: &Option<Float>,
+        next: &mut Complex,
+        ln_b: &Complex,
+        judged: bool,
+        missing: &mut Vec<Float>,
+    ) -> Result<(), String> {
+        let prec = next.prec_64().0;
+        let ln_b_size = cnum::abs(ln_b, prec);
+        let rate = |value: &Complex, speed: &Option<Float>| {
+            speed
+                .as_ref()
+                .map(|speed| Float::with_val_64(prec, speed / cnum::abs(value, prec)))
+        };
+        let last = self.values.len() - 1;
+        let zero = Float::new_64(prec);
+        // The pair of neighbours (`near` below `far`) is close enough when the
+        // argument turns by at most an eighth of a turn between them and the
+        // relative change of the value over their distance stays below 1/2 at
+        // both ends. Otherwise samples are added: next to an end where the
+        // value changes fast (a zero of the tetration is near) at distances
+        // doubling from about 1/(2 rate), and in the middle.
+        let mut judge = |turn: Float,
+                         near: (&Float, Option<Float>),
+                         far: (&Float, Option<Float>)|
+         -> Result<(), String> {
+            let gap = Float::with_val_64(prec, far.0 - near.0);
+            let mut ladder = |from: &Float, rate: &Option<Float>, forward: bool| {
+                let Some(rate) = rate else { return false };
+                if !rate.is_finite() || Float::with_val_64(prec, rate * &gap) * 2u32 <= 1u32 {
+                    return false;
+                }
+                // Powers of two keep the samples of all steps on one grid.
+                let exponent = Float::with_val_64(prec, rate * 2u32).recip().log2().floor();
+                let mut reach = Float::with_val_64(prec, 2).pow(exponent);
+                while reach.is_normal() && Float::with_val_64(prec, &reach * 2u32) <= gap {
+                    let offset = if forward {
+                        Float::with_val_64(prec, from + &reach)
+                    } else {
+                        Float::with_val_64(prec, from - &reach)
+                    };
+                    missing.push(offset);
+                    reach *= 2u32;
+                }
+                true
+            };
+            if !judged {
+                return Ok(());
+            }
+            let fast = ladder(near.0, &near.1, true) | ladder(far.0, &far.1, false);
+            if fast || turn * 8u32 > 1u32 {
+                let shift = usize::try_from(prec / 2).map_err(|_| "precision overflow")?;
+                if gap < (Float::with_val_64(prec, 1) >> shift) {
+                    return Err(
+                        "Schröder: the logarithm branches of this height cannot be fixed by continuity"
+                            .into(),
+                    );
+                }
+                missing.push(Float::with_val_64(prec, near.0 + gap / 2u32));
+            }
+            Ok(())
+        };
+        let mut after = self.values.clone();
+        after[last] = point.clone();
+        for index in (0..last).rev() {
+            if cnum::is_zero(&self.values[index]) {
+                return Err("Schröder: logarithm of zero while tracing a branch".into());
+            }
+            let mut candidate = cnum::ln_complex(&self.values[index], prec) / ln_b;
+            let turn = continue_branch(&mut candidate, &after[index + 1], ln_b, prec)?;
+            judge(
+                turn,
+                (
+                    &self.offsets[index],
+                    rate(&self.values[index], &self.speeds[index]),
+                ),
+                (
+                    &self.offsets[index + 1],
+                    rate(&self.values[index + 1], &self.speeds[index + 1]),
+                ),
+            )?;
+            after[index] = candidate;
+        }
+        let turn = continue_branch(next, &after[0], ln_b, prec)?;
+        judge(
+            turn,
+            (&zero, rate(point, speed)),
+            (&self.offsets[0], rate(&self.values[0], &self.speeds[0])),
+        )?;
+        for index in 0..last {
+            if let Some(speed) = &mut self.speeds[index] {
+                *speed /= cnum::abs(&self.values[index], prec) * &ln_b_size;
+            }
+        }
+        self.speeds[last] = speed.clone();
+        self.values = after;
+        Ok(())
+    }
+}
+
+/// Move `candidate`, a logarithm divided by `ln b`, to the branch nearest to
+/// `reference`. Returns the turn of the argument between the two points whose
+/// logarithms these are, as a fraction of a full turn.
+fn continue_branch(
+    candidate: &mut Complex,
+    reference: &Complex,
+    ln_b: &Complex,
+    prec: u64,
+) -> Result<Float, String> {
+    let turn = Complex::with_val_64(prec, (0, Float::with_val_64(prec, Constant::Pi) * 2u32));
+    let ratio = Complex::with_val_64(prec, reference - &*candidate) * ln_b / &turn;
+    if !cnum::is_finite(&ratio) {
+        return Err("Schröder: logarithm branch selection is not finite".into());
+    }
+    let branch = ratio.real().clone().round();
+    let miss = Float::with_val_64(prec, ratio.real() - &branch).abs();
+    if !branch.is_zero() {
+        *candidate += Complex::with_val_64(prec, &turn * &branch) / ln_b;
+    }
+    Ok(miss)
+}
+
+/// `steps` further logarithms to a real base of a point whose real part `x`
+/// no longer changes and whose imaginary part `y` has `(y/x)^2` below the
+/// working resolution: every step then divides `y` by `x ln b` exactly, to
+/// that resolution. Returns the point and the logarithm of the factor by
+/// which the rounding of the exponent grows; `None` when the point is not of
+/// that kind.
+fn settle_imaginary(
+    point: &Complex,
+    ln_b: &Float,
+    steps: &Integer,
+    prec: u64,
+) -> Result<Option<(Complex, Float)>, String> {
+    let (x, y) = (point.real(), point.imag());
+    if y.is_zero() || !x.is_finite() || *x <= 0 {
+        return Ok(None);
+    }
+    let bits = usize::try_from(prec / 2 + 2).map_err(|_| "precision overflow")?;
+    if y.clone().abs() >= (x.clone() >> bits) {
+        return Ok(None);
+    }
+    let rate = Float::with_val_64(prec, x * ln_b);
+    if !rate.is_finite() || rate <= 1 {
+        return Ok(None);
+    }
+    let exponent = Float::with_val_64(prec, rate.ln() * steps);
+    let settled = Float::with_val_64(prec, y * (-exponent.clone()).exp());
+    if settled.is_zero() || !settled.is_finite() {
+        return Err(
+            "Schröder: the imaginary part at this height is below MPFR's exponent range".into(),
+        );
+    }
+    let growth = exponent.ln().max(&Float::new_64(prec));
+    Ok(Some((Complex::with_val_64(prec, (x, settled)), growth)))
 }
 
 fn inverse_coordinate(state: &SchroderState, h: &Complex) -> Result<Complex, String> {
@@ -1360,8 +2343,68 @@ mod tests {
             safe_radius: Float::with_val_64(prec, 1),
             sigma_inner_radius: Float::with_val_64(prec, 1),
             inverse_radius: None,
+            univalent: false,
             prec,
         }
+    }
+
+    #[test]
+    fn anchor_compares_samples_with_the_integer_tower() {
+        let prec = cnum::digits_to_bits(20);
+        let base = cnum::parse_complex("0.5", "0", prec).unwrap();
+        let fp = match crate::regions::classify(&base, prec).unwrap() {
+            crate::regions::Region::ShellThronInterior(fp) => fp,
+            other => panic!("expected strict attraction, got {other:?}"),
+        };
+        let state = setup_schroder(&base, &fp, prec).unwrap();
+        let height = |re: &str, im: &str| cnum::parse_complex(re, im, prec).unwrap();
+        assert!(Anchor::new(&height("0.25", "0.1"), prec).is_none());
+        let whole = Anchor::new(&height("2", "0"), prec).unwrap();
+        assert_eq!(
+            (whole.offset, whole.ceiling),
+            (Float::with_val_64(prec, 1), Integer::from(3))
+        );
+        let mut anchor = Anchor::new(&height("0.25", "0"), prec).unwrap();
+        assert_eq!(anchor.offset, 0.75);
+        assert_eq!(anchor.ceiling, 1);
+        // Two levels above the end of the chain the anchor sample is b^^3.
+        let half = Float::with_val_64(prec, 0.5);
+        let third = half.clone().pow(half.clone().pow(&half));
+        let mut trail = Trail {
+            offsets: vec![anchor.offset.clone(), Float::with_val_64(prec, 1)],
+            values: vec![Complex::with_val_64(prec, third), cnum::one(prec)],
+            speeds: vec![None, None],
+        };
+        let two = Integer::from(2);
+        assert_eq!(anchor.holds(&trail, &two, &state).unwrap(), Some(true));
+        assert_eq!(
+            anchor
+                .holds(&trail, &Integer::from(ANCHOR_TOWER), &state)
+                .unwrap(),
+            None
+        );
+        let turn = Complex::with_val_64(prec, (0, Float::with_val_64(prec, Constant::Pi) * 2u32));
+        trail.values[0] += turn / &state.ln_b;
+        assert_eq!(anchor.holds(&trail, &two, &state).unwrap(), Some(false));
+        // A refuted chain is repeated with twice the samples, but only while
+        // the contradictions come later and later.
+        let mut missing = Vec::new();
+        anchor
+            .refute(&Integer::from(5), &trail, &mut missing)
+            .unwrap();
+        assert_eq!(
+            missing,
+            [
+                Float::with_val_64(prec, 0.375),
+                Float::with_val_64(prec, 0.875)
+            ]
+        );
+        anchor
+            .refute(&Integer::from(6), &trail, &mut missing)
+            .unwrap();
+        assert!(anchor
+            .refute(&Integer::from(6), &trail, &mut missing)
+            .is_err());
     }
 
     #[test]
@@ -1517,17 +2560,24 @@ mod tests {
         coefficients[1] = cnum::one(prec);
         let coordinate = Complex::with_val_64(prec, cnum::decimal("0.25", prec));
         let (value, derivative) =
-            eval_poincare_series(&coefficients, &coordinate, &radius, prec).unwrap();
+            eval_poincare_series(&coefficients, &coordinate, &radius, false, prec).unwrap();
         assert_eq!(value, coordinate);
         assert_eq!(derivative, cnum::one(prec));
-        assert!(eval_poincare_series(&coefficients[..2], &coordinate, &radius, prec).is_err());
-        assert!(eval_poincare_series(&coefficients, &cnum::one(prec), &radius, prec).is_err());
-        assert!(eval_poincare_series(&coefficients[..1], &coordinate, &radius, prec).is_err());
+        assert!(
+            eval_poincare_series(&coefficients[..2], &coordinate, &radius, false, prec).is_err()
+        );
+        assert!(
+            eval_poincare_series(&coefficients, &cnum::one(prec), &radius, false, prec).is_err()
+        );
+        assert!(
+            eval_poincare_series(&coefficients[..1], &coordinate, &radius, false, prec).is_err()
+        );
         for invalid in [rug::float::Special::Nan, rug::float::Special::Infinity] {
             assert!(eval_poincare_series(
                 &coefficients,
                 &coordinate,
                 &Float::with_val_64(prec, invalid),
+                false,
                 prec
             )
             .is_err());

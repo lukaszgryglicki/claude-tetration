@@ -23,8 +23,11 @@ use cnum::DisplayFloat;
 /// continuation is accepted.
 const LOOSE_BITS: usize = 24;
 
-/// `f(x, t)` and its derivative in `x`, for a path parameter `t`.
-type Forward<'a> = dyn FnMut(&Complex, &Float) -> Result<(Complex, Complex), String> + 'a;
+/// `f(x, t)` and its derivative in `x`, for a path parameter `t`. Without the
+/// flag an estimate of the derivative from earlier values will do; the last
+/// component tells whether the derivative is such an estimate.
+type Forward<'a> =
+    dyn FnMut(&Complex, &Float, bool) -> Result<(Complex, Complex, bool), String> + 'a;
 
 /// Newton iteration for `f(x, t) = goal` from `x`. Intermediate goals stop at a
 /// loose relative residual; a polished goal runs to the residual floor.
@@ -40,44 +43,60 @@ fn newton(
 ) -> Result<(Complex, Float), String> {
     let accept = cnum::abs(goal, prec).max(&Float::with_val_64(prec, 1)) >> LOOSE_BITS;
     let mut x = start.clone();
-    let (mut value, mut slope) = f(&x, t)?;
+    let (mut value, mut slope, mut estimated) = f(&x, t, false)?;
     let mut error = cnum::abs(&Complex::with_val_64(prec, &value - goal), prec);
     loop {
         if error.is_zero() || (!polish && error <= accept) {
             return Ok((x, error));
         }
-        let stalled = |reason: &str| {
-            if error <= accept {
-                Ok((x.clone(), error.clone()))
+        let failure = if cnum::is_zero(&slope) || !cnum::is_finite(&slope) {
+            Some("inverse iteration met a singular derivative".to_string())
+        } else {
+            let step = Complex::with_val_64(prec, &value - goal) / &slope;
+            if !trust(&x, &step) {
+                Some("inverse iteration left its trust region".to_string())
             } else {
-                Err(reason.to_string())
+                let candidate = Complex::with_val_64(prec, &x - &step);
+                match f(&candidate, t, false) {
+                    Err(reason) => Some(reason),
+                    Ok((next_value, next_slope, next_estimated)) => {
+                        let next_error =
+                            cnum::abs(&Complex::with_val_64(prec, &next_value - goal), prec);
+                        // Less than one part in 1024: the iteration has stopped converging.
+                        let slow = Float::with_val_64(
+                            prec,
+                            &error - Float::with_val_64(prec, &error >> 10u32),
+                        );
+                        if next_error >= slow {
+                            if next_error < error && next_error <= accept {
+                                return Ok((candidate, next_error));
+                            }
+                            Some("inverse iteration did not reduce the residual".to_string())
+                        } else {
+                            x = candidate;
+                            value = next_value;
+                            slope = next_slope;
+                            estimated = next_estimated;
+                            error = next_error;
+                            None
+                        }
+                    }
+                }
             }
         };
-        if cnum::is_zero(&slope) || !cnum::is_finite(&slope) {
-            return stalled("inverse iteration met a singular derivative");
-        }
-        let step = Complex::with_val_64(prec, &value - goal) / &slope;
-        if !trust(&x, &step) {
-            return stalled("inverse iteration left its trust region");
-        }
-        let candidate = Complex::with_val_64(prec, &x - &step);
-        let (next_value, next_slope) = match f(&candidate, t) {
-            Ok(pair) => pair,
-            Err(reason) => return stalled(&reason),
-        };
-        let next_error = cnum::abs(&Complex::with_val_64(prec, &next_value - goal), prec);
-        // Less than one part in 1024: the iteration has stopped converging.
-        let slow = Float::with_val_64(prec, &error - Float::with_val_64(prec, &error >> 10u32));
-        if next_error >= slow {
-            if next_error < error && next_error <= accept {
-                return Ok((candidate, next_error));
+        if let Some(reason) = failure {
+            if estimated {
+                // An estimated derivative gets one accurate retry.
+                (value, slope, _) = f(&x, t, true)?;
+                estimated = false;
+                continue;
             }
-            return stalled("inverse iteration did not reduce the residual");
+            return if error <= accept {
+                Ok((x, error))
+            } else {
+                Err(reason)
+            };
         }
-        x = candidate;
-        value = next_value;
-        slope = next_slope;
-        error = next_error;
     }
 }
 
@@ -146,13 +165,40 @@ fn polyline(points: &[Complex], t: &Float, prec: u64) -> Complex {
     Complex::with_val_64(prec, &points[leg] + span * fraction)
 }
 
+/// As `polyline`, but a leg much longer than the distance of its start from
+/// the origin is traversed geometrically: equal steps of `t` change the point
+/// by equal factors.
+fn stretched(points: &[Complex], t: &Float, prec: u64) -> Complex {
+    let last = points.len() - 1;
+    let leg = t
+        .clone()
+        .floor()
+        .to_integer()
+        .and_then(|leg| leg.to_usize())
+        .unwrap_or(last)
+        .min(last.saturating_sub(1));
+    if last == 0 {
+        return points[0].clone();
+    }
+    let mut fraction = Float::with_val_64(prec, t - Float::with_val_64(prec, leg));
+    let span = Complex::with_val_64(prec, &points[leg + 1] - &points[leg]);
+    let near = cnum::abs(&points[leg], prec).max(&Float::with_val_64(prec, 1));
+    let ratio = cnum::abs(&span, prec) / near;
+    if ratio > 2 && fraction < 1 {
+        let grown = (ratio.clone().ln() * &fraction).exp();
+        fraction = (grown - 1u32) / (ratio - 1u32);
+    }
+    Complex::with_val_64(prec, &points[leg] + span * fraction)
+}
+
 fn decimal_loss(log_factor: &Float) -> Result<u64, String> {
     if !log_factor.is_finite() {
         return Err("inverse conditioning is not finite".into());
     }
-    let lost = (log_factor.clone() / Float::with_val_64(64, 10).ln())
+    let prec = log_factor.prec_64();
+    let lost = (log_factor.clone() / Float::with_val_64(prec, 10).ln())
         .ceil()
-        .max(&Float::new_64(64));
+        .max(&Float::new_64(prec));
     lost.to_integer()
         .and_then(|lost| lost.to_u64())
         .ok_or_else(|| "inverse conditioning exceeds the supported precision count".into())
@@ -184,21 +230,33 @@ fn principal(mut w: Complex, prec: u64) -> Complex {
 }
 
 /// The Schroder coordinate of `z` as `(t, steps)`: `sigma(z) = t / lambda^steps`.
+/// The flag marks an orbit that passes 0 within the working precision (its
+/// next point is 1): the height of `z` then rounds to a singular height of the
+/// principal branch, provided every step so far inverts a principal logarithm.
 fn schroder_coordinate(
     state: &schroder::SchroderState,
     z: &Complex,
-) -> Result<(Complex, Integer), String> {
+) -> Result<(Complex, Integer, bool), String> {
     let prec = state.prec;
     let radius = state
         .inverse_radius
         .as_ref()
         .ok_or("super-logarithm needs a strictly attracting regular state")?;
-    let reach = Float::with_val_64(prec, radius / 2u32);
+    // A displacement below an eighth of the radius on which a long series is
+    // summed has its coordinate well inside that radius (Koebe).
+    let reach = if state.univalent {
+        Float::with_val_64(prec, &state.safe_radius / 8u32)
+    } else {
+        Float::with_val_64(prec, radius / 2u32)
+    };
     let mut jumps = OrbitJumps::new(&state.ln_b, &state.l, false, prec)?;
     let mut point = Complex::with_val_64(prec, z);
     let mut steps = Integer::new();
     let mut updates = Integer::new();
     let mut checkpoint = point.clone();
+    let pi = Float::with_val_64(prec, Constant::Pi);
+    let mut principal = true;
+    let mut collapsed = false;
     let coordinate = loop {
         let displacement = Complex::with_val_64(prec, &point - &state.l);
         if cnum::is_zero(&displacement) {
@@ -216,12 +274,31 @@ fn schroder_coordinate(
         if let Some(jump) = jump {
             point = jump.value;
             steps += jump.steps;
+            principal = false;
         } else {
             let exponent = Complex::with_val_64(prec, &point * &state.ln_b);
-            point = cnum::checked_exp(&exponent, prec).map_err(|e| {
+            principal &= *exponent.imag() <= pi && *exponent.imag() > -pi.clone();
+            let next = cnum::exp_or_vanishing(&exponent, prec).map_err(|e| {
                 format!("the orbit of z leaves the basin of the attracting fixed point ({e})")
             })?;
-            steps += 1;
+            match next {
+                Some(next) => {
+                    // An image of z that is 0 at this precision.
+                    collapsed |= principal && steps > 0 && cnum::is_one(&next);
+                    point = next;
+                    steps += 1;
+                }
+                None if principal => {
+                    point = cnum::one(prec);
+                    steps += 2;
+                    collapsed = true;
+                }
+                None => {
+                    return Err(
+                        "the orbit of z vanishes off the principal branch of the tetration".into(),
+                    )
+                }
+            }
         }
         updates += 1;
         if !cnum::is_finite(&point) || point == checkpoint {
@@ -234,27 +311,31 @@ fn schroder_coordinate(
             }
         }
     };
-    Ok((coordinate, steps))
+    Ok((coordinate, steps, collapsed))
 }
 
 /// `Log(sigma(z)/sigma(1)) / Log(lambda)` for a strictly attracting state, and
 /// the logarithm of the factor by which a relative error of `z` (or of the
-/// arithmetic) grows in the relative error of the result.
-fn regular_slog(state: &schroder::SchroderState, z: &Complex) -> Result<(Complex, Float), String> {
+/// arithmetic) grows in the relative error of the result. The flag marks a
+/// height that rounds to a singular integer at every precision.
+fn regular_slog(
+    state: &schroder::SchroderState,
+    z: &Complex,
+) -> Result<(Complex, Float, bool), String> {
     let prec = state.prec;
     let log_anchor = cnum::ln_complex(&state.s1, prec);
-    let raw = |z: &Complex| -> Result<(Complex, Complex, Integer, Float), String> {
-        let (coordinate, steps) = schroder_coordinate(state, z)?;
-        let log_coordinate = cnum::ln_complex(&coordinate, prec);
-        let turns = Complex::with_val_64(prec, &state.ln_lambda * &steps);
+    let measure = |coordinate: &Complex, steps: &Integer| -> (Complex, Float) {
+        let log_coordinate = cnum::ln_complex(coordinate, prec);
+        let turns = Complex::with_val_64(prec, &state.ln_lambda * steps);
         let scale = cnum::abs(&log_coordinate, prec)
             + cnum::abs(&log_anchor, prec)
             + cnum::abs(&turns, prec)
             + 4u32;
         let w = Complex::with_val_64(prec, &log_coordinate - &log_anchor) - turns;
-        Ok((w, coordinate, steps, scale))
+        (w, scale)
     };
-    let (unreduced, coordinate, steps, scale) = raw(z)?;
+    let (coordinate, steps, collapsed) = schroder_coordinate(state, z)?;
+    let (unreduced, scale) = measure(&coordinate, &steps);
     let mut w = principal(unreduced.clone(), prec);
     let real_multiplier = state.l.imag().is_zero() && state.ln_b.imag().is_zero();
     if real_multiplier && coordinate.imag().is_zero() && state.s1.imag().is_zero() {
@@ -271,7 +352,10 @@ fn regular_slog(state: &schroder::SchroderState, z: &Complex) -> Result<(Complex
         };
     }
     if cnum::is_zero(&w) {
-        return Ok((cnum::zero(prec), Float::new_64(prec)));
+        return Ok((cnum::zero(prec), Float::new_64(prec), collapsed));
+    }
+    if collapsed {
+        return Ok((w / &state.ln_lambda, Float::new_64(prec), true));
     }
     let size = cnum::abs(&w, prec);
     let mut loss = Float::with_val_64(prec, &scale / &size).ln();
@@ -281,14 +365,15 @@ fn regular_slog(state: &schroder::SchroderState, z: &Complex) -> Result<(Complex
     let nudge = Float::with_val_64(prec, 1) >> shift;
     if !cnum::is_zero(z) {
         let moved = Complex::with_val_64(prec, z * (nudge.clone() + 1u32));
-        let (other, _, _, _) = raw(&moved)?;
+        let (coordinate, steps, _) = schroder_coordinate(state, &moved)?;
+        let (other, _) = measure(&coordinate, &steps);
         let change = principal(Complex::with_val_64(prec, other - &unreduced), prec);
         let response = cnum::abs(&change, prec) / nudge / &size;
         if response.is_finite() && !response.is_zero() {
             loss = loss.max(&response.ln());
         }
     }
-    Ok((w / &state.ln_lambda, loss.max(&Float::new_64(prec))))
+    Ok((w / &state.ln_lambda, loss.max(&Float::new_64(prec)), false))
 }
 
 /// Solve `psi(t) = displacement` inside the Poincare disk.
@@ -302,7 +387,8 @@ fn invert_poincare(
     let mut best: Option<(Float, Complex)> = None;
     loop {
         let (value, slope) =
-            schroder::eval_poincare_series(&state.sigma_inv, &t, radius, prec).ok()?;
+            schroder::eval_poincare_series(&state.sigma_inv, &t, radius, state.univalent, prec)
+                .ok()?;
         let residual = Complex::with_val_64(prec, value - displacement);
         let error = cnum::abs(&residual, prec);
         if let Some((previous, argument)) = &best {
@@ -337,7 +423,11 @@ fn slog_regular(b: &Complex, z: &Complex, prec: u64, digits: u64) -> Result<Comp
             _ => return Err("super-logarithm: base is not strictly attracting".into()),
         };
         let state = schroder::setup_schroder(&base, &fp, work)?;
-        let (h, loss) = regular_slog(&state, &Complex::with_val_64(work, z))?;
+        let (h, loss, collapsed) = regular_slog(&state, &Complex::with_val_64(work, z))?;
+        if collapsed {
+            // Correctly rounded; the forward value at this singular height does not exist.
+            return Ok(Complex::with_val_64(prec, h));
+        }
         let lost = decimal_loss(&loss)?;
         let conditioned = checked
             .checked_add(lost)
@@ -399,10 +489,27 @@ fn check_inverse(
     Ok(())
 }
 
-fn step_within(limit: f64) -> impl Fn(&Complex, &Complex) -> bool {
+/// `forward`, remembering its values (`seen` holds those already known): the
+/// conditioning estimate and the final check evaluate it at the same points.
+fn remembering<'a>(
+    forward: &'a mut dyn FnMut(&Complex) -> Result<Complex, String>,
+    mut seen: Vec<(Complex, Complex)>,
+) -> impl FnMut(&Complex) -> Result<Complex, String> + 'a {
+    move |x| {
+        if let Some((_, value)) = seen.iter().find(|(point, _)| point == x) {
+            return Ok(value.clone());
+        }
+        let value = forward(x)?;
+        seen.push((x.clone(), value.clone()));
+        Ok(value)
+    }
+}
+
+/// Steps of modulus at most `numerator / denominator`.
+fn step_within(numerator: u32, denominator: u32) -> impl Fn(&Complex, &Complex) -> bool {
     move |_, step| {
-        let size = Float::with_val(64, step.abs_ref());
-        size.is_finite() && size <= limit
+        let size = Float::with_val_64(step.prec_64().0, step.abs_ref());
+        size.is_finite() && size * denominator <= numerator
     }
 }
 
@@ -558,11 +665,15 @@ fn slog_kneser(b: &Complex, z: &Complex, prec: u64, digits: u64) -> Result<Compl
             target.clone(),
         ];
         let (h, _) = follow(
-            &mut |h, _| state.evaluate(h).map(|(value, slope, _)| (value, slope)),
+            &mut |h, _, _| {
+                state
+                    .evaluate(h)
+                    .map(|(value, slope, _)| (value, slope, false))
+            },
             &|t| polyline(&points, t, work),
             start,
             2,
-            &step_within(0.5),
+            &step_within(1, 2),
             work,
         )?;
         let (value, slope, amplification) = state.evaluate(&h)?;
@@ -666,15 +777,58 @@ fn slog_complex(
     loop {
         let work = state.prec;
         let target = Complex::with_val_64(work, z);
-        let points = [cnum::one(work), target.clone()];
-        let (h, _) = follow(
-            &mut |h, _| state.evaluate(h).map(|(value, slope, _)| (value, slope)),
-            &|t| polyline(&points, t, work),
-            cnum::zero(work),
-            1,
-            &step_within(0.5),
-            work,
-        )?;
+        let mut points = vec![cnum::one(work), target.clone()];
+        let fixed = state.fixed_points().0;
+        if fixed.imag().is_zero() && target.imag().is_zero() && target.real() < fixed.real() {
+            // A real fixed point on the segment: bases in the upper half-plane
+            // have it above the real axis, so the limit passes below it.
+            let room = Float::with_val_64(work, 1u32 - fixed.real())
+                .min(&Float::with_val_64(work, fixed.real() - target.real()))
+                / 2u32;
+            points.insert(1, Complex::with_val_64(work, (fixed.real(), -room)));
+        }
+        let walk = |points: &[Complex]| {
+            follow(
+                &mut |h, _, _| {
+                    state
+                        .evaluate(h)
+                        .map(|(value, slope, _)| (value, slope, false))
+                },
+                &|t| stretched(points, t, work),
+                cnum::zero(work),
+                u32::try_from(points.len() - 1).expect("short path"),
+                &step_within(1, 2),
+                work,
+            )
+        };
+        let (h, _) = match walk(&points) {
+            Ok(found) => found,
+            Err(reason) => {
+                // The segment met an image of the cut of the tetration or a
+                // singularity: pass it on one side, then on the other.
+                let half = Complex::with_val_64(work, &target - 1u32) / 2u32;
+                let middle = Complex::with_val_64(work, &half + 1u32);
+                let aside = Complex::with_val_64(work, (-half.imag().clone(), half.real().clone()));
+                let mut found = None;
+                let mut report = reason;
+                for way in [
+                    Complex::with_val_64(work, &middle + &aside),
+                    Complex::with_val_64(work, &middle - &aside),
+                ] {
+                    if cnum::verbose() {
+                        eprintln!("slog: path failed ({report}); passing through {way:.6}");
+                    }
+                    match walk(&[cnum::one(work), way, target.clone()]) {
+                        Ok(detour) => {
+                            found = Some(detour);
+                            break;
+                        }
+                        Err(detour) => report = format!("{report}; detour: {detour}"),
+                    }
+                }
+                found.ok_or(report)?
+            }
+        };
         let (value, slope, amplification) = state.evaluate(&h)?;
         let loss = amplification + cnum::log_magnitude(&value, work)
             - cnum::log_magnitude(&slope, work)
@@ -726,19 +880,20 @@ fn slog_generic(b: &Complex, z: &Complex, prec: u64, digits: u64) -> Result<Comp
         };
         let points = [cnum::one(work), target.clone()];
         let (h, _) = follow(
-            &mut |h, _| {
+            &mut |h, _, _| {
                 let value = forward(h)?;
                 let ahead = forward(&Complex::with_val_64(work, h + &delta))?;
                 let behind = forward(&Complex::with_val_64(work, h - &delta))?;
                 let slope = Complex::with_val_64(work, ahead - behind) / &delta / 2u32;
-                Ok((value, slope))
+                Ok((value, slope, false))
             },
             &|t| polyline(&points, t, work),
             cnum::zero(work),
             1,
-            &step_within(0.5),
+            &step_within(1, 2),
             work,
         )?;
+        let mut forward = remembering(&mut forward, Vec::new());
         let lost = match nudge_loss(&mut forward, &h, &target, digits, work)? {
             Some(lost) => lost,
             None => extra.saturating_add(digits),
@@ -807,16 +962,39 @@ fn real_complex(x: &Float, prec: u64) -> Complex {
     Complex::with_val_64(prec, (x, 0))
 }
 
-/// `ln F_b(h) - ln z` for real `b > 1`, `h > 0`, `z > 1`, with `b = exp(rate)`.
-fn real_defect(rate: &Float, h: &Float, z: &Float, digits: u64) -> Result<Float, String> {
+/// `ln|F_b(h)| - ln|z|` for real `b = exp(rate) > 1`, negated for `h < 0` so
+/// that it increases with the base: `F_b(h)` grows from 1 for `h > 0`, falls
+/// from 1 to 0 for `-1 < h < 0` and rises from `-inf` to 0 for `-2 < h < -1`.
+fn real_defect(
+    rate: &Float,
+    h: &Float,
+    z: &Float,
+    digits: u64,
+    near: &mut Option<kneser::KneserState>,
+) -> Result<Float, String> {
     let prec = cnum::checked_digits_to_bits(digits)?.max(rate.prec_64());
     let base = Float::with_val_64(prec, rate.exp_ref());
-    let value = match dispatch::tetrate(
-        &real_complex(&base, prec),
-        &real_complex(h, prec),
-        prec,
-        digits,
-    ) {
+    let forward = |near: &mut Option<kneser::KneserState>| -> Result<Complex, String> {
+        let (b, height) = (real_complex(&base, prec), real_complex(h, prec));
+        // Above e^(1/e) each solve starts from the solution of the last base.
+        if let Some(last) = near.as_ref() {
+            if base > cnum::eta_upper(prec) && !h.is_integer() {
+                if let Ok(state) = kneser::setup_kneser_near(&b, prec, digits, last) {
+                    let value = kneser::eval_kneser(&state, &height, prec, digits);
+                    *near = Some(state);
+                    return value;
+                }
+            }
+        } else if base > cnum::eta_upper(prec) && !h.is_integer() && !cnum::cauchy_only() {
+            if let Ok(state) = kneser::setup_kneser(&b, prec, digits) {
+                let value = kneser::eval_kneser(&state, &height, prec, digits);
+                *near = Some(state);
+                return value;
+            }
+        }
+        dispatch::tetrate(&b, &height, prec, digits)
+    };
+    let value = match forward(near) {
         Ok(value) => value,
         // A tower beyond MPFR's range is above every finite target.
         Err(error) if error.contains("overflow") => {
@@ -824,18 +1002,29 @@ fn real_defect(rate: &Float, h: &Float, z: &Float, digits: u64) -> Result<Float,
         }
         Err(error) => return Err(error),
     };
-    if !value.imag().is_zero() || *value.real() <= 0 {
-        return Err("super-root: the forward value left the positive real axis".into());
+    if !value.imag().is_zero()
+        || value.real().is_zero()
+        || value.real().is_sign_negative() != z.is_sign_negative()
+    {
+        return Err("super-root: the forward value left the real half-axis of the target".into());
     }
-    Ok(Float::with_val_64(prec, value.real().ln_ref()) - Float::with_val_64(prec, z.ln_ref()))
+    let defect = Float::with_val_64(prec, value.real().abs_ref()).ln()
+        - Float::with_val_64(prec, z.abs_ref()).ln();
+    Ok(if h.is_sign_negative() {
+        -defect
+    } else {
+        defect
+    })
 }
 
-/// The real base `b > 1` with `F_b(h) = z` for real `z > 1`, `h > 0`: forward
-/// values to `coarse` digits while bracketing, to `checked` digits at the end,
-/// at `work` bits (enough to hold `z` and `h` exactly).
+/// The real base `b > 1` with `F_b(h) = z` for real `z > 1`, `h > 0`, for
+/// `0 < z < 1`, `-1 < h < 0` and for `z < 0`, `-2 < h < -1`: forward values
+/// to `coarse` digits while bracketing, to `checked` digits at the end, at
+/// `work` bits (enough to hold `z` and `h` exactly).
 fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Result<Float, String> {
     let z = Float::with_val_64(work, z);
     let h = Float::with_val_64(work, h);
+    let mut near: Option<kneser::KneserState> = None;
     let report = |stage: &str, rate: &Float| {
         if cnum::verbose() {
             eprintln!("sroot: {stage}, ln b = {:.12}", DisplayFloat(rate));
@@ -843,12 +1032,16 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
     };
     // F_z(h) <= z for h <= 1 and >= z for h >= 1: ln z is one end of the bracket.
     // For h >= 2, F_b(h) >= b^b, so b = e max(ln z, 1) already lies above the root.
-    let mut low = Float::with_val_64(work, z.ln_ref());
+    let mut low = if h < 0 {
+        Float::with_val_64(work, 1)
+    } else {
+        Float::with_val_64(work, z.ln_ref())
+    };
     if h >= 2 {
         low = low.max(&Float::with_val_64(work, 1)).ln() + 1u32;
     }
     let mut high = low.clone();
-    let mut low_defect = real_defect(&low, &h, &z, coarse)?;
+    let mut low_defect = real_defect(&low, &h, &z, coarse, &mut near)?;
     let mut high_defect = low_defect.clone();
     if low_defect.is_zero() {
         return Ok(low.exp());
@@ -857,7 +1050,7 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
         loop {
             high *= 2u32;
             report("bracketing upward", &high);
-            high_defect = real_defect(&high, &h, &z, coarse)?;
+            high_defect = real_defect(&high, &h, &z, coarse, &mut near)?;
             if high_defect >= 0 {
                 break;
             }
@@ -868,7 +1061,7 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
         loop {
             low /= 2u32;
             report("bracketing downward", &low);
-            low_defect = real_defect(&low, &h, &z, coarse)?;
+            low_defect = real_defect(&low, &h, &z, coarse, &mut near)?;
             if low_defect <= 0 {
                 break;
             }
@@ -876,12 +1069,15 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
             high_defect = low_defect.clone();
         }
     }
-    // Illinois regula falsi on the bracket.
-    let narrow = cnum::epsilon(coarse.saturating_sub(8).max(4), work);
+    // Illinois regula falsi on the bracket, until two iterates agree to a few
+    // digits: the secant steps below finish at full precision.
+    let narrow = cnum::epsilon(coarse.saturating_sub(8).clamp(4, 8), work);
     let mut side = 0i8;
     let mut rate = high.clone();
+    let mut earlier: Option<Float> = None;
     while Float::with_val_64(work, &high - &low) > Float::with_val_64(work, &high * &narrow) {
         let width = Float::with_val_64(work, &high - &low);
+        let last = rate.clone();
         rate = if high_defect.is_finite() {
             Float::with_val_64(work, &low * &high_defect - &high * &low_defect)
                 / Float::with_val_64(work, &high_defect - &low_defect)
@@ -891,8 +1087,16 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
         if !(rate > low && rate < high) {
             rate = Float::with_val_64(work, &low + &high) / 2u32;
         }
+        if earlier.is_some()
+            && Float::with_val_64(work, &rate - &last).abs()
+                <= Float::with_val_64(work, &rate * &narrow)
+        {
+            earlier = Some(last);
+            break;
+        }
+        earlier = Some(last);
         report("bracketed", &rate);
-        let defect = real_defect(&rate, &h, &z, coarse)?;
+        let defect = real_defect(&rate, &h, &z, coarse, &mut near)?;
         if defect.is_zero() {
             low = rate.clone();
             high = rate.clone();
@@ -921,9 +1125,13 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
         return Err("super-root: no finite forward value above the root".into());
     }
     // Secant refinement at full precision.
-    let mut previous = if rate == low { high } else { low };
-    let mut previous_defect = real_defect(&previous, &h, &z, checked)?;
-    let mut defect = real_defect(&rate, &h, &z, checked)?;
+    let mut previous = match earlier {
+        Some(last) if last != rate => last,
+        _ if rate == low => high,
+        _ => low,
+    };
+    let mut previous_defect = real_defect(&previous, &h, &z, checked, &mut near)?;
+    let mut defect = real_defect(&rate, &h, &z, checked, &mut near)?;
     let floor = cnum::epsilon(checked, work);
     loop {
         if defect.is_zero() || previous_defect == defect {
@@ -937,7 +1145,7 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
         }
         report("refining", &next);
         let small = step.clone().abs() <= Float::with_val_64(work, &next * &floor);
-        let next_defect = real_defect(&next, &h, &z, checked)?;
+        let next_defect = real_defect(&next, &h, &z, checked, &mut near)?;
         if next_defect.clone().abs() >= defect.clone().abs() {
             break;
         }
@@ -948,6 +1156,211 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
         }
     }
     Ok(rate.exp())
+}
+
+/// Decimal digits of the forward values while the path of a super-root is
+/// followed; its end is then polished at full precision.
+const WALK_DIGITS: u64 = 14;
+
+/// One base tried on a super-root path.
+struct Trial {
+    base: Complex,
+    height: Complex,
+    value: Complex,
+    slope: Complex,
+    estimated: bool,
+}
+
+/// Forward values `F_b(h)` to `digits` digits with their slopes in `b`. Every
+/// value is a full solve for its base, so the last trials are kept: a slope
+/// comes from a close trial at the same height when there is one, from
+/// central differences otherwise.
+struct Trials {
+    digits: u64,
+    bits: u64,
+    work: u64,
+    delta: Float,
+    seen: Vec<Trial>,
+}
+
+impl Trials {
+    fn new(digits: u64, checked: u64, work: u64) -> Result<Trials, String> {
+        let bits = if digits >= checked {
+            work
+        } else {
+            cnum::checked_digits_to_bits(digits)?.min(work)
+        };
+        Ok(Trials {
+            digits,
+            bits,
+            work,
+            delta: cnum::epsilon(digits / 2, work),
+            seen: Vec::new(),
+        })
+    }
+
+    fn value(&self, b: &Complex, height: &Complex) -> Result<Complex, String> {
+        dispatch::tetrate(
+            &Complex::with_val_64(self.bits, b),
+            &Complex::with_val_64(self.bits, height),
+            self.bits,
+            self.digits,
+        )
+        .map(|value| Complex::with_val_64(self.work, value))
+    }
+
+    fn at(
+        &mut self,
+        b: &Complex,
+        height: Complex,
+        sure: bool,
+    ) -> Result<(Complex, Complex, bool), String> {
+        let work = self.work;
+        let size = cnum::abs(b, work);
+        let gap = |trial: &Trial| cnum::abs(&Complex::with_val_64(work, b - &trial.base), work);
+        let here = self
+            .seen
+            .iter()
+            .rev()
+            .filter(|trial| trial.height == height);
+        let known = here
+            .clone()
+            .find(|trial| trial.base == *b)
+            .map(|trial| trial.value.clone());
+        let value = match known {
+            Some(value) => value,
+            None => self.value(b, &height)?,
+        };
+        let close = Float::with_val_64(work, &size * &self.delta);
+        let reach = Float::with_val_64(work, &size >> 5u32);
+        let estimate = if sure {
+            None
+        } else {
+            here.clone()
+                .map(|trial| (gap(trial), trial))
+                .find(|(gap, _)| *gap <= reach)
+                .map(|(gap, trial)| {
+                    if gap <= close {
+                        (trial.slope.clone(), trial.estimated)
+                    } else {
+                        let rise = Complex::with_val_64(work, &value - &trial.value);
+                        (rise / Complex::with_val_64(work, b - &trial.base), true)
+                    }
+                })
+        };
+        let (slope, estimated) = match estimate {
+            Some(found) => found,
+            None => {
+                let nudge = Complex::with_val_64(work, b * &self.delta);
+                let ahead = self.value(&Complex::with_val_64(work, b + &nudge), &height)?;
+                let behind = self.value(&Complex::with_val_64(work, b - &nudge), &height)?;
+                (
+                    Complex::with_val_64(work, ahead - behind) / nudge / 2u32,
+                    false,
+                )
+            }
+        };
+        if self.seen.len() >= 6 {
+            self.seen.remove(0);
+        }
+        self.seen.push(Trial {
+            base: b.clone(),
+            height,
+            value: value.clone(),
+            slope: slope.clone(),
+            estimated,
+        });
+        Ok((value, slope, estimated))
+    }
+
+    /// The values known at `height`.
+    fn known(self, height: &Complex) -> Vec<(Complex, Complex)> {
+        self.seen
+            .into_iter()
+            .filter(|trial| trial.height == *height)
+            .map(|trial| (trial.base, trial.value))
+            .collect()
+    }
+}
+
+/// Continue a real super-root to `(target, height)`, first in the target, then
+/// in the height: forward values to `level` digits along the path and to
+/// `checked` digits at its end. Returns the root and forward values known there.
+fn sroot_continued(
+    target: &Complex,
+    height: &Complex,
+    work: u64,
+    checked: u64,
+    level: u64,
+    coarse: u64,
+) -> Result<(Complex, Vec<(Complex, Complex)>), String> {
+    let size = cnum::abs(target, work);
+    let anchor_z = if size > cnum::decimal("1.0001", work) {
+        size
+    } else {
+        Float::with_val_64(work, 2)
+    };
+    let anchor_h = if *height.real() >= 0.25 {
+        Float::with_val_64(work, height.real())
+    } else {
+        Float::with_val_64(work, 1)
+    };
+    let start = if anchor_h == 1 {
+        anchor_z.clone()
+    } else {
+        sroot_real(&anchor_z, &anchor_h, work, level, coarse.min(level))?
+    };
+    let from = real_complex(&anchor_z, work);
+    let rung = real_complex(&anchor_h, work);
+    let trust = |b: &Complex, step: &Complex| cnum::abs(step, work) * 4u32 <= cnum::abs(b, work);
+    let mut trials = Trials::new(level, checked, work)?;
+    let mut walk = |targets: &[Complex], heights: &[Complex]| {
+        follow(
+            &mut |b, t, sure| trials.at(b, polyline(heights, t, work), sure),
+            &|t| polyline(targets, t, work),
+            real_complex(&start, work),
+            u32::try_from(targets.len() - 1).expect("short path"),
+            &trust,
+            work,
+        )
+    };
+    let direct = walk(
+        &[from.clone(), target.clone(), target.clone()],
+        &[rung.clone(), rung.clone(), height.clone()],
+    );
+    let rough = match direct {
+        Ok((root, _)) => root,
+        Err(reason) => {
+            // A singular value on the straight path (a fold of b -> F_b(h)
+            // on the real axis): pass above it.
+            let span = Complex::with_val_64(work, target - &from);
+            let lift = Complex::with_val_64(work, (0, cnum::abs(&span, work) / 2u32));
+            let above = Complex::with_val_64(work, &from + span / 2u32) + lift;
+            if cnum::verbose() {
+                eprintln!("sroot: straight path failed ({reason}); passing above it");
+            }
+            let (root, _) = walk(
+                &[from.clone(), above, target.clone(), target.clone()],
+                &[rung.clone(), rung.clone(), rung.clone(), height.clone()],
+            )
+            .map_err(|detour| format!("{reason}; path above the real axis: {detour}"))?;
+            root
+        }
+    };
+    if level >= checked {
+        return Ok((rough, trials.known(height)));
+    }
+    let mut fine = Trials::new(checked, checked, work)?;
+    let (root, _) = newton(
+        &mut |b, _, sure| fine.at(b, height.clone(), sure),
+        &rough,
+        &Float::new_64(work),
+        target,
+        true,
+        &trust,
+        work,
+    )?;
+    Ok((root, fine.known(height)))
 }
 
 /// Super-root: the base `b` with `F_b(h) = z`.
@@ -970,11 +1383,16 @@ pub fn sroot(z: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex
     if cnum::is_one(z) {
         return Ok(cnum::one(prec));
     }
-    let real_case = z.imag().is_zero() && h.imag().is_zero() && *z.real() > 1 && *h.real() > 0;
+    // Real targets with a real base above 1: see `real_defect`.
+    let real_case = z.imag().is_zero()
+        && h.imag().is_zero()
+        && ((*z.real() > 1 && *h.real() > 0)
+            || (*z.real() > 0 && *z.real() < 1 && *h.real() > -1 && *h.real() < 0)
+            || (*z.real() < 0 && *h.real() > -2 && *h.real() < -1));
     // A target close to 1 must be resolved against its distance from 1.
     let mut extra = 0u64;
-    if real_case {
-        let nearness = Float::with_val_64(prec, z.real().ln_ref());
+    if real_case && *z.real() > 0 {
+        let nearness = Float::with_val_64(prec, z.real().ln_ref()).abs();
         if nearness < 1 {
             extra = decimal_loss(&(-nearness.ln()))?;
         }
@@ -992,80 +1410,25 @@ pub fn sroot(z: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex
             dispatch::tetrate(b, height, work, checked)
                 .map(|value| Complex::with_val_64(work, value))
         };
-        let root = if real_case {
-            real_complex(
-                &sroot_real(target.real(), height.real(), work, checked, coarse)?,
-                work,
-            )
+        let (root, known) = if real_case {
+            let rate = sroot_real(target.real(), height.real(), work, checked, coarse)?;
+            (real_complex(&rate, work), Vec::new())
         } else {
-            // Continue a real solution: first move z, then h.
-            let size = cnum::abs(&target, work);
-            let anchor_z = if size > 1.0001 {
-                size
-            } else {
-                Float::with_val_64(work, 2)
-            };
-            let anchor_h = if *height.real() >= 0.25 {
-                Float::with_val_64(work, height.real())
-            } else {
-                Float::with_val_64(work, 1)
-            };
-            let start = if anchor_h == 1 {
-                anchor_z.clone()
-            } else {
-                sroot_real(&anchor_z, &anchor_h, work, checked, coarse)?
-            };
-            let from = real_complex(&anchor_z, work);
-            let level = real_complex(&anchor_h, work);
-            let delta = cnum::epsilon(checked / 2, work);
-            let walk = |targets: &[Complex], heights: &[Complex]| {
-                follow(
-                    &mut |b, t| {
-                        let height = polyline(heights, t, work);
-                        let value = forward(b, &height)?;
-                        let nudge = Complex::with_val_64(work, b * &delta);
-                        let ahead = forward(&Complex::with_val_64(work, b + &nudge), &height)?;
-                        let behind = forward(&Complex::with_val_64(work, b - &nudge), &height)?;
-                        Ok((
-                            value,
-                            Complex::with_val_64(work, ahead - behind) / nudge / 2u32,
-                        ))
-                    },
-                    &|t| polyline(targets, t, work),
-                    real_complex(&start, work),
-                    u32::try_from(targets.len() - 1).expect("short path"),
-                    &|b, step| {
-                        Float::with_val(64, step.abs_ref()) * 4u32
-                            <= Float::with_val(64, b.abs_ref())
-                    },
-                    work,
-                )
-            };
-            let direct = walk(
-                &[from.clone(), target.clone(), target.clone()],
-                &[level.clone(), level.clone(), height.clone()],
-            );
-            match direct {
-                Ok((root, _)) => root,
-                Err(reason) => {
-                    // A singular value on the straight path (a fold of b -> F_b(h)
-                    // on the real axis): pass above it.
-                    let span = Complex::with_val_64(work, &target - &from);
-                    let lift = Complex::with_val_64(work, (0, cnum::abs(&span, work) / 2u32));
-                    let above = Complex::with_val_64(work, &from + span / 2u32) + lift;
+            let level = checked.min(extra.saturating_add(WALK_DIGITS));
+            match sroot_continued(&target, &height, work, checked, level, coarse) {
+                Ok(found) => found,
+                Err(reason) if level < checked => {
                     if cnum::verbose() {
-                        eprintln!("sroot: straight path failed ({reason}); passing above it");
+                        eprintln!("sroot: {reason}; following the path at full precision");
                     }
-                    let (root, _) = walk(
-                        &[from.clone(), above, target.clone(), target.clone()],
-                        &[level.clone(), level.clone(), level.clone(), height.clone()],
-                    )
-                    .map_err(|detour| format!("{reason}; path above the real axis: {detour}"))?;
-                    root
+                    sroot_continued(&target, &height, work, checked, checked, coarse)?
                 }
+                Err(reason) => return Err(reason),
             }
         };
-        let lost = match nudge_loss(&mut |b| forward(b, &height), &root, &target, digits, work)? {
+        let mut at_height = |b: &Complex| forward(b, &height);
+        let mut image = remembering(&mut at_height, known);
+        let lost = match nudge_loss(&mut image, &root, &target, digits, work)? {
             Some(lost) => lost,
             None => extra.saturating_add(digits),
         };
@@ -1076,14 +1439,7 @@ pub fn sroot(z: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex
             extra = lost;
             continue;
         }
-        check_inverse(
-            &mut |b| forward(b, &height),
-            &root,
-            &target,
-            digits,
-            extra,
-            work,
-        )?;
+        check_inverse(&mut image, &root, &target, digits, extra, work)?;
         return Ok(Complex::with_val_64(
             output_precision(prec, digits, lost)?,
             root,

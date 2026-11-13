@@ -1,3 +1,95 @@
+# Status Update — 2026-11-13, evening (two-sided solver next to the boundary; real bases without tracing; constants and expressions as arguments)
+
+**A real base needs no branch tracing (proved, then removed).** For a real
+base with a real attracting fixed point the inverse germ has real
+coefficients and is one-to-one on its disk, `b^z` is one-to-one on the image
+of that disk, and the image is connected and symmetric about the real axis;
+it therefore lies in the strip `|Im z| < π/|ln b|`, where the principal
+logarithm is the inverse step (README § 6.3). Regular iteration at real
+bases no longer carries the samples of the tracing. 27 values (real and
+complex heights, 15 to 100 digits) are the same digits with and without it;
+the 100-digit `closer_attractor` case takes 421 s instead of 561 s. The
+check against the integer tower is unchanged, and so is everything at
+complex bases.
+
+**Long inverse series in the two-sided solver.** A base just outside the
+Shell–Thron region cost about `1/ln|λ|` logarithms per sample of a theta
+line and as many exponentials per contour node. The coefficients of the
+inverse series at the nearly neutral fixed point decay with a radius far
+beyond the short one, so the series is now summed on most of its disk and
+the lines are usually reached without any logarithm; a coordinate is
+accepted only on a disk where the series is one-to-one
+(`Σ|cₙ|ρⁿ < (7/8)π/|ln b|`), after a check of the functional equation
+(README § 6.10). At 15 digits, argument 1 of the multiplier: `|λ| = 1.001`
+3.5 s (51 s before), `1.0005` 3.9 s (100 s), `1.0002` 4.0 s (no result in 40
+minutes), `1 + 10⁻⁵` 5 s; argument 2: `1 + 10⁻¹²` 5 s. The short and the
+long series give the same 30 digits at `1.003`; at `1.0001` and `1 + 10⁻⁸`
+three contours agree at real and complex heights. Slow cases remain where
+the argument of `λ` is next to a low-order root of unity (at `1.0001`:
+`0.2` 50 s, `π/2` 164 s, `2π/3` 13 minutes).
+
+**Raised contours on the cut.** For `0 < b < e^{−e}` the disk of the series
+is pinched by the 2-cycle, and the upper theta function is singular below
+the height where its line leaves that disk. The solver now moves to taller
+contours with the same centre when the first precision level shows this,
+and keeps the contour for the later stages. Cut bases are solved up to
+`0.0659`: `0.063` 32 s (91 s before), `0.064` 20 s, `0.065` a minute,
+`0.0658` nine minutes, `0.0659` six (no result in 40 minutes before, from
+`0.065` on); `0.064`, `0.065` and `0.0658` agree on three contours.
+`0.06595` and `0.06598` gave no result in 45 minutes.
+
+**The inverses on the new bases; rule 8.** README § 7.1 has a new rule:
+support for new bases, heights or values is complete only when tetration,
+the super-logarithm and the super-root all work there, each with its own
+test. For the bases above: `--slog` at `|λ| = 1 + 10⁻⁸` and at the cut base
+`0.064` (`t1712`), `--sroot` to the base with `|λ| = 1.0001` (`t1713`, two
+minutes); forward tests `t1810`, `t1811`.
+
+**Constants and expressions as arguments.** Each of the four numbers of the
+command line is a decimal number, as before, or a constant expression:
+42 named constants (`pi`, `e`, `eta = e^(1/e)`, `towermin = e^(−e)`, `phi`,
+`gamma`, `omega`, … README § 3.2), `i`, `+ - * / ^ ^^`, brackets, products
+without a sign, and 76 function rows, tetration and its inverses among
+them: `tet 30 'pi*e^e-pow(2, 0.5)' 0 1 0`,
+`tet 30 '2^^2' 'ate(2+i, 1.5-0.5i)' 'pi/e' 'ssrt(16, 3)/4'`. The grammar
+and the names are those of the plotters `tet-line` and
+`rust-opengl-complex-drawer`, which gained the same constants and take
+constant expressions for their ranges.
+
+* *Precision.* A name is the constant at the precision the run reads it
+  (`tet 1000 pi 0 1 0`). An expression is evaluated twice, node by node,
+  with every operation rounded down and with every operation rounded up
+  and twenty more digits; the two must agree beyond the working precision
+  of the run in each part, and bits lost to cancellation are added.
+  `(pi + 1e-300) - pi` gives `1e-300`.
+* *Zeros and cuts.* A zero part is kept where it is exact by construction
+  (`pi*i`, `sqrt(-pi)`, `1/4 + 1/4 - 1/2`); a zero that inexact operands
+  produce, or a part whose two evaluations share no digit (`sin(pi)`), is
+  refused after three attempts with more than doubled digits. Zeros are
+  positive, so a value on a cut is the usual one (`sqrt(-4) = 2i`,
+  `asin(2) = π/2 − 1.317i`).
+* *Whole parts.* An expression too large for the precision of the run to
+  hold its whole part raises that precision, so `0^^(10^100 + 1)` is `0`
+  and `0^^(10^100)` is `1`.
+* *Tetration inside an argument* is computed by the library itself, twice
+  and with about 26 and 46 digits more than the run; it has the domain of
+  the mode it names (`ate(2+i, 1000-500i)` fails as
+  `tet --slog 15 2 1 1000 -500` does).
+* *Tests.* Every constant against a 70-digit mpmath reference; expressions,
+  branch cuts and all functions against mpmath; the zero rule; the grammar;
+  CLI tests `t712`–`t714` (digits of π at 200, `--help` and README list
+  every name). 135 expressions give the same value in `tet` and in the
+  `f64` parser of the drawer to 12 digits; the plotters differ where a
+  signed zero decides a branch (`sqrt(-4)` is `−2i` there, `2i` here).
+
+**Validation.** The default tier passed on the final tree, one target at a
+time (library 70, phases 1–5, 7–12, 16–18, grid and edge runners,
+documentation tests, 19 Python tests), and so did the slow suites 13–15
+(17 tests; README § 10 has the times). `cargo fmt --check` and
+`cargo clippy -D warnings` are clean. The guard test of README § 7.1 caught
+one new fixed-size comparison while this was written; it is rewritten and
+listed.
+
 # Status Update — 2026-11-13, later (fixed-size numbers guarded by a test; slow suites verified)
 
 No solver code changed in this update, and no value did.

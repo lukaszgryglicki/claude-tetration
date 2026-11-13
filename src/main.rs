@@ -24,9 +24,36 @@ Usage: tet [--quiet|--silent|-q] <precision_digits> <base_re> <base_im> <height_
 
 Arguments:
   precision_digits     positive integer; number of decimal digits of precision
-  base_re, base_im     real / imaginary parts of base b (decimal strings)
-  height_re, height_im real / imaginary parts of height h (decimal strings)
-  value_re, value_im   real / imaginary parts of the tetration value to invert
+  base_re, base_im     the base b = base_re + i base_im
+  height_re, height_im the height h = height_re + i height_im
+  value_re, value_im   the tetration value to invert, value_re + i value_im
+
+  Each of these four is a decimal number or a constant expression (quote it
+  for the shell), computed to the precision of the run:
+
+    numbers      12, -0.5, 1e-30, and i (or j) for the imaginary unit
+    constants    the names listed below: pi, e, eta, ...
+    operators    + - * / ^ (or **), ^^ for tetration, and brackets
+    products     need no sign: 2pi, 3i, 2(1+i)
+    functions    the names listed below: sqrt(2), ln(3), tet(b, h), ...
+
+  A leading sign binds less than ^, and ^ less than ^^; both group from the
+  right: -2^2 = -4, 2^3^2 = 2^9, 2^^3^2 = (2^^3)^2. There are no variables.
+  An argument may be complex itself: the number is first + i second, so
+  '2+i' 0 and 2 1 are the same base.
+
+  The expression is evaluated twice, with every operation rounded down and
+  with every operation rounded up, until both agree beyond the precision of
+  the run; digits lost to cancellation are added. A value that cancels to
+  nothing at every precision tried is refused, like sin(pi): write 0. A
+  tetration inside an argument is computed by tet itself, to more digits
+  than the run's.
+
+Constants (names, meaning):
+{constants}
+
+Functions (z, w complex; x, y real; names with the same meaning share a line):
+{functions}
 
 Output (on stdout):
   Two lines: real part on line 1, imaginary part on line 2, of the value
@@ -40,11 +67,19 @@ Diagnostics:
 
 Examples:
   tet 50 2 0 3 0          # 2^^3 = 16, 50 digits
-  tet 100 2.71828... 0 0.5 0
+  tet 100 e 0 0.5 0       # base e to 100 digits
   tet 30 1.5 0.5 1 0.7    # complex base, complex height
+  tet 30 'pi*e^e-pow(2, 0.5)' 0 '1/3' 0
+  tet 30 '2^^2' 'ate(2+i, 1.5-0.5i)' 'pi/e' 'ssrt(16, 3)/4'
   tet --slog 30 2 0 16 0  # the height h with 2^^h = 16, i.e. 3
   tet --sroot 30 16 0 3 0 # the base b with b^^3 = 16, i.e. 2
 ";
+
+fn usage() -> String {
+    USAGE
+        .replace("{constants}\n", &tetration::constants::help())
+        .replace("{functions}\n", &tetration::expression::help())
+}
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = env::args().collect();
@@ -65,11 +100,11 @@ fn main() -> ExitCode {
     args.retain(|arg| !matches!(arg.as_str(), "--slog" | "--ate" | "--sroot" | "--ssrt"));
 
     if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
-        print!("{}", USAGE);
+        print!("{}", usage());
         return ExitCode::SUCCESS;
     }
     if args.len() != 6 || (slog && sroot) {
-        eprint!("{}", USAGE);
+        eprint!("{}", usage());
         return ExitCode::from(2);
     }
 

@@ -24,6 +24,7 @@
 //! checks, not a certified forward-error bound.
 
 use std::collections::VecDeque;
+use std::sync::Mutex;
 
 use rug::{float::Constant, ops::Pow, Complex, Float, Integer};
 
@@ -40,6 +41,11 @@ const BRANCH_TOLERANCE: (u32, u32) = (2, 5);
 /// Precision of the path planning in the `ln b` plane and of fixed-point
 /// seeds: both only start iterations that converge at the working precision.
 const SCOUT_BITS: u64 = 128;
+/// A fixed point whose orbits take at least this many logarithms per
+/// e-folding gets a long Poincare series.
+const LONG_SERIES_STEPS: u32 = 64;
+/// Coefficients from which the decay radius of a long series is first read.
+const DECAY_TERMS: usize = 128;
 
 /// `P(z)` and `P'(z)` for complex coefficients.
 fn poly_value(coefficients: &[Complex], z: &Complex, prec: u64) -> (Complex, Complex) {
@@ -91,26 +97,262 @@ fn nearest_branch(
     Ok(branch)
 }
 
+/// The coefficients of `psi` (`psi(lambda t) = b^(L + psi(t)) - L`) with the
+/// state of their recurrence, so that the series can be continued.
+#[derive(Clone)]
+struct Series {
+    prec: u64,
+    ln_b: Complex,
+    lambda: Complex,
+    psi: Vec<Complex>,
+    /// `k psi_k` and `psi_k lambda^k`.
+    weighted: Vec<Complex>,
+    scaled: Vec<Complex>,
+    power: Complex,
+}
+
+impl Series {
+    fn new(ln_b: &Complex, lambda: &Complex, prec: u64) -> Series {
+        let psi = vec![cnum::zero(prec), cnum::one(prec)];
+        Series {
+            prec,
+            ln_b: Complex::with_val_64(prec, ln_b),
+            lambda: Complex::with_val_64(prec, lambda),
+            weighted: psi.clone(),
+            scaled: vec![cnum::zero(prec), Complex::with_val_64(prec, lambda)],
+            power: Complex::with_val_64(prec, lambda),
+            psi,
+        }
+    }
+
+    /// The next coefficient: one product per term of the convolution, summed
+    /// in fixed blocks so that threads do not change it.
+    fn push(&mut self) -> Result<(), String> {
+        const BLOCK: usize = 256;
+        let prec = self.prec;
+        let n = self.psi.len();
+        cnum::check_complex_storage(n as u128 * 4 + 4, prec)?;
+        self.power *= &self.lambda;
+        let blocks: Vec<usize> = (1..n).step_by(BLOCK).collect();
+        let (weighted, scaled) = (&self.weighted, &self.scaled);
+        let partial = map_points(&blocks, |&first| {
+            let mut sum = cnum::zero(prec);
+            for k in first..(first + BLOCK).min(n) {
+                sum += &weighted[k] * &scaled[n - k];
+            }
+            Ok(sum)
+        })?;
+        let mut sum = cnum::zero(prec);
+        for part in &partial {
+            sum += part;
+        }
+        let denominator = Complex::with_val_64(prec, &self.power - &self.lambda) * Integer::from(n);
+        if cnum::is_zero(&denominator) {
+            return Err(format!("Poincare resonance at order {n}"));
+        }
+        let coefficient = Complex::with_val_64(prec, sum * &self.ln_b) / denominator;
+        if !cnum::is_finite(&coefficient) {
+            return Err(format!("Poincare coefficient {n} is not finite"));
+        }
+        self.weighted
+            .push(Complex::with_val_64(prec, &coefficient * Integer::from(n)));
+        self.scaled
+            .push(Complex::with_val_64(prec, &coefficient * &self.power));
+        self.psi.push(coefficient);
+        Ok(())
+    }
+
+    /// The logarithm of the radius `r` with `|psi_n| <= r^(1-n)` on the
+    /// upper half of the computed orders.
+    fn decay(&self) -> Float {
+        let prec = self.prec;
+        let mut steepest: Option<Float> = None;
+        for (n, coefficient) in self.psi.iter().enumerate().skip(self.psi.len() / 2) {
+            let size = cnum::abs(coefficient, prec);
+            if n < 2 || size.is_zero() {
+                continue;
+            }
+            let rate = size.ln() / Float::with_val_64(prec, n - 1);
+            steepest = Some(match steepest {
+                Some(seen) => seen.max(&rate),
+                None => rate,
+            });
+        }
+        -steepest.unwrap_or_else(|| Float::new_64(prec))
+    }
+
+    /// The number of terms that sum `psi` to working accuracy on
+    /// `|t| <= radius` (eight consecutive terms below it), computing more
+    /// coefficients up to `limit`, and the sum of the sizes of all terms.
+    fn fit(&mut self, radius: &Float, limit: usize) -> Result<Option<(usize, Float)>, String> {
+        let prec = self.prec;
+        let shift = usize::try_from(prec).map_err(|_| "precision is not addressable")?;
+        let tolerance = Float::with_val_64(prec, radius) >> (shift + 8);
+        let mut radius_power = Float::with_val_64(prec, 1);
+        let mut total = Float::new_64(prec);
+        let mut small = 0u32;
+        let mut n = 1;
+        loop {
+            if n >= self.psi.len() {
+                if n > limit {
+                    return Ok(None);
+                }
+                self.push()?;
+            }
+            radius_power *= radius;
+            let term = cnum::abs(&self.psi[n], prec) * &radius_power;
+            if !term.is_finite() {
+                return Err(format!("Poincare term {n} is not finite"));
+            }
+            small = if term < tolerance { small + 1 } else { 0 };
+            total += term;
+            if small >= 8 && n >= 8 {
+                return Ok(Some((n + 1, total)));
+            }
+            n += 1;
+        }
+    }
+}
+
+/// A long Poincare series: its generator and the logarithm of the decay
+/// radius of its coefficients.
+#[derive(Clone)]
+struct Long {
+    series: Series,
+    decay: Float,
+}
+
 /// The base-dependent analytic data at one fixed point and one precision.
 #[derive(Clone)]
 struct Side {
     prec: u64,
+    /// Precision of the fixed-point data and of the series, `>= prec`.
+    work: u64,
     ln_b: Complex,
     l: Complex,
     kappa: Complex,
     /// The branch `k` of `(Log w + 2 pi i k) / ln b` that fixes `L`.
     branch: Integer,
     psi: Vec<Complex>,
+    /// The series is summed on `|t| <= psi_radius`.
     psi_radius: Float,
+    /// `psi` is close to the identity on `|t| <= core`: a point within a
+    /// quarter of it of `L` is inverted from its own displacement.
+    core: Float,
+    long: Option<Long>,
+}
+
+/// `psi(t)` and `psi'(t)` from the coefficients, rounded to `prec` bits.
+fn series_value(psi: &[Complex], t: &Complex, prec: u64) -> (Complex, Complex) {
+    let mut terms = psi[1..].iter().rev();
+    let leading = terms.next().expect("linear Poincare coefficient");
+    let mut quotient = Complex::with_val_64(prec, leading);
+    let mut slope = cnum::zero(prec);
+    for coefficient in terms {
+        slope *= t;
+        slope += &quotient;
+        quotient *= t;
+        quotient += coefficient;
+    }
+    let derivative = Complex::with_val_64(prec, &slope * t) + &quotient;
+    (quotient * t, derivative)
+}
+
+impl Long {
+    /// The `x` whose disk `|t| <= r e^(-x)` holds the coordinates up to
+    /// `e^reach` with a margin of one eighth, and the disk of radius `core`.
+    fn inset(&self, reach: &Float, core: &Float) -> Float {
+        let work = self.series.prec;
+        let lines =
+            Float::with_val_64(work, &self.decay - reach) - (Float::with_val_64(work, 1) >> 3u32);
+        lines.min(&Float::with_val_64(work, &self.decay - core.clone().ln()))
+    }
+
+    /// Fit the series to `|t| <= r e^(-x)`: its length and radius there, or
+    /// `None` when that radius is not above `floor`. The radius shrinks
+    /// until the terms decay as the first coefficients promised and their
+    /// sizes sum to less than `bound`: then `psi` maps the disk into a set
+    /// that holds no two points one period of `b^z` apart, `b^z` is
+    /// one-to-one on it, and so is `psi` on the disk (by induction on the
+    /// radius, from `psi(lambda t) = b^(L + psi(t)) - L`).
+    fn fit(
+        &mut self,
+        mut x: Float,
+        floor: &Float,
+        bound: &Float,
+        prec: u64,
+    ) -> Result<Option<(usize, Float)>, String> {
+        let work = self.series.prec;
+        for _ in 0..12 {
+            let radius = Float::with_val_64(work, &self.decay - &x).exp();
+            if !radius.is_finite() || radius <= *floor {
+                return Ok(None);
+            }
+            let expected = nats(work + 8) / &x;
+            let limit = to_count(expected * 2u32 + 64u32, "Poincare series length")?;
+            match self.series.fit(&radius, limit)? {
+                None => {
+                    let seen = self.series.decay();
+                    if seen < self.decay {
+                        self.decay = seen;
+                    } else {
+                        x = x * 5u32 / 4u32;
+                    }
+                }
+                Some((_, total)) if total > *bound => x += Float::with_val_64(work, 1) >> 2u32,
+                Some((length, _)) => {
+                    self.verify(length, &radius, prec)?;
+                    return Ok(Some((length, radius)));
+                }
+            }
+        }
+        Err("the terms of the long series do not decay".into())
+    }
+
+    /// The functional equation of the truncated series at eight points of
+    /// the circle that `lambda` maps onto the rim of its disk.
+    fn verify(&self, length: usize, radius: &Float, prec: u64) -> Result<(), String> {
+        let work = self.series.prec;
+        let psi = &self.series.psi[..length];
+        let (ln_b, lambda) = (&self.series.ln_b, &self.series.lambda);
+        let l = Complex::with_val_64(work, lambda / ln_b);
+        let inner = Float::with_val_64(work, radius / cnum::abs(lambda, work));
+        let shift = usize::try_from(prec.saturating_sub(16)).map_err(|_| "precision overflow")?;
+        let tolerance = Float::with_val_64(work, radius >> shift);
+        let pi = Float::with_val_64(work, Constant::Pi);
+        for j in 0..8u32 {
+            let angle = Float::with_val_64(work, &pi * (2 * j + 1)) / 8u32;
+            let t = Complex::with_val_64(
+                work,
+                (
+                    Float::with_val_64(work, angle.cos_ref()) * &inner,
+                    Float::with_val_64(work, angle.sin_ref()) * &inner,
+                ),
+            );
+            let (before, _) = series_value(psi, &t, work);
+            let (after, _) = series_value(psi, &Complex::with_val_64(work, &t * lambda), work);
+            let image = exp_complex(&Complex::with_val_64(work, before * ln_b), work)? - 1u32;
+            let defect = cnum::abs(&Complex::with_val_64(work, after - image * &l), work);
+            if !defect.is_finite() || defect > tolerance {
+                return Err("the long series fails its functional equation".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Side {
-    fn new(ln_b: &Complex, seed: &Complex, upper: bool, prec: u64) -> Result<Side, String> {
+    /// `L`, `lambda = L ln b` and `kappa = Log lambda` at one fixed point.
+    fn multiplier(
+        ln_b: &Complex,
+        seed: &Complex,
+        upper: bool,
+        prec: u64,
+    ) -> Result<(Complex, Complex, Complex), String> {
         let name = if upper { "upper" } else { "lower" };
-        let ln_b = Complex::with_val_64(prec, ln_b);
         let seed = Complex::with_val_64(prec, seed);
-        let l = crate::kouznetsov::newton_fixed_point(&ln_b, &seed, prec)?;
-        let mut lambda = Complex::with_val_64(prec, &l * &ln_b);
+        let l = crate::kouznetsov::newton_fixed_point(ln_b, &seed, prec)?;
+        let mut lambda = Complex::with_val_64(prec, &l * ln_b);
         if upper && lambda.imag().is_zero() {
             // A real multiplier is a limit from the upper half base-plane,
             // where its argument is positive.
@@ -123,6 +365,21 @@ impl Side {
         if (upper && *kappa.imag() <= 0) || (!upper && *kappa.imag() >= 0) {
             return Err(format!("the {name} multiplier rotates the wrong way"));
         }
+        Ok((l, lambda, kappa))
+    }
+
+    /// `reach`: the logarithm of the largest coordinate `|t|` that the last
+    /// solve of this base needed on its line, when known.
+    fn new(
+        base: &LogBase,
+        seed: &Complex,
+        upper: bool,
+        prec: u64,
+        reach: Option<&Float>,
+    ) -> Result<Side, String> {
+        let name = if upper { "upper" } else { "lower" };
+        let ln_b = base.at(prec)?;
+        let (l, lambda, kappa) = Self::multiplier(&ln_b, seed, upper, prec)?;
         let turns = Float::with_val_64(prec, lambda.imag() - cnum::ln_complex(&l, prec).imag())
             / (Float::with_val_64(prec, Constant::Pi) * 2u32);
         let branch = turns
@@ -138,7 +395,7 @@ impl Side {
             radius = radius.min(&Float::with_val_64(prec, gap.root(order) / &scale));
             power *= &lambda;
         }
-        loop {
+        let psi = loop {
             if !radius.is_finite() || radius <= 0 {
                 return Err(format!(
                     "degenerate Poincare radius at the {name} fixed point"
@@ -146,18 +403,179 @@ impl Side {
             }
             let (psi, peak) = Self::psi_series(&ln_b, &lambda, &radius, prec)?;
             if peak <= Float::with_val_64(prec, &radius * 2u32) {
-                return Ok(Side {
-                    prec,
-                    ln_b,
-                    l,
-                    kappa,
-                    branch,
-                    psi,
-                    psi_radius: radius,
-                });
+                break psi;
             }
             radius /= 2u32;
+        };
+        let mut side = Side {
+            prec,
+            work: prec,
+            ln_b,
+            l,
+            kappa,
+            branch,
+            psi,
+            psi_radius: radius.clone(),
+            core: radius,
+            long: None,
+        };
+        if let Err(reason) = side.lengthen(base, upper, reach) {
+            if cnum::verbose() {
+                eprintln!("kneser-c: no long Poincare series at the {name} fixed point ({reason})");
+            }
         }
+        Ok(side)
+    }
+
+    /// The `x` that minimizes the modelled cost of a solve whose lines lie
+    /// at the decay radius `r` of the coefficients, with the series on
+    /// `|t| <= r e^(-x)`: about 2000 orbits of `x/rate` logarithms or
+    /// exponentials, as many sums of `nats/x` terms, and the products for
+    /// the coefficients. The weights are measured costs relative to one
+    /// logarithm; they affect speed only.
+    fn balance(nats: &Float, rate: &Float) -> Float {
+        let prec = rate.prec_64();
+        let weight = |text: &str| cnum::decimal(text, prec);
+        let orbit = weight("2000") / rate;
+        let series = weight("600") * nats;
+        let setup = weight("0.1") * nats.clone().square();
+        cnum::cost_balance(&orbit, &series, &setup)
+    }
+
+    /// The largest sum of the sizes of the terms of `psi` on a disk on which
+    /// `psi` is certainly one-to-one: `7/8` of half a period of `b^z`.
+    fn span(&self) -> Float {
+        let prec = self.work;
+        Float::with_val_64(prec, Constant::Pi) * 7u32 / (cnum::abs(&self.ln_b, prec) * 8u32)
+    }
+
+    /// Next to the Shell-Thron boundary an orbit takes `1/ln|lambda|`
+    /// logarithms for each e-folding of its distance from `L`, and the short
+    /// series leaves it several. The coefficients of `psi` decay like
+    /// `r^(-n)` with a radius `r` far beyond that series (the linearization
+    /// radius of the nearly neutral fixed point). Summed on
+    /// `|t| <= r e^(-x)` with about `precision/x` terms, the series reaches
+    /// the lines of the solver themselves, or leaves `x/ln|lambda|`
+    /// logarithms; `x` follows from the coordinates the lines need, once
+    /// known, and from the cost model otherwise.
+    fn lengthen(
+        &mut self,
+        base: &LogBase,
+        upper: bool,
+        reach: Option<&Float>,
+    ) -> Result<(), String> {
+        let prec = self.prec;
+        let rate = Float::with_val_64(prec, self.kappa.real());
+        if Float::with_val_64(prec, &rate * LONG_SERIES_STEPS) >= 1 {
+            return Ok(());
+        }
+        let least = Self::balance(&nats(prec), &rate);
+        // Rounding grows with the length of an orbit, with the partial sums
+        // of the series and along the recurrence of its coefficients (like
+        // the 3/2 power of the order, measured).
+        let longest = nats(prec) / &least * 4u32 + 64u32;
+        let guard = (Float::with_val_64(prec, 4u32) / &rate).log2().ceil()
+            + longest.log2().ceil() * 2u32
+            + 8u32;
+        let guard = guard
+            .to_integer()
+            .and_then(|guard| guard.to_u64())
+            .ok_or("guard precision is not finite")?;
+        let work = prec.checked_add(guard).ok_or("precision count overflow")?;
+        let exact = work.checked_add(32).ok_or("precision count overflow")?;
+        cnum::check_precision(exact)?;
+        let (l, _, _) = Self::multiplier(&base.at(exact)?, &self.l, upper, exact)?;
+        let ln_b = base.at(work)?;
+        let (l, lambda, kappa) = Self::multiplier(&ln_b, &l, upper, work)?;
+        let mut series = Series::new(&ln_b, &lambda, work);
+        while series.psi.len() <= DECAY_TERMS {
+            series.push()?;
+        }
+        let decay = series.decay();
+        let mut long = Long { series, decay };
+        let least = Float::with_val_64(work, &least);
+        let widest = Float::with_val_64(work, &long.decay - &least).exp();
+        if widest <= Float::with_val_64(work, &self.core * 2u32) {
+            return Ok(());
+        }
+        let x = match reach {
+            Some(reach) => long.inset(reach, &self.core),
+            None => Float::with_val_64(work, 1) >> 2u32,
+        }
+        .max(&least);
+        let floor = Float::with_val_64(work, &self.core / 2u32);
+        let bound = Float::with_val_64(work, Constant::Pi) * 7u32 / (cnum::abs(&ln_b, work) * 8u32);
+        let Some((length, radius)) = long.fit(x, &floor, &bound, prec)? else {
+            return Ok(());
+        };
+        self.work = work;
+        self.ln_b = ln_b;
+        self.l = l;
+        self.kappa = kappa;
+        self.psi = long.series.psi[..length].to_vec();
+        self.psi_radius = radius;
+        self.long = Some(long);
+        Ok(())
+    }
+
+    /// Refit a long series to the largest coordinate `e^reach` that its
+    /// line needs: a shorter series where the line lies well inside the
+    /// disk, a longer one where it leaves logarithms to take.
+    fn retune(&mut self, reach: &Float) -> Result<(), String> {
+        let (prec, work) = (self.prec, self.work);
+        let bound = self.span();
+        let Some(long) = &mut self.long else {
+            return Ok(());
+        };
+        let rate = Float::with_val_64(prec, self.kappa.real());
+        let least = Self::balance(&nats(prec), &rate);
+        let x = long
+            .inset(reach, &self.core)
+            .max(&Float::with_val_64(work, &least));
+        let current = Float::with_val_64(work, &long.decay - self.psi_radius.clone().ln());
+        let change = Float::with_val_64(work, &x - &current).abs();
+        if change * 16u32 <= x {
+            return Ok(());
+        }
+        let floor = Float::with_val_64(work, &self.core / 2u32);
+        // A refit that fails leaves the series as it is.
+        if let Ok(Some((length, radius))) = long.fit(x, &floor, &bound, prec) {
+            self.psi = long.series.psi[..length].to_vec();
+            self.psi_radius = radius;
+        }
+        Ok(())
+    }
+
+    /// With a long series: the number of logarithms after which a line
+    /// whose largest coordinate is `e^reach` lies in the disk of the series.
+    fn plan(&self, reach: Option<&Float>) -> Result<Option<Integer>, String> {
+        if self.long.is_none() {
+            return Ok(None);
+        }
+        let Some(reach) = reach else {
+            return Ok(Some(Integer::new()));
+        };
+        let work = self.work;
+        let excess = Float::with_val_64(work, reach - self.psi_radius.clone().ln())
+            + (Float::with_val_64(work, 1) >> 4u32);
+        if excess <= 0 {
+            return Ok(Some(Integer::new()));
+        }
+        (excess / self.kappa.real())
+            .ceil()
+            .to_integer()
+            .map(Some)
+            .ok_or_else(|| "the orbit length is not finite".into())
+    }
+
+    /// The logarithms added when a line did not fit into the disk yet.
+    fn stride(&self) -> Result<Integer, String> {
+        let work = self.work;
+        ((Float::with_val_64(work, 1) >> 4u32) / self.kappa.real())
+            .ceil()
+            .to_integer()
+            .map(|stride| stride + 1u32)
+            .ok_or_else(|| "the orbit length is not finite".into())
     }
 
     /// The coefficients of `psi` (`psi(lambda t) = b^(L + psi(t)) - L`) up to
@@ -208,22 +626,13 @@ impl Side {
 
     /// `psi(t)` and `psi'(t)` with the arithmetic rounded to `prec` bits.
     fn psi_value(&self, t: &Complex, prec: u64) -> (Complex, Complex) {
-        let mut terms = self.psi[1..].iter().rev();
-        let leading = terms.next().expect("linear Poincare coefficient");
-        let mut quotient = Complex::with_val_64(prec, leading);
-        let mut slope = cnum::zero(prec);
-        for coefficient in terms {
-            slope *= t;
-            slope += &quotient;
-            quotient *= t;
-            quotient += coefficient;
-        }
-        let derivative = Complex::with_val_64(prec, &slope * t) + &quotient;
-        (quotient * t, derivative)
+        series_value(&self.psi, t, prec)
     }
 
     /// `S(w)` and `S'(w)` with the arithmetic rounded to `prec` bits.
     fn superfunction(&self, w: &Complex, prec: u64) -> Result<(Complex, Complex), String> {
+        let output = prec;
+        let prec = prec + (self.work - self.prec);
         let exponent = Complex::with_val_64(prec, &self.kappa * w);
         if !cnum::is_finite(&exponent) {
             return Err("superfunction argument is not finite".into());
@@ -241,7 +650,7 @@ impl Side {
         let turns = Complex::with_val_64(prec, &self.kappa * &steps);
         let reduced = Complex::with_val_64(prec, &exponent - &turns);
         if *reduced.real() < -(nats(prec) + 64u32) {
-            return Ok((Complex::with_val_64(prec, &self.l), cnum::zero(prec)));
+            return Ok((Complex::with_val_64(output, &self.l), cnum::zero(output)));
         }
         let t = exp_complex(&reduced, prec)?;
         let (psi, slope) = self.psi_value(&t, prec);
@@ -257,7 +666,10 @@ impl Side {
         if !cnum::is_finite(&value) || !cnum::is_finite(&derivative) {
             return Err("superfunction value exceeds MPFR's range".into());
         }
-        Ok((value, derivative))
+        Ok((
+            Complex::with_val_64(output, value),
+            Complex::with_val_64(output, derivative),
+        ))
     }
 
     /// `steps` further inverse steps of a point at `L + displacement` inside
@@ -268,10 +680,10 @@ impl Side {
         displacement: &Complex,
         steps: &Integer,
     ) -> Result<(Complex, Complex), String> {
-        let prec = self.prec;
+        let (output, prec) = (self.prec, self.work);
         let exponent = -Complex::with_val_64(prec, &self.kappa * steps);
         if !cnum::is_finite(&exponent) || *exponent.real() < -(nats(prec) + 64u32) {
-            return Ok((self.l.clone(), cnum::zero(prec)));
+            return Ok((Complex::with_val_64(output, &self.l), cnum::zero(output)));
         }
         let t = self.invert_psi(displacement)?;
         let scale = exp_complex(&exponent, prec)?;
@@ -281,15 +693,15 @@ impl Side {
             return Err("Poincare inversion has a zero derivative".into());
         }
         Ok((
-            Complex::with_val_64(prec, &self.l + psi),
-            scale * after / before,
+            Complex::with_val_64(output, &self.l + psi),
+            Complex::with_val_64(output, scale * after / before),
         ))
     }
 
     /// The `t` with `psi(t) = displacement`, for a displacement well inside
     /// the Poincare disk: Newton at low precision, then one step per doubling.
     fn invert_psi(&self, displacement: &Complex) -> Result<Complex, String> {
-        let prec = self.prec;
+        let prec = self.work;
         if cnum::is_zero(displacement) {
             return Err("Abel coordinate is singular at the fixed point".into());
         }
@@ -326,11 +738,129 @@ impl Side {
         }
         let (value, _) = self.psi_value(&t, prec);
         let error = cnum::abs(&Complex::with_val_64(prec, value - displacement), prec);
-        let shift = usize::try_from(prec.saturating_sub(24)).map_err(|_| "precision overflow")?;
+        let shift =
+            usize::try_from(self.prec.saturating_sub(24)).map_err(|_| "precision overflow")?;
         if error > cnum::abs(displacement, prec) >> shift {
             return Err("Poincare inversion missed working accuracy".into());
         }
         Ok(t)
+    }
+
+    /// Newton's iteration for `psi(t) = displacement` from `start`, at the
+    /// precision of `start`, for as long as the residual falls. `None` when
+    /// it leaves the disk of the series or does not arrive at a solution.
+    fn settle(&self, displacement: &Complex, start: Complex) -> Result<Option<Complex>, String> {
+        let work = start.prec_64().0;
+        let rim = Float::with_val_64(work, &self.psi_radius * 9u32) / 8u32;
+        let mut t = start;
+        let mut best: Option<(Float, Complex)> = None;
+        for _ in 0..64 {
+            if cnum::abs(&t, work) > rim {
+                break;
+            }
+            let (value, slope) = self.psi_value(&t, work);
+            let residual = Complex::with_val_64(work, value - displacement);
+            let error = cnum::abs(&residual, work);
+            if !error.is_finite() || cnum::is_zero(&slope) {
+                break;
+            }
+            if best.as_ref().is_some_and(|(least, _)| error >= *least) {
+                break;
+            }
+            let next = Complex::with_val_64(work, &t - residual / slope);
+            let settled = error.is_zero();
+            best = Some((error, std::mem::replace(&mut t, next)));
+            if settled {
+                break;
+            }
+        }
+        let shift = usize::try_from(work / 2).map_err(|_| "precision overflow")?;
+        Ok(best
+            .filter(|(least, _)| *least <= cnum::abs(displacement, work) >> shift)
+            .map(|(_, t)| t))
+    }
+
+    /// One Newton step per doubling of the precision from a settled `t` to
+    /// the precision of the series, where the residual is checked. `None`
+    /// when the solution lies outside the disk of the series.
+    fn sharpen(&self, displacement: &Complex, rough: &Complex) -> Result<Option<Complex>, String> {
+        let prec = self.work;
+        let mut work = rough.prec_64().0.min(prec);
+        let mut t = rough.clone();
+        while work < prec {
+            work = work.saturating_mul(2).min(prec);
+            let (value, slope) = self.psi_value(&t, work);
+            if cnum::is_zero(&slope) {
+                return Err("Poincare inversion has a zero derivative".into());
+            }
+            let residual = Complex::with_val_64(work, value - displacement);
+            t = Complex::with_val_64(work, &t - residual / slope);
+        }
+        let (value, _) = self.psi_value(&t, prec);
+        let error = cnum::abs(&Complex::with_val_64(prec, value - displacement), prec);
+        let shift =
+            usize::try_from(self.prec.saturating_sub(24)).map_err(|_| "precision overflow")?;
+        let accurate = error.is_finite() && error <= cnum::abs(displacement, prec) >> shift;
+        if !accurate || cnum::abs(&t, prec) > self.psi_radius {
+            return Ok(None);
+        }
+        Ok(Some(t))
+    }
+
+    /// With a long series: `Log t` for the `t` of its disk with
+    /// `psi(t) = w - L`, for every point `w` of a line, or `None` when one
+    /// of them has none. `psi` is one-to-one on the disk (see `Long::fit`),
+    /// so a solution found there is the coordinate of its point, however it
+    /// was reached: the point nearest to `L` from its own displacement, each
+    /// further one from its neighbour, at 64 bits; all of them are then
+    /// brought to the precision of the series.
+    fn invert_line(&self, points: &[Complex]) -> Result<Option<Vec<Complex>>, String> {
+        let prec = self.work;
+        let low = prec.min(64);
+        let displacements: Vec<Complex> = points
+            .iter()
+            .map(|w| Complex::with_val_64(prec, w - &self.l))
+            .collect();
+        let mut nearest = 0;
+        let mut least: Option<Float> = None;
+        for (index, displacement) in displacements.iter().enumerate() {
+            let size = cnum::abs(displacement, prec);
+            if least.as_ref().is_none_or(|seen| size < *seen) {
+                least = Some(size);
+                nearest = index;
+            }
+        }
+        let count = displacements.len();
+        let mut rough: Vec<Option<Complex>> = vec![None; count];
+        let first = Complex::with_val_64(low, &displacements[nearest]);
+        let Some(first) = self.settle(&displacements[nearest], first)? else {
+            return Ok(None);
+        };
+        rough[nearest] = Some(first);
+        let order = (nearest + 1..count).chain((0..nearest).rev());
+        for index in order {
+            let neighbour = if index > nearest {
+                index - 1
+            } else {
+                index + 1
+            };
+            let start = rough[neighbour].clone().expect("settled neighbour");
+            match self.settle(&displacements[index], start)? {
+                Some(t) => rough[index] = Some(t),
+                None => return Ok(None),
+            }
+        }
+        let pairs: Vec<(&Complex, Complex)> = displacements
+            .iter()
+            .zip(rough)
+            .map(|(displacement, t)| (displacement, t.expect("settled point")))
+            .collect();
+        let logs = map_points(&pairs, |(displacement, t)| {
+            Ok(self
+                .sharpen(displacement, t)?
+                .map(|t| cnum::ln_complex(&t, prec)))
+        })?;
+        Ok(logs.into_iter().collect())
     }
 }
 
@@ -447,7 +977,13 @@ struct Level {
     circle: Vec<Arc>,
     twist: Vec<Complex>,
     weights: Option<Vec<Float>>,
+    /// The logarithm of the largest coordinate `|t|` that the last pass
+    /// over the upper and over the lower line needed (long series only).
+    reach: [Mutex<Option<Float>>; 2],
 }
+
+/// The reach of both lines of a level, for the next one.
+type Reach = (Option<Float>, Option<Float>);
 
 struct Step {
     taylor: Vec<Complex>,
@@ -483,6 +1019,7 @@ impl Level {
         digits: u64,
         escalation: u32,
         seeds: Option<&(Complex, Complex)>,
+        known: &Reach,
     ) -> Result<Level, String> {
         let prec =
             cnum::checked_digits_to_bits(digits.checked_add(8).ok_or("precision count overflow")?)?;
@@ -491,8 +1028,8 @@ impl Level {
             Some((upper, lower)) => (upper.clone(), lower.clone()),
             None => fixed_point_seeds(&ln_b, prec)?,
         };
-        let upper = Side::new(&ln_b, &upper_seed, true, prec)?;
-        let lower = Side::new(&ln_b, &lower_seed, false, prec)?;
+        let upper = Side::new(base, &upper_seed, true, prec, known.0.as_ref())?;
+        let lower = Side::new(base, &lower_seed, false, prec, known.1.as_ref())?;
         let centre = cnum::parse_float(&geometry.centre, prec)?;
         let radius = cnum::parse_float(&geometry.radius, prec)?;
         let height = cnum::parse_float(&geometry.height, prec)?;
@@ -637,6 +1174,7 @@ impl Level {
             circle,
             twist,
             weights,
+            reach: [Mutex::new(known.0.clone()), Mutex::new(known.1.clone())],
         })
     }
 
@@ -644,10 +1182,72 @@ impl Level {
         self.upper.prec
     }
 
+    fn reach_of(&self, slot: usize) -> Result<Option<Float>, String> {
+        self.reach[slot]
+            .lock()
+            .map(|reach| reach.clone())
+            .map_err(|_| "a solver thread panicked".to_string())
+    }
+
+    fn reach(&self) -> Result<Reach, String> {
+        Ok((self.reach_of(0)?, self.reach_of(1)?))
+    }
+
+    /// When the upper line does not lie in the disk of its long series: the
+    /// height at which it would, with half an e-folding to spare, and the
+    /// lowest height at which it would at all. The coordinates fall like
+    /// `e^(-y Im kappa)` with the height `y`. Below the second height
+    /// `theta` is singular too (the line leaves the domain of the Abel
+    /// function), so its modes decay slowly or not at all.
+    fn lift(&self) -> Result<Option<(Float, Float)>, String> {
+        let side = &self.upper;
+        let (Some(long), Some(reach)) = (&side.long, self.reach_of(0)?) else {
+            return Ok(None);
+        };
+        let prec = self.prec();
+        let eighth = Float::with_val_64(prec, 1) >> 3u32;
+        let outside = Float::with_val_64(prec, &reach - &long.decay) + eighth;
+        if outside <= 0 {
+            return Ok(None);
+        }
+        let rate = Float::with_val_64(prec, side.kappa.imag());
+        let least = Float::with_val_64(prec, &outside / &rate) + &self.height;
+        let spare = Float::with_val_64(prec, 0.5) / rate;
+        Ok(Some((Float::with_val_64(prec, &least + spare), least)))
+    }
+
+    /// One pass over each line of a long series whose reach is not known
+    /// yet, and the refit of that series to the coordinates it finds.
+    fn calibrate(&mut self, taylor: &[Complex]) -> Result<(), String> {
+        for lower in [false, true] {
+            let slot = usize::from(lower);
+            let (side, line) = if lower {
+                (&self.lower, &self.line_dn)
+            } else {
+                (&self.upper, &self.line_up)
+            };
+            if side.long.is_none() || self.reach_of(slot)?.is_some() {
+                continue;
+            }
+            self.theta(side, line, taylor, lower)?;
+            if let Some(found) = self.reach_of(slot)? {
+                let side = if lower {
+                    &mut self.lower
+                } else {
+                    &mut self.upper
+                };
+                side.retune(&found)?;
+            }
+        }
+        Ok(())
+    }
+
     /// One side's theta coefficients from the polynomial on its line, and the
     /// size of the discarded modes. All samples take the same number of
     /// logarithms; each branch is fixed by its neighbour, and the last sample
     /// by the first one a level earlier, since `F(z + 1 - n) = F(z - (n - 1))`.
+    /// A long series is inverted as soon as the whole line lies in its disk,
+    /// which is at once where the line needs no coordinate beyond it.
     fn theta(
         &self,
         side: &Side,
@@ -656,16 +1256,31 @@ impl Level {
         lower: bool,
     ) -> Result<(Vec<Complex>, Float), String> {
         let prec = self.prec();
+        // Orbits and inversions run at the precision of the series.
+        let work = side.work;
+        let slot = usize::from(lower);
         let mut points = map_points(line, |(argument, _)| {
             Ok(poly_value(taylor, argument, prec).0)
         })?;
-        let target = Float::with_val_64(prec, &side.psi_radius / 4u32);
+        let target = Float::with_val_64(prec, &side.core / 4u32);
+        let mut plan = side.plan(self.reach_of(slot)?.as_ref())?;
+        let mut found: Option<Vec<Complex>> = None;
         let mut levels = Integer::new();
         // The closest approach since the last checkpoint and in the stretch
         // before it: orbits spiral, so single distances are not monotonic.
         let mut closest: Option<Float> = None;
         let mut checkpoint: Option<Float> = None;
         loop {
+            if plan.as_ref().is_some_and(|at| levels >= *at) {
+                match side.invert_line(&points)? {
+                    Some(logs) => {
+                        found = Some(logs);
+                        break;
+                    }
+                    // A point is still outside the disk of the series.
+                    None => plan = Some(side.stride()? + &levels),
+                }
+            }
             let worst = points.iter().fold(Float::new_64(prec), |worst, w| {
                 worst.max(&cnum::abs(&Complex::with_val_64(prec, w - &side.l), prec))
             });
@@ -692,20 +1307,37 @@ impl Level {
                 if cnum::is_zero(w) {
                     return Err("logarithm of zero on a theta line".to_string());
                 }
-                Ok(cnum::ln_complex(w, prec) / &side.ln_b)
+                Ok(cnum::ln_complex(w, work) / &side.ln_b)
             })?;
             for j in (0..next.len()).rev() {
                 let (head, tail) = next.split_at_mut(j + 1);
                 let reference = tail.first().unwrap_or(&wrap);
-                nearest_branch(&mut head[j], reference, &side.ln_b, prec)?;
+                nearest_branch(&mut head[j], reference, &side.ln_b, work)?;
             }
             points = next;
             levels += 1;
         }
-        let logs = map_points(&points, |w| {
-            let t = side.invert_psi(&Complex::with_val_64(prec, w - &side.l))?;
-            Ok(cnum::ln_complex(&t, prec))
-        })?;
+        let logs = match found {
+            Some(logs) => logs,
+            None => map_points(&points, |w| {
+                let t = side.invert_psi(&Complex::with_val_64(work, w - &side.l))?;
+                Ok(cnum::ln_complex(&t, work))
+            })?,
+        };
+        if side.long.is_some() {
+            let highest = logs
+                .iter()
+                .map(|log| log.real())
+                .fold(None::<&Float>, |highest, size| match highest {
+                    Some(seen) if seen >= size => Some(seen),
+                    _ => Some(size),
+                })
+                .ok_or("empty theta line")?;
+            let reach = Float::with_val_64(work, side.kappa.real() * &levels) + highest;
+            *self.reach[slot]
+                .lock()
+                .map_err(|_| "a solver thread panicked")? = Some(reach);
+        }
         let turn = two_pi_i(prec);
         let mut values: Vec<Complex> = Vec::with_capacity(logs.len());
         let mut previous: Option<Complex> = None;
@@ -1142,25 +1774,174 @@ struct Start {
     escalation: u32,
 }
 
+/// A contour that does not suit its base: the upper line has to rise, to
+/// the first of `height` or at least to the second (see `Level::lift`)
+/// where a pass over the line could measure them. `taylor` is the solution
+/// of the first level on that contour, when it has one.
+struct Raise {
+    height: Option<(Float, Float)>,
+    reason: String,
+    taylor: Option<Vec<Complex>>,
+}
+
+/// The contours with higher lines than `geometry`, lowest first, when that
+/// is the default contour or one of these: for bases whose lines leave the
+/// disk of a long series. All keep the Taylor centre, so the polynomial of
+/// one contour starts the next.
+fn raised(geometry: &KneserGeometry) -> Vec<(Float, KneserGeometry)> {
+    let default = KneserGeometry::default();
+    let menu = [("1", "0.7"), ("1.2", "0.9"), ("1.35", "1.1")];
+    let family = *geometry == default
+        || menu.iter().any(|(radius, height)| {
+            geometry.centre == default.centre
+                && geometry.radius == *radius
+                && geometry.height == *height
+        });
+    let Some(given) = cnum::parse_float(&geometry.height, SCOUT_BITS)
+        .ok()
+        .filter(|_| family)
+    else {
+        return Vec::new();
+    };
+    menu.iter()
+        .filter_map(|(radius, height)| {
+            let level = cnum::parse_float(height, SCOUT_BITS).ok()?;
+            (level > given).then(|| {
+                (
+                    level,
+                    KneserGeometry {
+                        centre: default.centre.clone(),
+                        radius: (*radius).into(),
+                        height: (*height).into(),
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+/// Solve on `geometry` or, with `adapt`, on a contour with higher lines
+/// where the upper line of `geometry` leaves the disk of a long series.
 fn solve(
     base: &LogBase,
     geometry: &KneserGeometry,
     target: u64,
     start: Option<Start>,
+    adapt: bool,
 ) -> Result<ComplexKneserState, String> {
+    let menu = if adapt { raised(geometry) } else { Vec::new() };
+    let mut need = match solve_on(base, geometry, target, start.as_ref(), !menu.is_empty())? {
+        Ok(state) => return Ok(state),
+        Err(need) => need,
+    };
+    let mut left = geometry;
+    // The sizes that the low contour needed say nothing about a higher one.
+    let mut warm = start.as_ref().map(|start| Start {
+        taylor: start.taylor.clone(),
+        digits: start.digits,
+        seeds: start.seeds.clone(),
+        escalation: 0,
+    });
+    for (index, (height, taller)) in menu.iter().enumerate() {
+        // The highest contour is taken with less to spare as well.
+        let last = index + 1 == menu.len();
+        if need
+            .height
+            .as_ref()
+            .is_some_and(|(wanted, least)| height < wanted && !(last && height >= least))
+        {
+            continue;
+        }
+        if cnum::verbose() {
+            eprintln!(
+                "kneser-c: {} ({}); trying {}",
+                describe(left),
+                need.reason,
+                describe(taller)
+            );
+        }
+        if let Some(taylor) = need.taylor.take() {
+            warm = Some(Start {
+                taylor,
+                digits: FIRST_LEVEL_DIGITS.min(target),
+                seeds: None,
+                escalation: 0,
+            });
+        }
+        left = taller;
+        match solve_on(base, taller, target, warm.as_ref(), true) {
+            Ok(Ok(state)) => return Ok(state),
+            Ok(Err(higher)) => need = higher,
+            Err(error) => {
+                if cnum::verbose() {
+                    eprintln!("kneser-c: {}: {error}", describe(taller));
+                }
+                break;
+            }
+        }
+    }
+    // No higher contour took the base: the given one, with its orbits.
+    match solve_on(base, geometry, target, start.as_ref(), false)? {
+        Ok(state) => Ok(state),
+        Err(need) => Err(need.reason),
+    }
+}
+
+/// The precision ladder on one contour. With `raise`, a first level whose
+/// upper line does not lie in the disk of its long series ends the solve.
+fn solve_on(
+    base: &LogBase,
+    geometry: &KneserGeometry,
+    target: u64,
+    start: Option<&Start>,
+    raise: bool,
+) -> Result<Result<ComplexKneserState, Raise>, String> {
     let (mut digits, mut taylor, mut seeds, mut escalation) = match start {
         Some(start) => (
             start.digits.min(target),
-            Some(start.taylor),
-            start.seeds,
+            Some(start.taylor.clone()),
+            start.seeds.clone(),
             start.escalation,
         ),
         None => (FIRST_LEVEL_DIGITS.min(target), None, None, 0),
     };
     let mut coarse: Option<Float> = None;
+    let mut reach: Reach = (None, None);
+    let mut first = raise;
     loop {
-        let level = Level::new(base, geometry, digits, escalation, seeds.as_ref())?;
+        let mut level = Level::new(base, geometry, digits, escalation, seeds.as_ref(), &reach)?;
         let prec = level.prec();
+        let mut initial: Vec<Complex> = match &taylor {
+            Some(previous) => previous
+                .iter()
+                .take(level.order + 1)
+                .map(|c| Complex::with_val_64(prec, c))
+                .collect(),
+            None => initial_taylor(&level.upper.ln_b, &level.centre, level.order, prec)?,
+        };
+        initial.resize(level.order + 1, cnum::zero(prec));
+        // Only the first precision level may ask for a higher contour.
+        let entry = first && level.upper.long.is_some();
+        let outside = |height: (Float, Float), taylor: Option<Vec<Complex>>| Raise {
+            height: Some(height),
+            reason: "the upper line leaves the disk of the long series".into(),
+            taylor,
+        };
+        let unfit = |reason: String| Raise {
+            height: None,
+            reason,
+            taylor: None,
+        };
+        match level.calibrate(&initial) {
+            Ok(()) if entry => {
+                if let Some(height) = level.lift()? {
+                    return Ok(Err(outside(height, None)));
+                }
+            }
+            Ok(()) => {}
+            Err(reason) if entry => return Ok(Err(unfit(reason))),
+            Err(reason) => return Err(reason),
+        }
         if cnum::verbose() {
             eprintln!(
                 "kneser-c: level {digits} digits ({prec} bits): {} theta modes, {} samples, Taylor order {}, {} contour nodes, {}+{} Poincare terms",
@@ -1172,16 +1953,18 @@ fn solve(
                 level.lower.psi.len() - 1
             );
         }
-        let mut initial: Vec<Complex> = match &taylor {
-            Some(previous) => previous
-                .iter()
-                .take(level.order + 1)
-                .map(|c| Complex::with_val_64(prec, c))
-                .collect(),
-            None => initial_taylor(&level.upper.ln_b, &level.centre, level.order, prec)?,
+        let (step, norm) = match level.solve(initial) {
+            Ok(solved) => solved,
+            Err(reason) if entry => return Ok(Err(unfit(reason))),
+            Err(reason) => return Err(reason),
         };
-        initial.resize(level.order + 1, cnum::zero(prec));
-        let (step, norm) = level.solve(initial)?;
+        reach = level.reach()?;
+        if entry {
+            // The solution may need coordinates that its first iterate did not.
+            if let Some(height) = level.lift()? {
+                return Ok(Err(outside(height, Some(step.taylor))));
+            }
+        }
         let defect = level.defect(&step)?.max(&norm);
         let limit = cnum::epsilon(digits, prec);
         let fixed_points = (level.upper.l.clone(), level.lower.l.clone());
@@ -1212,13 +1995,14 @@ fn solve(
             continue;
         }
         coarse = None;
+        first = false;
         if digits < target {
             taylor = Some(step.taylor);
             seeds = Some(fixed_points);
             digits = digits.saturating_mul(2).min(target);
             continue;
         }
-        return Ok(ComplexKneserState {
+        return Ok(Ok(ComplexKneserState {
             base: base.clone(),
             geometry: geometry.clone(),
             escalation,
@@ -1232,7 +2016,7 @@ fn solve(
             residual: defect,
             upper: level.upper,
             lower: level.lower,
-        });
+        }));
     }
 }
 
@@ -1293,9 +2077,10 @@ fn start_at_real(
     ln_b: &Complex,
     geometry: &KneserGeometry,
     first: u64,
+    adapt: bool,
 ) -> Result<ComplexKneserState, String> {
     let here = LogBase::Is(ln_b.clone());
-    let direct = match solve(&here, geometry, first, None) {
+    let direct = match solve(&here, geometry, first, None, adapt) {
         Ok(state) => return Ok(state),
         Err(error) => error,
     };
@@ -1318,7 +2103,7 @@ fn start_at_real(
         seeds: None,
         escalation: 0,
     };
-    solve(&here, geometry, first, Some(start))
+    solve(&here, geometry, first, Some(start), adapt)
 }
 
 /// Reach the base along one of the `continuation_paths`.
@@ -1326,10 +2111,11 @@ fn continue_in_base(
     base: &LogBase,
     geometry: &KneserGeometry,
     target: u64,
+    adapt: bool,
 ) -> Result<ComplexKneserState, String> {
     let mut failures = Vec::new();
     for path in continuation_paths(&base.at(SCOUT_BITS)?) {
-        match continue_along(base, geometry, target, &path) {
+        match continue_along(base, geometry, target, &path, adapt) {
             Ok(state) => return Ok(state),
             Err(error) => failures.push(error),
         }
@@ -1344,10 +2130,11 @@ fn continue_along(
     geometry: &KneserGeometry,
     target: u64,
     path: &[Complex],
+    adapt: bool,
 ) -> Result<ComplexKneserState, String> {
     let prec = SCOUT_BITS;
     let first = FIRST_LEVEL_DIGITS.min(target);
-    let mut state = start_at_real(&path[0], geometry, first)?;
+    let mut state = start_at_real(&path[0], geometry, first, adapt)?;
     for segment in path.windows(2) {
         let span = Complex::with_val_64(prec, &segment[1] - &segment[0]);
         let mut done = Float::new_64(prec);
@@ -1379,7 +2166,19 @@ fn continue_along(
                 seeds: None,
                 escalation: state.escalation,
             };
-            match solve(&LogBase::Is(here.clone()), geometry, first, Some(start)) {
+            // A stage stays on the contour that its predecessor needed.
+            let contour = if adapt {
+                state.geometry.clone()
+            } else {
+                geometry.clone()
+            };
+            match solve(
+                &LogBase::Is(here.clone()),
+                &contour,
+                first,
+                Some(start),
+                adapt,
+            ) {
                 Ok(solved) => {
                     if cnum::verbose() {
                         eprintln!(
@@ -1408,13 +2207,18 @@ fn continue_along(
             }
         }
     }
+    let contour = if adapt {
+        state.geometry.clone()
+    } else {
+        geometry.clone()
+    };
     let start = Start {
         taylor: state.taylor,
         digits: first,
         seeds: None,
         escalation: state.escalation,
     };
-    solve(base, geometry, target, Some(start))
+    solve(base, &contour, target, Some(start), adapt)
 }
 
 fn describe(geometry: &KneserGeometry) -> String {
@@ -1445,10 +2249,11 @@ pub fn setup_complex_kneser(
         FIRST_LEVEL_DIGITS.min(target),
         0,
         None,
+        &(None, None),
     )?;
     let mut failures = Vec::new();
     for geometry in &candidates {
-        match solve(&base, geometry, target, None) {
+        match solve(&base, geometry, target, None, true) {
             Ok(state) => return Ok(state),
             Err(error) => failures.push(format!("{}: {error}", describe(geometry))),
         }
@@ -1457,7 +2262,7 @@ pub fn setup_complex_kneser(
         }
     }
     for geometry in &candidates {
-        match continue_in_base(&base, geometry, target) {
+        match continue_in_base(&base, geometry, target, true) {
             Ok(state) => return Ok(state),
             Err(error) => failures.push(format!(
                 "{} continued in the base: {error}",
@@ -1487,11 +2292,11 @@ pub fn setup_complex_kneser_with_geometry(
         .checked_add(GUARD_DIGITS)
         .ok_or("precision count overflow")?;
     let base = LogBase::Of(b.clone());
-    let direct = match solve(&base, geometry, target, None) {
+    let direct = match solve(&base, geometry, target, None, false) {
         Ok(state) => return Ok(state),
         Err(error) => error,
     };
-    continue_in_base(&base, geometry, target)
+    continue_in_base(&base, geometry, target, false)
         .map_err(|error| format!("direct start: {direct}; base continuation: {error}"))
 }
 
@@ -1513,7 +2318,7 @@ impl ComplexKneserState {
             seeds: Some((self.upper.l.clone(), self.lower.l.clone())),
             escalation: self.escalation,
         };
-        solve(&self.base, &self.geometry, target, Some(start))
+        solve(&self.base, &self.geometry, target, Some(start), false)
     }
 
     /// Branch numbers of the logarithms that take `F(u)` to `F(u - n)` for a
@@ -1595,8 +2400,7 @@ impl ComplexKneserState {
             }
             let settled = branch == side.branch
                 && next.iter().all(|w| {
-                    cnum::abs(&Complex::with_val_64(prec, w - &side.l), prec) * 4u32
-                        <= side.psi_radius
+                    cnum::abs(&Complex::with_val_64(prec, w - &side.l), prec) * 4u32 <= side.core
                 });
             branches.push(branch);
             levels.push(next);
@@ -1700,7 +2504,7 @@ impl ComplexKneserState {
                     let lower = argument.imag().is_sign_negative() && !argument.imag().is_zero();
                     let side = if lower { &self.lower } else { &self.upper };
                     let displacement = Complex::with_val_64(prec, &value - &side.l);
-                    if cnum::abs(&displacement, prec) * 2u32 > side.psi_radius {
+                    if cnum::abs(&displacement, prec) * 2u32 > side.core {
                         return Err("the height reduction lost the fixed-point branch".into());
                     }
                     let remaining = Integer::from(&steps - &done);

@@ -114,7 +114,15 @@ zero imaginary part.
   longer a value of the two-fixed-point function; `--slog` covers real
   targets of cut bases, very large targets and targets next to singular
   heights; `--sroot` covers negative heights and is 2 to 4 times faster on
-  complex inputs.
+  complex inputs. Later the same day: the two-sided solver sums long
+  inverse series too and raises its contour on the cut (§ 6.10), so complex
+  bases just outside the boundary take seconds down to `|λ| − 1 = 10⁻¹²`
+  (`1.0005`: 4 s, 100 s before; `1.0002` did not finish before) and cut
+  bases are solved up to `0.0659` (`0.065`: one minute; no result before);
+  a real base is shown to need no branch tracing (§ 6.3); and the four
+  numbers of the command line may be named constants and constant
+  expressions, tetration included, computed to the precision of the run
+  (§ 3.2).
 * **Status (November 2026):** real bases above `e^{1/e}` are solved by a
   theta-mapping iteration whose cost grows linearly with the digits:
   `2^^0.5` takes 0.3 s at 15 digits (41 s before) and matches the independent
@@ -154,6 +162,7 @@ zero imaginary part.
 2. [Building from source](#2-building-from-source)
 3. [Command-line usage](#3-command-line-usage)
    1. [The inverse modes: super-logarithm and super-root](#31-the-inverse-modes-super-logarithm-and-super-root)
+   2. [Constants and expressions in the arguments](#32-constants-and-expressions-in-the-arguments)
 4. [Library usage](#4-library-usage)
 5. [Coverage map](#5-coverage-map)
    1. [✅ Verified](#51--verified)
@@ -398,9 +407,11 @@ tet [-q] --sroot|--ssrt <precision_digits> <value_re> <value_im> <height_re> <he
 
 * `precision_digits` — requested decimal precision (positive integer).
   Internally mapped to MPC binary precision with guard bits.
-* the four remaining arguments are decimal strings for two complex numbers,
-  each as its real part followed by its imaginary part: without a flag the
-  base `b = base_re + i·base_im` and the height `h = height_re + i·height_im`.
+* the four remaining arguments are two complex numbers, each as its real
+  part followed by its imaginary part: without a flag the base
+  `b = base_re + i·base_im` and the height `h = height_re + i·height_im`.
+  Each of the four is a decimal number or a constant expression such as
+  `pi`, `e^(1/e)` or `2^^0.5`, computed to the precision of the run (§ 3.2).
 * `--slog` (alias `--ate`) takes the base and a value and prints the height
   `h` with `F_b(h) = value`; `--sroot` (alias `--ssrt`) takes a value and
   the height and prints the base `b` with `F_b(h) = value`. § 3.1 explains
@@ -684,6 +695,255 @@ inputs carry them: a value typed with 20 digits cannot fix 30 digits of a
 height. When the answer is ill-conditioned the program works with more
 digits internally and re-reads the inputs at that precision (§ 6.9).
 
+### 3.2 Constants and expressions in the arguments
+
+Each of the four numbers after the precision is a decimal number, read as
+before, or a **constant expression**, computed to the precision of the run.
+Quote it for the shell:
+
+```
+$ tet 50 pi 0 1 0                        # b^^1 = b: pi to 50 digits
+3.1415926535897932384626433832795028841971693993751
+0
+$ tet 30 'pi*e^e-pow(2, 0.5)' 0 1 0
+46.1943053660313545855098891412
+0
+$ tet 20 'e^(1/e)' 0 1 0                 # the same number as eta
+1.4446678610097661337
+0
+$ tet 20 '2^^2' 0 'tet(2, 1)' 0          # tetration inside the arguments: 4^^2
+256.00000000000000000
+0
+$ tet 15 'ssrt(16, 3)' 0 'ate(2, 16)' 0  # the base 2 and the height 3
+16.0000000000000
+0
+```
+
+An expression is built from
+
+* numbers (`12`, `-0.5`, `1e-30`) and the imaginary unit `i` (or `j`);
+* the named constants of the first table below; the case of ASCII letters
+  does not matter, a Greek alias is taken as written;
+* `+ - * /`, `^` (or `**`) for the power and `^^` for tetration, and
+  brackets; `−`, `×`, `·` and `÷` are read too;
+* products without a sign: `2pi`, `3i`, `2(1+i)`, `(1+i)(1-i)`;
+* the functions of the second table, among them tetration (`tet(b, h)`, the
+  same as `b^^h`) and its inverses (`slog` or `ate`, `ssrt` or `sroot`).
+
+There are no variables: an argument stands for one number. A leading sign
+binds less than `^`, and `^` less than `^^`; both group from the right:
+`-2^2 = -4`, `2^-2 = 1/4`, `2^3^2 = 2^9`, `2^^3^2 = (2^^3)^2`.
+
+An argument may be complex itself. The number is always
+`first + i·second`, so `'2+i' 0`, `2 1` and `i -2i` are the same base.
+
+The grammar, the names and their meanings are those of the plotters
+[`tet-line`](https://github.com/lukaszgryglicki/tet-line) and
+[`rust-opengl-complex-drawer`](https://github.com/lukaszgryglicki/rust-opengl-complex-drawer),
+which read the same expressions with a variable for the function they draw
+and the same constant expressions for their ranges. On 13 November 2026,
+135 expressions with the operators, every shared function and the 42
+constants had the same value here and in the drawer's `f64` parser to 12
+digits. The differences:
+
+* a zero part has no sign here, so a negative real number lies on the cut
+  itself and `sqrt(-4)` is `2i`; the plotters work with IEEE numbers, read
+  `-4` as `−4 − 0i` and give `−2i` (likewise `ln(-1)`, `(-8)^(1/3)`,
+  `cbrt(-8)`; `sqrt(0-4)` is `2i` in all three);
+* `gamma` and `fact` take real numbers only (there is no arbitrary-precision
+  complex gamma function underneath), `arg(0)` is an error, and a function
+  with a real second argument (`scale`, `unscale`, `powf`, `expf`) refuses
+  a complex one instead of dropping its imaginary part;
+* there are no `inf`, `nan` and `is_nan`-like names, because an argument is
+  a finite number, and two numbers in a row are an error, not a product;
+* `tet(b, h)`, `atan2`, `w`, `min`, `max`, `hypot`, `agm`, `lgamma`,
+  `digamma`, `zeta`, `erf`, `erfc`, `ei`, `li2` and `**` exist only here.
+
+**Precision.** Every operation of an expression is a correctly rounded MPFR
+or MPC operation, or a tetration of this library. The expression is
+evaluated twice, node by node: once with every operation rounded down, and
+once, with twenty more digits, with every operation rounded up. An inexact
+operation therefore leaves different numbers in the two evaluations, and
+their difference shows how many bits were lost. The two values have to
+agree, in the real and in the imaginary part, beyond the precision at which
+the run reads its inputs (the requested digits and the guard bits); where
+they do not, the lost bits are added to the working precision and both
+evaluations are repeated. `(pi + 1e-300) - pi` is `1e-300` to every
+requested digit. This is the evidence of two different evaluations, as
+elsewhere in this program, not an interval proof.
+
+**Zeros.** A part that both evaluations share is exact, and a zero is kept
+as an exact zero where it is exact by construction: a sum of exact numbers
+(`1/4 + 1/4 - 1/2`), a product with an exact zero factor (`pi*i` has the
+real part `0`), a function of a number on an axis (`sqrt(-pi)`,
+`sin(i*pi)`). A real expression of real operations has the imaginary part
+`0`. A zero made of inexact operands is not trusted (`pi - pi`,
+`sqrt(2)^2 - 2`), and neither is a part whose two evaluations have no digit
+in common (`sin(pi)` is positive in one and negative in the other): the
+digits are more than doubled, and after three such attempts in a row the
+argument is refused:
+
+```
+$ tet 20 'sin(pi)' 0 1 0
+error: invalid number "sin(pi)": the value cancels below every precision tried (if it is zero, write 0)
+```
+
+**Branch cuts.** A number exactly on a branch cut gets the value that
+continues the function counter-clockwise around the branch point, as in
+Mathematica and mpmath: `sqrt(-4) = 2i`, `ln(-1) = pi i`,
+`(-8)^(1/3) = 1 + 1.732...i`, `asin(2) = pi/2 - 1.3169...i`,
+`acos(2) = 1.3169...i`, `atanh(2) = 0.5493... - (pi/2) i`. `cbrt` and
+`root` are principal values too: `cbrt(-8)` is `1 + 1.732...i`, not `-2`.
+
+**Tetration inside an argument** is computed by the library itself, not by
+another process, with the domain and the failures of the mode it names:
+`ate(2+i, 1000-500i)` is refused exactly as `tet --slog 50 2 1 1000 -500`
+is (§ 3.1). It is computed twice, for the two evaluations, with about 26
+and 46 digits more than the run requests, because an argument has to be
+right to the working precision of the computation that uses it:
+`tet 50 '2^^0.5' 0 1 0` prints the 50 digits of `tet 50 2 0 0.5 0` and
+takes 12 s instead of 2 s.
+
+**The constants.** A name stands for the constant at whatever precision
+the run reads it: `tet 1000 pi 0 1 0` prints a thousand digits of π. π,
+ln 2, Euler's constant and Catalan's constant are MPFR's; closed forms are
+evaluated with correctly rounded functions and guard bits; the Dottie
+number, the Laplace limit and the Ramanujan–Soldner constant are Newton
+iterations whose residual is checked; Khinchin's, Niven's, the
+Meissel–Mertens, twin prime, Erdős–Borwein, Cahen, reciprocal Fibonacci and
+Euler–Gompertz constants are series whose tails are bounded. The unit
+tests compare every constant with an independent 70-digit reference and
+check that its digits do not depend on the precision asked for
+(`src/constants.rs`). The values below are rounded to 25 digits.
+
+| Names | Meaning | Value |
+|---|---|---|
+| `pi`, `π` | circle constant | `3.141592653589793238462643` |
+| `e` | Euler's number | `2.718281828459045235360287` |
+| `tau`, `τ` | 2 pi | `6.283185307179586476925287` |
+| `halfpi` | pi/2 | `1.570796326794896619231322` |
+| `deg`, `degree` | one degree in radians, pi/180 | `1.745329251994329576923691e-2` |
+| `sqrtpi`, `√π` | square root of pi | `1.772453850905516027298167` |
+| `eta`, `η`, `towermax` | e^(1/e): the largest base whose infinite tower converges | `1.444667861009766133658339` |
+| `towermin` | e^(-e): the smallest base whose infinite tower converges | `6.598803584531253707679019e-2` |
+| `einv` | 1/e | `3.678794411714423215955238e-1` |
+| `gelfond` | Gelfond's constant e^pi | `23.14069263277926900572909` |
+| `gelfondschneider` | Gelfond-Schneider constant 2^sqrt(2) | `2.665144142690225188650297` |
+| `ramanujan` | Ramanujan's constant e^(pi sqrt 163) | `262537412640768744.0000000` |
+| `phi`, `φ`, `golden` | golden ratio (1 + sqrt 5)/2 | `1.618033988749894848204587` |
+| `silver` | silver ratio 1 + sqrt 2 | `2.414213562373095048801689` |
+| `plastic` | plastic number: x^3 = x + 1 | `1.324717957244746025960909` |
+| `supergolden` | supergolden ratio: x^3 = x^2 + 1 | `1.465571231876768026656731` |
+| `tribonacci` | tribonacci constant: x^3 = x^2 + x + 1 | `1.839286755214161132551853` |
+| `sqrt2`, `√2` | square root of 2 | `1.414213562373095048801689` |
+| `sqrt3`, `√3` | square root of 3 | `1.732050807568877293527446` |
+| `sqrt5`, `√5` | square root of 5 | `2.236067977499789696409174` |
+| `ln2` | natural logarithm of 2 | `6.931471805599453094172321e-1` |
+| `ln10` | natural logarithm of 10 | `2.302585092994045684017991` |
+| `gamma`, `γ`, `eulergamma` | Euler-Mascheroni constant | `5.772156649015328606065121e-1` |
+| `catalan` | Catalan's constant | `9.159655941772190150546035e-1` |
+| `apery`, `zeta3` | Apery's constant zeta(3) | `1.202056903159594285399738` |
+| `zeta2`, `basel` | zeta(2) = pi^2/6 | `1.644934066848226436472415` |
+| `omega`, `Ω` | omega constant W(1): omega e^omega = 1 | `5.671432904097838729999687e-1` |
+| `dottie` | Dottie number: cos x = x | `7.390851332151606416553121e-1` |
+| `lemniscate`, `ϖ` | lemniscate constant Gamma(1/4)^2/(2 sqrt(2 pi)) | `2.622057554292119810464840` |
+| `gauss` | Gauss's constant 1/agm(1, sqrt 2) | `8.346268416740731862814297e-1` |
+| `parabolic` | universal parabolic constant sqrt 2 + ln(1 + sqrt 2) | `2.295587149392638074034298` |
+| `levy` | Levy's constant e^(pi^2/(12 ln 2)) | `3.275822918721811159787682` |
+| `khinchin` | Khinchin's constant | `2.685452001065306445309715` |
+| `gompertz` | Euler-Gompertz constant | `5.963473623231940743410785e-1` |
+| `soldner` | Ramanujan-Soldner constant: zero of the logarithmic integral | `1.451369234883381050283968` |
+| `laplace` | Laplace limit | `6.627434193491815809747421e-1` |
+| `erdosborwein` | Erdos-Borwein constant: sum of 1/(2^n - 1) | `1.606695152415291763783302` |
+| `cahen` | Cahen's constant | `6.434105462883380261822543e-1` |
+| `recfib` | reciprocal Fibonacci constant: sum of 1/F_n | `3.359885666243177553172011` |
+| `niven` | Niven's constant | `1.705211140105367764288551` |
+| `mertens` | Meissel-Mertens constant | `2.614972128476427837554268e-1` |
+| `twinprime` | twin prime constant | `6.601618158468695739278121e-1` |
+
+**The functions.** `z` and `w` are complex, `x`, `y`, `r` and `t` real, `n`
+whole; names in one row mean the same.
+
+| Names | Meaning |
+|---|---|
+| `tet` | tet(b, h) = b^^h, tetration |
+| `slog`, `ate` | slog(b, z): the height h with b^^h = z |
+| `ssrt`, `sroot` | ssrt(z, h): the base b with b^^h = z |
+| `sqrt` | square root |
+| `cbrt` | cube root, principal value |
+| `root` | root(z, n) = z^(1/n), principal value |
+| `sqr`, `square` | square |
+| `pow`, `powc` | pow(z, w) = z^w |
+| `powf` | powf(z, x) = z^x, real x |
+| `powi` | powi(z, n) = z^n, whole n |
+| `powu` | powu(z, n) = z^n, whole n that is not negative |
+| `exp` | exponential |
+| `exp2` | exp2(z) = 2^z |
+| `expf` | expf(z, x) = x^z, real x |
+| `ln` | natural logarithm |
+| `log` | log(z) = ln z; log(z, b) = ln z / ln b |
+| `log2` | logarithm to the base 2 |
+| `log10` | logarithm to the base 10 |
+| `sin` | sine |
+| `cos` | cosine |
+| `tan` | tangent |
+| `cot` | cotangent |
+| `sec` | secant |
+| `csc` | cosecant |
+| `asin`, `arcsin` | inverse sine |
+| `acos`, `arccos` | inverse cosine |
+| `atan`, `arctan` | inverse tangent |
+| `atan2` | atan2(y, x): the argument of x + iy, real x and y |
+| `sinh` | hyperbolic sine |
+| `cosh` | hyperbolic cosine |
+| `tanh` | hyperbolic tangent |
+| `coth` | hyperbolic cotangent |
+| `sech` | hyperbolic secant |
+| `csch` | hyperbolic cosecant |
+| `asinh`, `arcsinh` | inverse hyperbolic sine |
+| `acosh`, `arccosh` | inverse hyperbolic cosine |
+| `atanh`, `arctanh` | inverse hyperbolic tangent |
+| `abs`, `mag`, `mod`, `norm`, `polar_r`, `radius` | absolute value |
+| `abs2`, `mag2`, `norm_sqr`, `normsq` | square of the absolute value |
+| `l1_norm`, `l1`, `manhattan`, `taxicab` | \|re z\| + \|im z\| |
+| `arg`, `phase`, `polar_theta`, `theta` | argument, in (-pi, pi] |
+| `to_polar` | abs(z) + i arg(z) |
+| `re`, `real` | real part |
+| `im`, `imag` | imaginary part |
+| `conj`, `conjugate` | complex conjugate |
+| `inv`, `recip`, `inverse`, `finv` | 1/z |
+| `sgn`, `sign`, `signum` | z/abs(z), and 0 for 0 |
+| `cis` | cis(x) = cos x + i sin x, real x |
+| `scale` | scale(z, x) = z x, real x |
+| `unscale` | unscale(z, x) = z/x, real x |
+| `fdiv` | fdiv(z, w) = z/w |
+| `complex`, `rect`, `new` | complex(x, y) = x + iy, real x and y |
+| `polar`, `from_polar` | polar(r, t) = r (cos t + i sin t), real r and t |
+| `floor` | largest whole number not above, of each part |
+| `ceil` | smallest whole number not below, of each part |
+| `round` | nearest whole number, halves away from zero, of each part |
+| `trunc` | whole number towards zero, of each part |
+| `frac`, `fract` | what trunc leaves, of each part |
+| `minabs` | the argument of the smaller absolute value |
+| `maxabs` | the argument of the larger absolute value |
+| `avg` | avg(z, w) = (z + w)/2 |
+| `min` | the smaller of two real numbers |
+| `max` | the larger of two real numbers |
+| `hypot` | hypot(x, y) = sqrt(x^2 + y^2), real x and y |
+| `agm` | arithmetic-geometric mean of two real numbers |
+| `gamma`, `tgamma` | gamma function of a real number (without brackets, gamma is Euler's constant) |
+| `lgamma` | logarithm of \|gamma(x)\|, real x |
+| `fact`, `factorial` | fact(x) = gamma(x + 1), real x |
+| `digamma` | logarithmic derivative of the gamma function, real x |
+| `zeta` | Riemann zeta function of a real number |
+| `erf` | error function of a real number |
+| `erfc` | complementary error function of a real number |
+| `ei` | exponential integral Ei of a real number |
+| `li2` | dilogarithm of a real number |
+| `w`, `lambertw` | Lambert W, principal branch |
+
+`tet --help`, and `tet` without arguments, print both lists.
+
 ---
 
 ## 4. Library usage
@@ -704,6 +964,10 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 ```
+
+The string arguments are those of the command line: decimal numbers or
+constant expressions (§ 3.2); `expression::complex` and `expression::pair`
+evaluate one to a given number of bits.
 
 The string API, CLI and grid runner include supplied significant decimal
 digits when choosing working precision, without changing requested output
@@ -734,8 +998,8 @@ Every row is subject to branch, domain, convergence and resource limits:
 | inverses `--slog`, `--sroot` | see § 6.9 | closed form (regular bases), Newton continuation on the forward evaluators | every result is checked by forward evaluation |
 | complex and negative bases whose primary fixed points both repel | all complex heights that do not overflow; cuts along the real axis left of `−2` | two-sided theta mapping (§ 6.10); Kouznetsov only if that construction fails | equals the Kneser solver on the real axis and five Cauchy-solver values; three or more contours agree to 30 digits at `−2`, `3+4i`, `−1+2i`, `−0.8+0.4i`; 182 of 182 scanned bases outside the region solved |
 | `Im(b) < 0` | reflected domain | Schwarz convention | same numerical limitations as the reflected case |
-| boundary band `0.95 ≤ \|λ\| ≤ 1.05` | case-dependent | attracting inverse germ below `\|λ\| = 1`; theta mappings above it | strict-attractor fringe covered; real bases down to `1.44467` (§ 6.8) and complex bases down to `\|λ\| = 1.001` from outside and up to `\|λ\| = 0.99999` from inside, at a cost that grows towards `\|λ\| = 1`; below `\|λ\| = 1` a failed regular iteration is an error; the parabolic base `η` itself and neutral multipliers remain |
-| real cut segment `0 < b < e^{−e}` | as for complex bases | two-sided theta mapping at the real base; ε-walker only as fallback | `0.04` and `0.01`: three contours agree to 30 digits, a fourth reached by continuation through complex bases agrees, and the values are continuous with `b + 10^{−10}i` |
+| boundary band `0.95 ≤ \|λ\| ≤ 1.05` | case-dependent | attracting inverse germ below `\|λ\| = 1`; theta mappings above it | strict-attractor fringe covered; real bases down to `1.44467` (§ 6.8), complex bases from outside down to `\|λ\| − 1 = 10⁻¹²` in seconds where the argument of `λ` is not next to a low-order root of unity (§ 6.10), and up to `\|λ\| = 0.99999` from inside at a cost that grows towards `\|λ\| = 1`; below `\|λ\| = 1` a failed regular iteration is an error; the parabolic base `η` itself and neutral multipliers remain |
+| real cut segment `0 < b < e^{−e}` | as for complex bases | two-sided theta mapping at the real base; ε-walker only as fallback | `0.04` and `0.01`: three contours agree to 30 digits, a fourth reached by continuation through complex bases agrees, and the values are continuous with `b + 10^{−10}i`; with raised contours up to `0.0659` (`e^{−e} = 0.065988…`): `0.064`, `0.065` and `0.0658` agree on three contours |
 | `b=0` outside nonnegative integer heights; nondegenerate `b` at integer `h≤−2` | — | error | base one retains its constant-function convention |
 
 ### 5.1 ✅ Verified
@@ -777,7 +1041,36 @@ Numerically cross-checked, **not interval-certified**:
   (`1.4610 + 0.0424i` at `r = 0.99`, `1.4722 + 0.0290i` at `0.995`,
   `1.4792 + 0.0169i` at `0.998`, `1.4800 + 0.0135i` at `0.999`,
   `1.4673 + 0.0073i` at `0.9999`) belong to the other function, as § 1.2
-  says.
+  says. With the long series of § 6.10 the sequence from outside goes on:
+  `1.38663865921269 + 0.0565946814238598i` at `r = 1.0001`,
+  `1.38661782875409 + 0.0566219905969793i` at `1 + 10⁻⁸` and
+  `1.38661782669143 + 0.0566219933006876i` at `1 + 10⁻¹⁰`. The short
+  series, with its chain of logarithms, and the long one give the same 30
+  digits at `r = 1.003`; at `r = 1.0001` and at `1 + 10⁻⁸` three contours
+  agree in all 15 digits at real and complex heights (`0.5`, `0.5 + 0.25i`,
+  `−1.5`, `−0.7 + 2i`, and `−0.5` for the second).
+  *Cut bases next to `e^{−e}`.* `F_{0.064}(0.5) = 0.144775599906460 +
+  0.443320899614581i` on the raised contour that the solver chooses and on
+  two contours given explicitly, at four heights, and with 30 requested
+  digits; `0.065` (`0.147494834456034 + 0.442983841845186i`) agrees on
+  three contours at three heights and `0.0658` (`0.149646567159292 +
+  0.442708868079745i`) on three; `0.0655` gives `0.148842097206092 +
+  0.442812526272372i` and `0.0659` gives `0.149914081229433 +
+  0.442674172400147i`, a smooth sequence in the base.
+  *Real bases without branch tracing.* 27 values of regular iteration at
+  real bases (real and complex heights, 15 to 100 digits) are the same
+  digits with the tracing of § 6.3 and without it, the 100-digit reference
+  of `closer_attractor_matches_independent_hundred_digit_reference`
+  included; on the boundary of the disk of the inverse series
+  `|Im F| · |ln b| / π` stays below `0.49` for the sampled bases, as the
+  argument of § 6.3 requires (below 1).
+  *The inverses on the new bases.* `--slog` returns the heights at
+  `|λ| = 1 + 10⁻⁸` and at the cut base `0.064`, and `--sroot` finds the base
+  with `|λ| = 1.0001`, `1.77016044416313 + 0.163180206721051i`, from its
+  value at height `0.5` (`t1712`, `t1713`). Both are many-valued: from
+  `F_{0.064}(0.5)` at height `0.5` the super-root returns another base that
+  has this value, `0.0637136516945754 + 0.0989628904766703i`, and verifies
+  it.
   *Inverses.* Every new `--slog` and `--sroot` value below was confirmed by
   forward evaluation at 30 digits, apart from the heights that round to a
   singular height.
@@ -1082,11 +1375,19 @@ part does not guarantee a solvable or accurate near-cut case.
   root-of-unity or irrationally neutral cases, or guarantee practical runtime
   arbitrarily close to the neutral boundary. Stalled alternative constructions
   still cannot return their old relaxed-gate samples as answers.
-* **Complex bases next to the Shell–Thron boundary from outside:** the
-  two-sided solver needs about `1/ln|λ|` logarithms per sample, where `λ` is
-  the weaker multiplier (`0.5+2i`, `|λ| = 1.004`: 5 s at 15 digits; `0.06`,
-  `λ = −1.007`: 11 s; `|λ| = 1.001` at argument 1: 30 s; `|λ| = 1.0001`:
-  more than ten minutes; cut bases from `0.065` up to `e^{−e}` likewise).
+* **Complex bases next to the Shell–Thron boundary from outside:** with the
+  long series of § 6.10 the two-sided solver takes seconds for a generic
+  multiplier `λ`, however close to the unit circle (15 digits, argument 1:
+  `|λ| = 1.001` 3.5 s, `1.0005` 4 s, `1.0002` 4 s, `1 + 10⁻⁵` 5 s;
+  argument 2: `1 + 10⁻¹²` 5 s; before: 51 s, 100 s, and no result in 40
+  minutes). The cost comes back where the argument of `λ` is next to a
+  low-order root of unity, because the disk of the series shrinks there: at
+  `|λ| = 1.0001`, argument `0.2` takes 50 s, `π/2` 164 s and `2π/3` 13
+  minutes. On the cut (`λ < −1`) the bases up to `0.0659` are solved:
+  `0.06` (`λ = −1.017`) 13 s, `0.063` 32 s, `0.064` 20 s, `0.065` about a
+  minute, `0.0658` and `0.0659` six to nine minutes (before: `0.063` 91 s,
+  no result in 40 minutes from `0.065` on). `0.06595` and `0.06598` gave no
+  result in 45 minutes; `e^{−e} = 0.0659880…` itself is the neutral case.
   Neutral multipliers are not covered. The base
   `−0.8+0.4i`, where the Cauchy solver returned a different artifact at
   every precision, is now solved (§ 5.1); its anatomy is kept in
@@ -1345,13 +1646,29 @@ chain is repeated. With Taylor jumps the samples make the same jumps;
 where one of them cannot, shorter jumps are tried, and after the shortest
 the chain goes on in single steps. This is done in the half-plane
 `|λ^{h+2}| < 1`, where the tetration is single-valued; outside it the
-logarithms are the principal ones (§ 1.2). A real base between 1 and
-`e^{1/e}` keeps real heights on the positive real axis and needs no
-samples. The values above are now `1.5088 + 0.0616i` at `0.56` and
+logarithms are the principal ones (§ 1.2). The values above are now `1.5088 + 0.0616i` at `0.56` and
 `1.53538151660357 + 0.0781658334622440i` at `0.60`, and the anchor
 `F(0) = 1`, which failed on the wrong branch for `|λ| ≥ 0.998`, holds:
 `|λ| = 0.998` at the same argument gives `1.47919432026926 +
 0.0169457889363597i`.
+
+**A real base needs no tracing.** For a real base with a real attracting
+fixed point `L` (`e^{−e} < b < e^{1/e}`) every logarithm that the tracing
+would fix is the principal one, at real and complex heights alike, and no
+samples are carried. The inverse germ `ψ`, with `F = L + ψ(t)` at the
+coordinate `t`, has real coefficients and is one-to-one on its disk `D`:
+if `ψ(t₁) = ψ(t₂)`, the functional equation gives `ψ(λⁿt₁) = ψ(λⁿt₂)` for
+every `n`, and `ψ` is one-to-one near 0. On the image `Ω = L + ψ(D)` the
+map `b^z` is `ψ(t) ↦ ψ(λt)`, hence one-to-one too, so `Ω` holds no two
+points that differ by the period `2πi/ln b`. `Ω` is connected, contains the
+real point `L` and is symmetric about the real axis. If it reached the
+line `Im z = π/|ln b|`, it would hold the conjugate of that point as well,
+one period away. So `Ω` lies in the strip `|Im z| < π/|ln b|`, where the
+principal logarithm is the inverse of `b^z`. The check against the integer
+tower below stays in force. The 27 values compared with and without the
+tracing are listed in § 5.1; the run of
+`closer_attractor_matches_independent_hundred_digit_reference` takes 421 s
+instead of 561 s.
 
 **Real heights are checked against the integer tower.** For a real height
 `h` one sample of the chain sits at the next integer above the chain point,
@@ -1800,7 +2117,7 @@ the edge `Im a = π`. `Im b < 0` is the mirror image.
 The solver is the one of § 6.8 without the symmetry: a complex Taylor
 polynomial between the two lines, both `θ` functions, Cauchy's formula on the
 whole circle, a complex normalizing shift, Anderson mixing on the real and
-imaginary parts, the same precision ladder. Three things are new.
+imaginary parts, the same precision ladder. These things are new.
 
 * **Logarithm branches by continuity.** Nothing keeps `F` away from the
   negative real axis, so the principal logarithm is not the inverse step.
@@ -1833,6 +2150,36 @@ imaginary parts, the same precision ladder. Three things are new.
   smaller contours (`−1/2, 3/4, 0.35` and `−1, 0.7, 0.3`) are tried when the
   default one fails. The Poincaré radius
   shrinks near low-order resonances of the multiplier (`λ₊ ≈ −1` on the cut).
+* **Long inverse series.** A sample of a theta line reaches the disk of
+  the inverse series `ψ₊` after about `ln(T/ρ)/ln|λ₊|` logarithms, where `T`
+  is the largest coordinate on the line and `ρ` the radius used: thousands
+  of logarithms per sample, and as many exponentials per contour node, when
+  `|λ₊|` is next to 1. But the coefficients of `ψ₊` decay like `r^{−n}`
+  with a radius `r` far beyond the short one (at `|λ₊| = 1.003`, argument
+  1: `r = 2.4`, and the line needs `T = 1.25`). A fixed point whose orbits
+  take 64 logarithms or more per e-folding therefore gets a long series: `r`
+  is read from the coefficients, the series is summed on `|t| ≤ r e^{−x}`
+  with about `precision/x` terms and guard bits for the rounding of the
+  recurrence, and `x` is chosen from the coordinates that the lines need,
+  so that most bases take no logarithm at all. A coordinate found in that
+  disk is the right one whatever way led to it, because `ψ₊` is one-to-one
+  there: the series is kept only on a radius `ρ` with
+  `Σ |cₙ| ρⁿ < (7/8) π/|ln b|`, where its image holds no two points one
+  period apart. The functional equation is checked on the circle before the
+  series is used. The coordinates of a line are found by continuation from
+  the sample nearest to the fixed point (64 bits) and then brought to the
+  working precision by Newton steps in parallel.
+* **Raised contours on the cut.** For a cut base the disk of `ψ₊` is
+  pinched by the 2-cycle (`r ≈ 1.3 √δ` for `λ₊ = −1 − δ`), and `θ₊` is
+  singular below the height at which the line leaves that disk (measured:
+  `0.33` at `0.06`, `0.45` at `0.063`). The default line, at height `0.5`,
+  then needs ever more modes and fails from `0.065` on. When the first
+  precision level shows that the line lies outside the disk, or fails
+  with a long upper series, the solver moves to a taller contour with the
+  same centre (`−1/2`; radius and height `1, 0.7`, then `1.2, 0.9`, then
+  `1.35, 1.1`), started from the polynomial of the lower one, and keeps it
+  for the later stages. If the taller one fails, the given contour is
+  tried as before. A contour given explicitly is never replaced.
 * **Continuation in the base.** If no direct start converges, the base is
   reached from a real one through a path in the `ln b` plane that stays
   outside the Shell–Thron region (which lies in `−e ≤ Re ≤ 0.87`,
@@ -1842,9 +2189,11 @@ imaginary parts, the same precision ladder. Three things are new.
   region. A secant predictor in the base lengthens the steps.
 
 Cost: one to two seconds at 15 digits and three to five at 30 for ordinary
-bases; `0.04` 2 s, `0.5+2i` (`|λ₊| = 1.004`) 5 s, `0.06` (`λ₊ = −1.007`)
-11 s, `1.7708 + 0.1625i` (`|λ₊| = 1.001`) 30 s. The number of logarithms per
-sample grows like `1/ln|λ₊|` towards the Shell–Thron boundary. Very small bases need the continuation: `10^{−6}` 13 s,
+bases; `0.04` 2 s, `0.5+2i` (`|λ₊| = 1.004`) 1.3 s, `0.06`
+(`λ₊ = −1.017`) 13 s, `1.7708 + 0.1625i` (`|λ₊| = 1.001`) 2 s. With the long series the
+cost no longer grows towards the Shell–Thron boundary for generic
+multipliers; it does next to low-order roots of unity and on the cut next
+to `e^{−e}` (§ 5.3). Very small bases need the continuation: `10^{−6}` 13 s,
 `10^{−10}` 19 s, `10^{−100}` two minutes. The evidence is listed in § 5.1; the acceptance gates
 (both junctions, the functional equation across the strip, normalization,
 discarded modes) are consistency checks, not an enclosure.
@@ -1946,6 +2295,17 @@ affected inputs fail with an error instead.
    whose digits were confirmed by an independent route (another
    construction, another contour, the functional equation at a higher
    precision, the slow path it replaces) and an entry in § 5 and § 8.
+8. **Every extension covers all three functions.** Support for new complex
+   bases, heights or values is complete only when tetration `b^^h`, its
+   inverse in the height (arc-tetration, the super-logarithm: `--slog` /
+   `--ate`) and its inverse in the base (the super-root: `--sroot` /
+   `--ssrt`) all work correctly there. Each of the three is run on the new
+   inputs and either returns the requested digits or fails with an error
+   that says why; each inverse must return a solution that the forward
+   function reproduces (both are many-valued, § 6.9: it need not be the
+   height or the base that the value was computed from); each has its own
+   regression test. A limit that remains for one of them is recorded in
+   § 8.
 
 The fixed-size numbers that remain in `src/` and `examples/`, each checked
 against rule 4. A new one needs a line here before it is merged: the test
@@ -1957,16 +2317,19 @@ digits, and fails on any that is not permitted there by name.
 | where | what is fixed-size | why no digit can depend on it |
 |---|---|---|
 | `kneser::nats` | the working precision in nats, as a 64-bit number | a size: it sets series lengths, guard-bit counts and cut-offs that keep a 64-nat margin |
-| `Model::invert_psi`, `Model::invert_long`, `Side::invert_psi` | Newton iterations that start at 64 bits | the precision doubles up to the working precision; the last step and the residual test are done there |
+| `Model::invert_psi`, `Model::invert_long`, `Side::invert_psi`, `Side::invert_line` | Newton iterations that start at 64 bits; the continuation along a theta line from one sample to the next, at 64 bits | the precision doubles up to the working precision; the last step and the residual test are done there, and a coordinate is accepted only inside the disk on which the series is one-to-one |
 | `kneser_complex::second_branch` | the `W₁` seed, at most 128 bits | starts the Newton iteration for the fixed point at the working precision |
 | `kneser_complex::continuation_paths`, `continue_along` | way-points of a path of bases, 128 bits | the bases on the way only warm-start the solve at the exact base |
-| `kneser_complex::geometries` | the order in which the contours are tried, from `ln b` at 128 bits | every contour gives the same function; the solve and its gates run at the working precision |
+| `kneser_complex::geometries`, `raised` | the order in which the contours are tried, from `ln b` at 128 bits; the heights of the raised contours compared at 128 bits | every contour gives the same function; the solve and its gates run at the working precision |
+| `LONG_SERIES_STEPS`, `DECAY_TERMS` (`kneser_complex.rs`) | 64 logarithms per e-folding, from which a fixed point gets a long series; the 128 coefficients from which its decay radius is first read | a choice between two ways to the same coordinates; the radius used is then fixed by the one-to-one test and the functional equation at the working precision |
 | `GUARD_DIGITS` (`kneser.rs`), `CHECK_DIGITS` (`inverse.rs`) | 6 and 10 digits | added to the requested digits: they only raise the precision |
 | the precision ladders of both theta solvers | levels of 12, 24, … digits | each level starts the next one; the gates are passed at the last |
 | `inverse::follow` (`LOOSE_BITS`), `inverse::sroot_continued` (`WALK_DIGITS`) | roots on the way of a continuation to 24 bits; forward values of a super-root path to 14 digits plus the conditioning | the end of the path is polished by Newton at the full working precision and then verified by forward evaluation |
 | `inverse::sroot_real` | bracketing at 24 digits plus the conditioning | the secant steps and the verification run at the full precision |
 | central differences (`slog_generic`, `Trials`) and secants (`Trials`) | derivatives to half the working digits or less | a Newton slope steers the iteration; its root does not depend on it |
 | comparisons | the constants `0.25`, `0.5`, `1.5` and small integer ratios | exact, compared at the working precision |
+| `expression.rs` | 16 bits beyond the precision of the run on which the two evaluations must agree; 20 digits between them; 64 guard bits of a named constant before its directed rounding; three total cancellations, and 64 times the digits, before an input is refused; the 64 bits below the unit place that a large value must keep; the 8 values remembered | margins and limits of the precision, never a value: they raise the precision or end in an error |
+| `constants.rs` | starting values `3/4`, `2/3`, `3/8` of the Newton iterations; guard bits 64 | exact small ratios at the working precision; each iteration ends on a residual test there |
 | `schroder::LongSeries`, `schroder::Anchor` | step and term counts (256, 4096) and cost weights that choose between the short series, the long series and Taylor jumps; the 65536 levels of the integer tower kept for the branch check | each choice is between methods that converge to the same value; the check can only reject |
 | `kouznetsov.rs` | `as_secs_f64` | timing output |
 | `examples/grid_runner.rs`, `examples/edge_runner.rs` | `f64` percentages of passing cells, `as_secs_f64` | statistics and timing output of the two test-grid tools; every value they print comes from the library |
@@ -1990,8 +2353,10 @@ The same contract opens `src/lib.rs`.
 ## 8. Known limitations
 
 * **Coverage:** neutral multipliers (the Shell–Thron boundary itself,
-  including the parabolic base `η`) are not covered, and the cost grows
-  without bound towards them from either side. A failed construction is not
+  including the parabolic base `η`) are not covered. The cost grows without
+  bound towards them from inside the region, towards `η` and `e^{−e}` on the
+  real axis, and from outside next to low-order roots of unity of the
+  multiplier (§ 5.3). A failed construction is not
   proof that no alternative mathematical construction exists.
 * **Resources and convergence:** the former 32768/131072-node budgets and
   fixed iteration/order limits are removed. For real bases above `η` the
@@ -2030,14 +2395,15 @@ The following remaining directions require separate mathematical work:
 |---|---|---|
 | Validated numerics | Residuals and same-family agreement do not bound output error | Outward-rounded enclosures for roots, series/tails, quadrature, normalization and inverse operators; explicit domain/branch conditions |
 | Real-base high-precision methods | Done for real `b > η` by the theta-mapping solver (§ 6.8); 1000 digits is hours, not impossible | Faster polynomial evaluation and a Newton–Krylov outer iteration would cut the cost further |
-| Complex bases outside Shell–Thron | Done by the two-sided theta mapping (§ 6.10) for every scanned base whose primary fixed points both repel | A proof that the iteration converges for every such base; the cost near neutral multipliers |
+| Complex bases outside Shell–Thron | Done by the two-sided theta mapping (§ 6.10) for every scanned base whose primary fixed points both repel | A proof that the iteration converges for every such base; the cost next to low-order roots of unity of the multiplier, where the disk of the inverse series shrinks (§ 5.3) |
 | The two-fixed-point function inside Shell–Thron | It exists there as well and differs from regular iteration (Paulsen 2019): at `\|λ\| = 0.998`, argument 1, height `0.5`, by `0.09 − 0.04i` | A convention for offering both families; the solver currently requires a repelling upper fixed point |
 | Regular iteration next to the boundary | With the long series (§ 6.3) it reaches `\|λ\| = 0.9999` in 45 s and `0.99999` in 9 minutes; each further factor of ten costs ten to thirty times more, mostly for the samples of the chains | Samples kept only on the levels that need them; the coefficient recursion in parallel; a branch check for complex heights like the integer tower for real ones; the branch of the many-valued region outside `\|λ^{h+2}\| < 1` (principal logarithms at present) |
 | Parabolic/root-of-unity cases | Sectorial Fatou coordinates exist in classical local theory; at λ=−1 use the second iterate | Truncation bounds, sector matching, inversion and the intended global normalization |
-| Near-parabolic real bases | With the long Poincaré series (§ 6.8) the theta mapping reaches `b − η ≈ 2·10⁻⁶`, at a cost like `(b − η)^{−1/2…−2/3}` | Taylor expansions of the Abel function away from the fixed point, or perturbed Fatou coordinates; the same long series for the two-sided solver (cut bases next to `e^{−e}`, complex bases next to the boundary) |
+| Near-parabolic real bases | With the long Poincaré series (§ 6.8) the theta mapping reaches `b − η ≈ 2·10⁻⁶`, at a cost like `(b − η)^{−1/2…−2/3}` | Taylor expansions of the Abel function away from the fixed point, or perturbed Fatou coordinates |
 | Other rotating near-neutral attractors | Paired steps now address strict attraction near `-1`; other near-resonances still use generic bounds | Further cancellation-aware iterates with local error/branch bounds, not relaxed precision goals |
 | Difficult complex bases | `−0.8+0.4i` is solved (§ 5.1); the former strictly attracting deep-band witness is independently checked | An external reference value for a complex base outside the region, from an unrelated implementation |
-| Cut-base limits | Solved at the real base itself, with contour independence and continuity from the upper half-plane (§ 5.1) | The same external comparison; behaviour as `b → 0⁺` and `b → e^{−e}` |
+| Cut-base limits | Solved at the real base itself, with contour independence and continuity from the upper half-plane (§ 5.1), up to `0.0659` with raised contours (§ 6.10) | The same external comparison; behaviour as `b → 0⁺`; the last `10^{−4}` below `e^{−e}`, where the disk of the inverse series closes onto the 2-cycle (Fatou coordinates of the second iterate) |
+| Inverses beyond their present reach | `--slog` follows the orbit of the value into the basin of a Shell–Thron base and refuses values whose orbit leaves it (`tet --slog 15 2 1 1000 -500`); `--sroot` at a complex height can run for a long time (`tet --sroot 15 10 1 0.3 -1`: no result in 15 minutes) | A search for the heights of values outside the basin (they sit next to the singular heights); a predictor for the super-root at complex heights |
 
 Do not conflate all `|λ|≈1` cases. A routing band is not the neutral boundary;
 root-of-unity multipliers and irrationally neutral multipliers pose different
@@ -2096,6 +2462,8 @@ src/
                      cut-base ε-walker (§ 6.7)
   fft.rs             big-float FFT cross-correlation kernels
   cnum.rs            complex-number helpers, parsing/formatting, env flags
+  constants.rs       named constants at any precision (§ 3.2)
+  expression.rs      constant expressions for the textual inputs (§ 3.2)
   integer_height.rs  finite-precision integer towers and exact special cases
 tests/               phase1…phase18 plus Python plotting/Makefile regressions
                      batteries (CLI, regions, Schröder, Kouznetsov,
@@ -2108,14 +2476,14 @@ updates.md           dated research log (current campaign status)
 
 ```console
 $ TET_MT=4 cargo test --release --all-targets -- --test-threads=1
-$ cargo test --release --lib       # includes high-precision jump cases
+$ cargo test --release --lib       # includes high-precision jump cases, constants, expressions (about 3 min)
 $ TET_MT=2 cargo test --release --test phase12_coverage -- --test-threads=1
 $ TET_MT=2 cargo test --release --test phase13_near_neutral -- --test-threads=1
 $ TET_MT=2 cargo test --release --test phase14_complex_jumps -- --test-threads=1
 $ cargo test --release --test phase4_schroder   # regular iteration, branches, long series (about 10 s)
 $ cargo test --release --test phase16_kneser    # theta-mapping solver (about 30 s)
-$ cargo test --release --test phase17_inverse   # --slog / --sroot (about 80 s)
-$ cargo test --release --test phase18_complex_kneser   # two-sided solver (about 50 s)
+$ cargo test --release --test phase17_inverse   # --slog / --sroot (about 3 minutes)
+$ cargo test --release --test phase18_complex_kneser   # two-sided solver (about a minute)
 $ cargo test --release --test phase8_verification   # regression witnesses (about 80 s)
 $ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_plotting.py'
 $ cargo test --release --doc
@@ -2181,6 +2549,23 @@ The native-height tests use the long inverse series of § 6.3; the chains of
 the paired 100-digit cases carry the samples of the branch tracing. That
 tree also has the test `machine_numbers_stay_out_of_the_arithmetic` of
 § 7.1 (phase 10: 28 tests), and the default tier passed on it again.
+
+The run of the evening of 13 November was made on the tree with the long
+series and the raised contours of § 6.10, real bases without tracing
+(§ 6.3) and the expressions of § 3.2. The default tier passed, one target
+at a time: library 70 (14 of them for the constants and the expressions),
+phase 7 15, phase 10 28, phase 17 14, phase 18 12, every other target with
+the counts above, and the 19 Python tests. New tests: `t712`–`t714`
+(constants and expressions on the command line; `--help` and this README
+name every constant and function), `t1712`, `t1713` (the inverses on bases
+next to the boundary and on the cut), `t1810`, `t1811` (long series, raised
+contour) and the unit tests of `src/constants.rs` and `src/expression.rs`.
+The slow suites 13–15 passed again, all 17 tests (same host and flags):
+phase 13 in 14 s, 25 s, 47 s and 424 s; phase 14 in 7 s, 141 s, 337 s and
+851 s; phase 15 in 32 s, 36 s and 37 s, the real base in 158 s, 339 s and
+847 s, the complex one in 294 s, 574 s and 1247 s. The cases of real bases
+are faster than in the table because they no longer carry the samples of
+the tracing.
 
 ## 11. References
 

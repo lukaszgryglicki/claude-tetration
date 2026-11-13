@@ -458,6 +458,59 @@ fn t1711_sroot_at_negative_heights_and_complex_targets() {
 }
 
 #[test]
+fn t1712_slog_next_to_the_shell_thron_boundary_from_outside() {
+    // The two-sided solver with its long series (|lambda| = 1 + 10^-8 at
+    // the upper fixed point) and on a contour with higher lines (the cut
+    // base 0.064, lambda = -1.0056): the forward values, each confirmed on
+    // other contours, give back their height.
+    let digits = 15u64;
+    let prec = cnum::digits_to_bits(digits);
+    let height = parse("0.5", "0.25", prec);
+    for (base, value) in [
+        (
+            (
+                "1.770092737094460584327615948947547484885",
+                "0.1632528288422982831409167375865243798265",
+            ),
+            ("1.34819262932619", "2.39545550581152e-1"),
+        ),
+        (
+            ("0.064", "0"),
+            ("3.16405891384551e-1", "2.10445927511775e-1"),
+        ),
+    ] {
+        let found = inverse::slog(
+            &parse(base.0, base.1, prec),
+            &parse(value.0, value.1, prec),
+            prec,
+            digits,
+        )
+        .unwrap();
+        assert!(
+            agreement(&found, &height, prec) >= digits - 3,
+            "b={}: {found}",
+            base.0
+        );
+    }
+}
+
+#[test]
+fn t1713_sroot_next_to_the_shell_thron_boundary_from_outside() {
+    // The base with |lambda| = 1.0001 at its upper fixed point (argument 1),
+    // 1.77016044416312 + 0.163180206721050i, from its value at height 0.5:
+    // some fifty solves of the two-sided solver, each a few seconds with
+    // the long series (the slowest test of this file, about two minutes).
+    let found =
+        tetration::sroot_str("15", "1.38663865921269", "5.65946814238598e-2", "0.5", "0").unwrap();
+    let prec = cnum::digits_to_bits(15);
+    let base = parse("1.77016044416312", "1.63180206721050e-1", prec);
+    assert!(
+        agreement(&parse(&found.0, &found.1, prec), &base, prec) >= 13,
+        "{found:?}"
+    );
+}
+
+#[test]
 fn t1705_cli_flags() {
     let run = |arguments: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_tet"))

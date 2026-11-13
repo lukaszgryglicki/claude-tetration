@@ -27,9 +27,14 @@
 //!   no digit depends on it) and a line in the table of README § 7.1.
 //! * No fixed cap on iterations, series lengths or grid sizes may limit the
 //!   accuracy silently.
+//! * Support for new bases, heights or values is complete only when
+//!   tetration, the super-logarithm (`--slog`) and the super-root (`--sroot`)
+//!   all work correctly on them, each with its own regression test.
 
 pub mod cnum;
+pub mod constants;
 pub mod dispatch;
+pub mod expression;
 pub mod fft;
 pub mod integer_height;
 pub mod inverse;
@@ -56,8 +61,9 @@ pub fn tetrate_str(
     let digits: u64 = prec_str
         .parse()
         .map_err(|_| format!("invalid precision: {:?}", prec_str))?;
-    let mut prec =
-        cnum::checked_input_precision(digits, &[base_re, base_im, height_re, height_im])?;
+    let inputs = [base_re, base_im, height_re, height_im];
+    let prec = cnum::checked_input_precision(digits, &inputs)?;
+    let mut prec = expression::input_precision(&inputs, prec)?;
     let result = loop {
         let b = cnum::parse_complex(base_re, base_im, prec)?;
         let h = cnum::parse_complex(height_re, height_im, prec)?;
@@ -123,7 +129,8 @@ fn inverse_str(
     let digits: u64 = prec_str
         .parse()
         .map_err(|_| format!("invalid precision: {:?}", prec_str))?;
-    let mut prec = cnum::checked_input_precision(digits, &inputs)?;
+    let prec = cnum::checked_input_precision(digits, &inputs)?;
+    let mut prec = expression::input_precision(&inputs, prec)?;
     let result = loop {
         let first = cnum::parse_complex(inputs[0], inputs[1], prec)?;
         let second = cnum::parse_complex(inputs[2], inputs[3], prec)?;

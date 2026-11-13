@@ -382,3 +382,110 @@ fn t1809_a_nearly_neutral_multiplier_starts_directly() {
         cnum::checked_exp(&Complex::with_val_64(prec, eval("-0.5", "0") * &ln_b), prec).unwrap();
     assert!(agreement(&value, &image, prec) >= digits - 1);
 }
+
+#[test]
+fn t1810_a_long_poincare_series_reaches_the_lines() {
+    // |lambda| = 1.0005 at the upper fixed point (argument 1): the digits of
+    // the short series, whose orbits took thousands of logarithms per sample
+    // (100 s). The long series holds the lines and takes none.
+    assert_eq!(
+        tetration::tetrate_str(
+            "15",
+            "1.77043116020741634070338878631",
+            "0.162889518463665419508723173616",
+            "0.5",
+            "0"
+        )
+        .unwrap(),
+        (
+            "1.38672194162660".to_string(),
+            "5.64853994314319e-2".to_string()
+        )
+    );
+    // |lambda| = 1 + 10^-8, out of reach of the short series: the same
+    // digits on another contour, and the functional equation.
+    let digits = 15u64;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse(
+        "1.770092737094460584327615948947547484885",
+        "0.1632528288422982831409167375865243798265",
+        prec,
+    );
+    let ln_b = cnum::ln_complex(&b, prec);
+    let state = kneser_complex::setup_complex_kneser(&b, prec, digits).unwrap();
+    let second = kneser_complex::setup_complex_kneser_with_geometry(
+        &b,
+        prec,
+        digits,
+        &contour("-0.5", "0.75", "0.35"),
+    )
+    .unwrap();
+    let eval = |state: &kneser_complex::ComplexKneserState, re: &str, im: &str| {
+        kneser_complex::eval_complex_kneser(state, &parse(re, im, prec), prec, digits).unwrap()
+    };
+    for ((re, im), expected) in [
+        (("0.5", "0"), ("1.38661782875409", "5.66219905969793e-2")),
+        (("0.5", "0.25"), ("1.34819262932619", "2.39545550581152e-1")),
+        (
+            ("-1.5", "0"),
+            ("-9.71562534278606e-1", "9.51318587182804e-2"),
+        ),
+        (("-0.7", "2"), ("9.24791415358686e-1", "1.12800371163643")),
+    ] {
+        let value = eval(&state, re, im);
+        let (real, imaginary) = cnum::format_complex(&value, digits as usize);
+        assert_eq!(
+            (real.as_str(), imaginary.as_str()),
+            expected,
+            "h={re}+{im}i"
+        );
+        assert!(
+            agreement(&value, &eval(&second, re, im), prec) >= digits - 1,
+            "h={re}+{im}i"
+        );
+    }
+    let image = cnum::checked_exp(
+        &Complex::with_val_64(prec, eval(&state, "-0.5", "0") * &ln_b),
+        prec,
+    )
+    .unwrap();
+    assert!(agreement(&eval(&state, "0.5", "0"), &image, prec) >= digits - 1);
+}
+
+#[test]
+fn t1811_cut_bases_next_to_the_flip_take_higher_lines() {
+    // lambda = -1.0056 at the real fixed point of 0.064. On the default
+    // contour the upper line leaves the domain of the Abel function there,
+    // and no number of theta modes helps; the solver moves to a contour
+    // with higher lines. The explicit contours -0.5/1.2/0.9 and
+    // -0.5/1.35/1.1 gave these digits, and 30 requested digits agree.
+    let digits = 15u64;
+    let prec = cnum::digits_to_bits(digits);
+    let b = parse("0.064", "0", prec);
+    let ln_b = cnum::ln_complex(&b, prec);
+    let state = kneser_complex::setup_complex_kneser(&b, prec, digits).unwrap();
+    let eval = |re: &str, im: &str| {
+        kneser_complex::eval_complex_kneser(&state, &parse(re, im, prec), prec, digits).unwrap()
+    };
+    for ((re, im), expected) in [
+        (("0.5", "0"), ("1.44775599906460e-1", "4.43320899614581e-1")),
+        (
+            ("0.5", "0.25"),
+            ("3.16405891384551e-1", "2.10445927511775e-1"),
+        ),
+        (
+            ("-1.5", "0"),
+            ("2.28011900720536e-1", "3.72774621673599e-1"),
+        ),
+    ] {
+        let (real, imaginary) = cnum::format_complex(&eval(re, im), digits as usize);
+        assert_eq!(
+            (real.as_str(), imaginary.as_str()),
+            expected,
+            "h={re}+{im}i"
+        );
+    }
+    let image =
+        cnum::checked_exp(&Complex::with_val_64(prec, eval("-0.5", "0") * &ln_b), prec).unwrap();
+    assert!(agreement(&eval("0.5", "0"), &image, prec) >= digits - 1);
+}

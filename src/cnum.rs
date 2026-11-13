@@ -526,10 +526,10 @@ fn round_exp_component(
 }
 
 /// Parse a complex number from two decimal strings (real, imaginary).
+/// The complex number `re + i im` of two textual inputs: decimal numbers,
+/// or the constant expressions of `expression.rs`.
 pub fn parse_complex(re: &str, im: &str, prec: u64) -> Result<Complex, String> {
-    let r = parse_float(re, prec)?;
-    let i = parse_float(im, prec)?;
-    Ok(Complex::with_val_64(prec, (r, i)))
+    crate::expression::pair(re, im, prec)
 }
 
 /// Format a complex number to (real_str, imag_str) using `digits` significant

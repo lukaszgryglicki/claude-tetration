@@ -231,3 +231,117 @@ fn t711_long_decimal_inputs_preserve_exact_domains() {
         }
     }
 }
+
+/// A name or an expression is its number to the digits of the run: `b^^1 = b`.
+#[test]
+fn t712_constants_and_expressions_have_the_requested_digits() {
+    let pi = "3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679821480865132823066470938446095505822317253594081284811174502841027019385211055596446229489549303820";
+    let eta = "1.44466786100976613365833910859643022305859545324225316582052";
+    let towermin = "6.59880358453125370767901875968464249385770482527964364024735e-2";
+    for (digits, base, expected) in [
+        ("200", "pi", pi),
+        (
+            "60",
+            "e",
+            "2.71828182845904523536028747135266249775724709369995957496697",
+        ),
+        ("60", "eta", eta),
+        ("60", "e^(1/e)", eta),
+        ("60", "towermin", towermin),
+        ("60", "e^-e", towermin),
+        ("20", "-pi", "-3.1415926535897932385"),
+        (
+            "30",
+            "pi*e^e-pow(2, 0.5)",
+            "46.1943053660313545855098891412",
+        ),
+    ] {
+        let out = run(&["-q", digits, base, "0", "1", "0"]);
+        assert!(out.status.success(), "{base}: {out:?}");
+        assert!(out.stderr.is_empty(), "{base}: {out:?}");
+        let (re, im) = parse_two_lines(&out.stdout);
+        assert_eq!((re.as_str(), im.as_str()), (expected, "0"), "{base}");
+    }
+}
+
+/// The number is `first + i second`, each of them may be complex, and a
+/// tetration inside an argument is computed by the same library.
+#[test]
+fn t713_complex_expressions_and_tetration_inside_arguments() {
+    let value = |arguments: &[&str]| {
+        let out = run(arguments);
+        assert!(out.status.success(), "{arguments:?}: {out:?}");
+        parse_two_lines(&out.stdout)
+    };
+    let direct = value(&["-q", "20", "2", "1", "1.5", "0.5"]);
+    for (first, second) in [("2+i", "0"), ("i", "-2i"), ("2", "sqrt(1)"), ("0", "1-2i")] {
+        let same = value(&["-q", "20", first, second, "3/2", "1/2"]);
+        assert_eq!(same, direct, "{first} {second}");
+    }
+    let tower = value(&["-q", "20", "2^^2", "0", "tet(2, 1)", "0"]);
+    assert_eq!(tower.0, "256.00000000000000000");
+    // The inverses in the arguments: the base 2 and the height 3.
+    let sixteen = value(&["-q", "15", "ssrt(16, 3)", "0", "ate(2, 16)", "0"]);
+    assert_eq!(sixteen.0, "16.0000000000000");
+    let height = value(&["-q", "--slog", "15", "sqrt(2)^^2 / 1", "0", "2^^3", "0"]);
+    let plain = value(&[
+        "-q",
+        "--slog",
+        "15",
+        "1.632526919438152844773495",
+        "0",
+        "16",
+        "0",
+    ]);
+    assert_eq!(height, plain);
+    // A whole height keeps its parity however large it is: 0^^n is 1, 0, 1, ...
+    let one = "1.00000000000000";
+    for (height, expected) in [("10^100", one), ("10^100 + 1", "0"), ("2*3", one)] {
+        let zero = value(&["-q", "15", "0", "0", height, "0"]);
+        assert_eq!(zero.0, expected, "{height}");
+    }
+    for (argument, reason) in [
+        ("x", "unknown name x"),
+        ("sin(pi)", "cancels below every precision"),
+        ("1/0", "division by zero"),
+        ("2^^", "ends early"),
+    ] {
+        let out = run(&["20", argument, "0", "1", "0"]);
+        assert_eq!(out.status.code(), Some(1), "{argument}");
+        assert!(out.stdout.is_empty(), "{argument}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("invalid number"), "{argument}: {stderr}");
+        assert!(stderr.contains(reason), "{argument}: {stderr}");
+    }
+}
+
+/// `--help`, the usage printed without arguments and the README name every
+/// constant and every function.
+#[test]
+fn t714_help_and_readme_list_every_constant_and_function() {
+    let help = String::from_utf8(run(&["--help"]).stdout).unwrap();
+    let bare = run(&[]);
+    assert_eq!(bare.status.code(), Some(2));
+    assert_eq!(String::from_utf8(bare.stderr).unwrap(), help);
+    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
+        .expect("README.md");
+    let listed = |names: &[&str], meaning: &str| {
+        let line = format!("    {} ", names.join(", "));
+        assert!(
+            help.lines()
+                .any(|found| found.starts_with(&line) && found.ends_with(meaning)),
+            "--help lacks {names:?}"
+        );
+        for name in names {
+            assert!(readme.contains(&format!("`{name}`")), "README lacks {name}");
+        }
+    };
+    for named in tetration::constants::TABLE {
+        let mut names = vec![named.name];
+        names.extend(named.aliases);
+        listed(&names, named.meaning);
+    }
+    for function in tetration::expression::FUNCTIONS {
+        listed(function.names, function.meaning);
+    }
+}

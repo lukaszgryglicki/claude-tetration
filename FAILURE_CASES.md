@@ -25,6 +25,30 @@ Legend:
 
 ## A. Shell-Thron boundary band (|λ| ≈ 1) — **PARTIAL; unchecked fallback removed**
 
+**November 13, from outside the boundary.** The two-sided theta mapping now
+sums a long inverse series at a nearly neutral repelling fixed point
+(README § 6.10), so a base just outside the region no longer costs
+`1/ln|λ|` logarithms per sample. Along `b = exp(t e^{−t})`, `t = r e^{i}`,
+at 15 digits and height `0.5`:
+
+| `r = \|λ\|` | before | now | value |
+|---|---|---|---|
+| `1.01` | 5.8 s | 3.1 s | |
+| `1.003` | 18 s | 3.4 s | the same 30 digits by both methods |
+| `1.001` | 51 s | 3.5 s | `1.38682593718001 + 0.0563487196582669i` |
+| `1.0005` | 100 s | 3.9 s | |
+| `1.0002` | no result in 40 minutes | 4.0 s | |
+| `1.0001` | — | 4.0 s | `1.38663865921269 + 0.0565946814238598i` |
+| `1 + 10⁻⁸` | — | 5 s | `1.38661782875409 + 0.0566219905969793i` |
+| `1 + 10⁻¹⁰` | — | 5 s | `1.38661782669143 + 0.0566219933006876i` |
+
+What remains slow is a multiplier whose argument is next to a low-order
+root of unity, where the disk of the series shrinks: at `|λ| = 1.0001`,
+argument `0.2` takes 50 s (`1.26184258229199 + 0.000311201254236810i`),
+`π/2` 164 s (`1.54842119699974 + 0.327200324951150i`) and `2π/3` 13
+minutes (`1.35794577605142 + 0.890919914039478i`). Neutral multipliers
+themselves are not covered.
+
 Schröder regular tetration can converge geometrically too slowly near the boundary;
 Newton-Kantorovich Kouznetsov falls into a pathological scalability trap:
 `|arg(λ)|` is tiny (e.g. 0.1411 rad for b=1.45), so the strip must extend to
@@ -631,7 +655,7 @@ walker tracks. No walk is needed: `tet 15 0.04 0 0.5 0` takes 3 seconds.
   −0.125023808503236713358729653966 + 0.413987966241729684229874554858i`.
 * Continuity from above: `b = 0.04 + 10^{−10}i` agrees with `b = 0.04` to
   the expected ten digits (t1805).
-* Other bases at 15 digits: `0.06` (`λ = −1.007`, 21 s) `0.133551357296516 +
+* Other bases at 15 digits: `0.06` (`λ = −1.017`, 13 s) `0.133551357296516 +
   0.444588502619596i`; `0.05` `0.102649474416971 + 0.447040991018417i`;
   `0.001` `−0.335658584585117 + 0.268881908378586i`.
 * Very small bases are reached by continuation along the cut from `e^−3.2`:
@@ -643,6 +667,19 @@ walker tracks. No walk is needed: `tet 15 0.04 0 0.5 0` takes 3 seconds.
 * The Taylor series of `F` at `−1/2` converges only to radius about 1.2 at
   `b = 0.04` (a further zero of `F` puts a singularity nearer than `−2`), so
   the discretization is enlarged automatically and smaller contours are used.
+
+* **Next to `e^{−e}` (November 13).** From `0.065` on the default contour
+  fails: the upper theta function is singular below the height at which
+  its line leaves the disk of the inverse series, and that height rises
+  towards `e^{−e}` (`0.33` at `0.06`, `0.45` at `0.063`). The solver now
+  raises the contour (README § 6.10): `0.063` 32 s (91 s before), `0.064`
+  20 s (`0.144775599906460 + 0.443320899614581i`, the same on two explicit
+  contours and at 30 digits), `0.065` about a minute (`0.147494834456034 +
+  0.442983841845186i`, three contours), `0.0655` 44 s, `0.0658` nine minutes
+  (`0.149646567159292 + 0.442708868079745i`, three contours), `0.0659` six
+  minutes (`0.149914081229433 + 0.442674172400147i`). `0.06595` and
+  `0.06598` gave no result in 45 minutes: the last `10^{−4}` below
+  `e^{−e} = 0.0659880358…` are open.
 
 The walker description below is kept for the fallback path and as history.
 

@@ -1077,13 +1077,13 @@ fn eval_schroder_with_conditioning(
     let forward_log = k > 0;
     let shifts = k.clone().abs();
     let log_ln_b = cnum::log_magnitude(&state.ln_b, prec);
-    // A real base with a positive multiplier keeps the real heights above -1
-    // on the positive real axis: none of their logarithms can change branch.
-    let real_curve = h.imag().is_zero()
-        && state.ln_b.imag().is_zero()
-        && state.l.imag().is_zero()
-        && *state.ln_b.real() > 0
-        && *state.l.real() > 0;
+    // A real base with a real fixed point needs no tracing. Its inverse germ
+    // has real coefficients, so the image of the disk of that germ is
+    // symmetric about the real axis, and `b^z` is one-to-one on that image:
+    // it holds no two conjugate points `2 pi / |ln b|` apart and, being
+    // connected, lies in `|Im z| < pi / |ln b|`. Every logarithm that the
+    // tracing would fix is therefore the principal one.
+    let real_base = state.ln_b.imag().is_zero() && state.l.imag().is_zero();
     // `F(h + k + offset)` and `|dF/ds|` there, at the top of the chain.
     let top = |offset: &Float| -> Result<Sample, String> {
         let mut height = Complex::with_val_64(prec, h + offset);
@@ -1125,7 +1125,7 @@ fn eval_schroder_with_conditioning(
             }
         }
     };
-    let traced = forward_log && !real_curve;
+    let traced = forward_log && !real_base;
     let start = (f, log_amplification);
     let start_speed = if traced {
         top(&Float::new_64(prec))?.1

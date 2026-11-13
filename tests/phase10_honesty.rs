@@ -505,22 +505,242 @@ fn cached_evaluators_reject_negative_integer_singularities() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn surrogate_and_inconsistent_precision_requests_are_errors() {
+fn inconsistent_precision_requests_are_errors() {
     let prec = cnum::digits_to_bits(50);
     let one = cnum::one(prec);
     let height = parse("0.5", "0", prec);
-    assert!(
-        tetration::linear_approx::tetrate_linear(&one, &height, prec)
-            .unwrap_err()
-            .contains("disabled")
-    );
     for digits in [0, 1000, u64::MAX] {
         assert!(dispatch::tetrate(&one, &height, prec, digits).is_err());
     }
     for digits in [0, u64::MAX] {
         assert!(cnum::checked_digits_to_bits(digits).is_err());
     }
+}
+
+/// A source file without its comments, without the contents of its string
+/// and character literals and without its test module.
+fn production_code(source: &str) -> Vec<char> {
+    let source: Vec<char> = source
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .collect();
+    let mut code = Vec::with_capacity(source.len());
+    let mut at = 0;
+    while at < source.len() {
+        let ahead = |offset: usize| source.get(at + offset).copied();
+        match source[at] {
+            '/' if ahead(1) == Some('/') => {
+                while at < source.len() && source[at] != '\n' {
+                    at += 1;
+                }
+            }
+            '"' => {
+                at += 1;
+                while at < source.len() && source[at] != '"' {
+                    let escape = source[at] == '\\';
+                    at += usize::from(escape);
+                    if source.get(at) == Some(&'\n') {
+                        code.push('\n');
+                    }
+                    at += 1;
+                }
+                at += 1;
+                code.push(' ');
+            }
+            '\'' if ahead(1) == Some('\\') => {
+                at += 3;
+                while at < source.len() && source[at] != '\'' {
+                    at += 1;
+                }
+                at += 1;
+                code.push(' ');
+            }
+            '\'' if ahead(2) == Some('\'') => {
+                at += 3;
+                code.push(' ');
+            }
+            other => {
+                code.push(other);
+                at += 1;
+            }
+        }
+    }
+    code
+}
+
+/// Machine-size numbers in `code`, with their lines: names of the machine
+/// float types, floating-point literals, MPFR values or precisions given by
+/// an integer literal, and constants that name a number of bits or digits.
+fn machine_numbers(code: &[char]) -> Vec<(usize, String)> {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let digits = |mut at: usize| {
+        while code
+            .get(at)
+            .is_some_and(|c| c.is_ascii_digit() || *c == '_')
+        {
+            at += 1;
+        }
+        at
+    };
+    let text = |from: usize, to: usize| code[from..to].iter().collect::<String>();
+    let mut found = Vec::new();
+    let mut line = 1;
+    let mut at = 0;
+    while at < code.len() {
+        let start = at;
+        let first = code[at];
+        if first.is_ascii_digit() {
+            let radix = first == '0' && matches!(code.get(at + 1), Some('x' | 'b' | 'o'));
+            at = digits(at);
+            let mut float = false;
+            if !radix {
+                let after = code.get(at + 1).copied().unwrap_or(' ');
+                if code.get(at) == Some(&'.')
+                    && after != '.'
+                    && !after.is_alphabetic()
+                    && after != '_'
+                {
+                    float = true;
+                    at = digits(at + 1);
+                }
+                let sign = usize::from(matches!(code.get(at + 1), Some('+' | '-')));
+                if matches!(code.get(at), Some('e' | 'E'))
+                    && code.get(at + 1 + sign).is_some_and(|c| c.is_ascii_digit())
+                {
+                    float = true;
+                    at = digits(at + 1 + sign);
+                }
+            }
+            let number = at;
+            while code.get(at).is_some_and(|c| word(*c)) {
+                at += 1;
+            }
+            let field = start >= 2 && code[start - 1] == '.' && code[start - 2] != '.';
+            if (float || code.get(number) == Some(&'f')) && !field {
+                found.push((line, text(start, at)));
+            }
+        } else if first.is_alphabetic() || first == '_' {
+            while code.get(at).is_some_and(|c| word(*c)) {
+                at += 1;
+            }
+            let name = text(start, at);
+            let before = text(start.saturating_sub(9), start);
+            let sized = name.starts_with("with_val")
+                || name == "digits_to_bits"
+                || (name == "min" && before.ends_with("prec."))
+                || (name.starts_with("new")
+                    && (before.ends_with("Float::") || before.ends_with("Complex::")));
+            if name.contains("f64") || name.contains("f32") {
+                found.push((line, name));
+            } else if name == "const" {
+                let mut end = at + 1;
+                while code.get(end).is_some_and(|c| word(*c)) {
+                    end += 1;
+                }
+                let constant = text(at + 1, end);
+                if constant.ends_with("_BITS") || constant.ends_with("_DIGITS") {
+                    found.push((line, format!("const {constant}")));
+                }
+            } else if sized && code.get(at) == Some(&'(') {
+                let mut argument = at + 1;
+                while code.get(argument).is_some_and(|c| c.is_whitespace()) {
+                    argument += 1;
+                }
+                let end = digits(argument);
+                if end > argument && !code.get(end).is_some_and(|c| word(*c) || *c == '.') {
+                    let owner = if name == "min" { "prec." } else { "" };
+                    found.push((line, format!("{owner}{name}({}", text(argument, end))));
+                }
+            }
+        } else {
+            line += usize::from(first == '\n');
+            at += 1;
+        }
+    }
+    found
+}
+
+#[test]
+fn machine_numbers_stay_out_of_the_arithmetic() {
+    // README § 7.1 lists every machine float and every number of a fixed
+    // size in `src/` and `examples/` with the reason why no digit depends on
+    // it. A new one fails here until it is listed there and permitted below.
+    let permitted = |file: &str, finding: &str| {
+        matches!(finding, "0.25" | "0.5" | "1.5")
+            || matches!(
+                (file, finding),
+                ("src/kouznetsov.rs", "as_secs_f64")
+                    | ("src/kneser.rs", "with_val_64(64")
+                    | ("src/kneser.rs" | "src/kneser_complex.rs", "prec.min(64")
+                    | (
+                        "src/kneser.rs",
+                        "const GUARD_DIGITS" | "const FIRST_LEVEL_DIGITS"
+                    )
+                    | ("src/kneser_complex.rs", "const SCOUT_BITS")
+                    | (
+                        "src/inverse.rs",
+                        "const LOOSE_BITS" | "const CHECK_DIGITS" | "const WALK_DIGITS"
+                    )
+                    | (
+                        "examples/edge_runner.rs" | "examples/grid_runner.rs",
+                        "as_secs_f64" | "f64" | "100.0"
+                    )
+                    | ("examples/test_w0.rs", "digits_to_bits(8")
+            )
+    };
+    let sample = "let a = x.to_f64() * 1e-6 + 2.5f32; // 0.1 as f64\n\
+                  let b = Float::with_val(53, \"0.1\") + pair.0 + (1..3).len() as u32;\n\
+                  let c = prec.min(64) + 0x1e5 + 7.max(2) + 0.5 + '1' as u32;\n\
+                  const START_BITS: u64 = 128; const ORDER: usize = 8;\n\
+                  let d = Float::with_val_64(cnum::digits_to_bits(15), prec.min(limit));";
+    let found: Vec<String> = machine_numbers(&production_code(sample))
+        .into_iter()
+        .filter(|(_, finding)| !permitted("src/sample.rs", finding))
+        .map(|(line, finding)| format!("{line}: {finding}"))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "1: to_f64",
+            "1: 1e-6",
+            "1: 2.5f32",
+            "2: with_val(53",
+            "3: prec.min(64",
+            "4: const START_BITS",
+            "5: digits_to_bits(15"
+        ]
+    );
+
+    let mut unlisted = Vec::new();
+    for directory in ["src", "examples"] {
+        let root = format!("{}/{directory}", env!("CARGO_MANIFEST_DIR"));
+        let mut paths: Vec<_> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+            .collect();
+        paths.sort();
+        assert!(paths.len() > 2, "{paths:?}");
+        for path in paths {
+            let file = format!(
+                "{directory}/{}",
+                path.file_name().unwrap().to_string_lossy()
+            );
+            let code = production_code(&std::fs::read_to_string(&path).unwrap());
+            for (line, finding) in machine_numbers(&code) {
+                if !permitted(&file, &finding) {
+                    unlisted.push(format!("{file}:{line}: {finding}"));
+                }
+            }
+        }
+    }
+    assert!(
+        unlisted.is_empty(),
+        "machine-size numbers that README § 7.1 does not list:\n{}",
+        unlisted.join("\n")
+    );
 }
 
 #[test]

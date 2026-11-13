@@ -1492,11 +1492,12 @@ cut-base walker below, but does not guarantee convergence.
 ### 6.6 Retired polynomial fallback
 
 The former five-level iε Richardson table returned answers even when its
-levels disagreed and no requested-accuracy bound existed. It is removed.
-`linear_approx::tetrate_linear` is a deprecated error-only compatibility
-entry point. Numerical seeds, convergent series and quadrature remain part
-of the analytical solvers; a seed or a fixed polynomial substitute is not
-returned as tetration merely because it looks plausible.
+levels disagreed and no requested-accuracy bound existed. It is removed,
+and so is the linear-interpolation API `linear_approx`, which had been
+reduced to an entry point that only returned an error. Numerical seeds,
+convergent series and quadrature remain part of the analytical solvers; a
+seed or a fixed polynomial substitute is not returned as tetration merely
+because it looks plausible.
 
 At the real routing boundary, continuation is tried before the existing
 direct Kouznetsov method. A failed continuation must not suppress a converging
@@ -1946,8 +1947,12 @@ affected inputs fail with an error instead.
    construction, another contour, the functional equation at a higher
    precision, the slow path it replaces) and an entry in § 5 and § 8.
 
-The fixed-size numbers that remain in `src/`, each checked against rule 4
-(a new one needs a line here before it is merged):
+The fixed-size numbers that remain in `src/` and `examples/`, each checked
+against rule 4. A new one needs a line here before it is merged: the test
+`machine_numbers_stay_out_of_the_arithmetic` (`tests/phase10_honesty.rs`)
+scans both directories for machine float types, floating-point literals,
+MPFR numbers of a literal size and constants that name a number of bits or
+digits, and fails on any that is not permitted there by name.
 
 | where | what is fixed-size | why no digit can depend on it |
 |---|---|---|
@@ -1955,6 +1960,8 @@ The fixed-size numbers that remain in `src/`, each checked against rule 4
 | `Model::invert_psi`, `Model::invert_long`, `Side::invert_psi` | Newton iterations that start at 64 bits | the precision doubles up to the working precision; the last step and the residual test are done there |
 | `kneser_complex::second_branch` | the `W₁` seed, at most 128 bits | starts the Newton iteration for the fixed point at the working precision |
 | `kneser_complex::continuation_paths`, `continue_along` | way-points of a path of bases, 128 bits | the bases on the way only warm-start the solve at the exact base |
+| `kneser_complex::geometries` | the order in which the contours are tried, from `ln b` at 128 bits | every contour gives the same function; the solve and its gates run at the working precision |
+| `GUARD_DIGITS` (`kneser.rs`), `CHECK_DIGITS` (`inverse.rs`) | 6 and 10 digits | added to the requested digits: they only raise the precision |
 | the precision ladders of both theta solvers | levels of 12, 24, … digits | each level starts the next one; the gates are passed at the last |
 | `inverse::follow` (`LOOSE_BITS`), `inverse::sroot_continued` (`WALK_DIGITS`) | roots on the way of a continuation to 24 bits; forward values of a super-root path to 14 digits plus the conditioning | the end of the path is polished by Newton at the full working precision and then verified by forward evaluation |
 | `inverse::sroot_real` | bracketing at 24 digits plus the conditioning | the secant steps and the verification run at the full precision |
@@ -1962,6 +1969,21 @@ The fixed-size numbers that remain in `src/`, each checked against rule 4
 | comparisons | the constants `0.25`, `0.5`, `1.5` and small integer ratios | exact, compared at the working precision |
 | `schroder::LongSeries`, `schroder::Anchor` | step and term counts (256, 4096) and cost weights that choose between the short series, the long series and Taylor jumps; the 65536 levels of the integer tower kept for the branch check | each choice is between methods that converge to the same value; the check can only reject |
 | `kouznetsov.rs` | `as_secs_f64` | timing output |
+| `examples/grid_runner.rs`, `examples/edge_runner.rs` | `f64` percentages of passing cells, `as_secs_f64` | statistics and timing output of the two test-grid tools; every value they print comes from the library |
+| `examples/test_w0.rs` | a working precision of 8 digits | a diagnostic that prints one Lambert W value at the precision it names; no result of the library passes through it |
+
+Decimal constants that are not exactly representable are parsed at the
+working precision (`cnum::decimal`): the damping factors, step caps,
+schedules, starting guesses and contour geometry of the Cauchy solver, the
+seeds of the Lambert W iteration and a few thresholds that choose a method
+or refuse an input. Each of them was read on 13 November 2026: every one
+starts an iteration, steers it or rejects, and none accepts a result. The
+loosest of them, the residual up to which the Cauchy solver keeps a stalled
+iterate as a warm start (`validate_best_residual`), cannot reach an answer:
+a state is evaluated only if its boundary residual is below
+`10^−(digits+3)` (`eval_kouznetsov_once`), the cut-base walk must end at
+`ε = 0` under that same gate, and a state solved for fewer digits than the
+request plus the measured loss is solved again.
 
 The same contract opens `src/lib.rs`.
 
@@ -2075,7 +2097,6 @@ src/
   fft.rs             big-float FFT cross-correlation kernels
   cnum.rs            complex-number helpers, parsing/formatting, env flags
   integer_height.rs  finite-precision integer towers and exact special cases
-  linear_approx.rs   deprecated error-only compatibility entry point
 tests/               phase1…phase18 plus Python plotting/Makefile regressions
                      batteries (CLI, regions, Schröder, Kouznetsov,
                      regression witnesses incl. the t860 case)
@@ -2134,15 +2155,32 @@ phase 3 13, phase 4 15, phase 5 15, phase 7 12, phase 8 18, phase 9 17,
 phase 10 27, phase 11 17 (without the multi-hour
 `kouznetsov_large_height_retains_requested_significant_digits`), phase 12
 7, phase 16 10, phase 17 12, phase 18 10, grid runner 7, edge runner 4, the
-documentation tests and the 18 Python tests. `t870` and `t872` are no longer
+documentation tests and the 19 Python tests. `t870` and `t872` are no longer
 ignored (17 s and 45 s with the long Poincaré series of § 6.8). New tests:
 `t100` (towers that cycle or vanish), `t380`, `t390`, `t391` (far-left
 heights, branch continuity, long inverse series), `t1609` (bases next to
 `e^{1/e}`), `t1709`–`t1711` (inverses), `t1808`, `t1809`, an honesty test
-for attracting bases and a unit test of the integer-tower check. The slow
-suites 13–15 were not run; their near-parabolic cases use Taylor jumps,
-whose chains now carry the samples of the branch tracing and take up to
-twice as long as before.
+for attracting bases and a unit test of the integer-tower check.
+
+The slow suites 13–15 were run on 13 November as well, on that tree without
+the retired `linear_approx` module (FreeBSD host, `TET_MT=2`, one test per
+`cargo test` invocation, four of them at a time): **all 17 tests pass**.
+
+| suite | test | time | October ledger (Linux) |
+|---|---|---|---|
+| phase 13 | cache; CLI; values at 20, 50, 100 digits | 22 s; 43 s; 66 s | 18 s; 34 s; 64 s |
+| phase 13 | `closer_attractor`, 100 digits | 549 s | deferred, not run |
+| phase 14 | cache; CLI; values | 6 s; 124 s; 313 s | 5 s; 93 s; 282 s |
+| phase 14 | `deep_complex_jump` | 785 s | 844 s |
+| phase 15 | cache | 46 s | 48 s |
+| phase 15 | native imaginary height; native real height | 40 s; 35 s | 738 s; 899 s |
+| phase 15 | real base at 20; 50; 100 digits | 228 s; 419 s; 1071 s | 247 s; 430 s; 723 s |
+| phase 15 | complex base at 20; 50; 100 digits | 276 s; 524 s; 1311 s | 337 s; 450 s; 1030 s |
+
+The native-height tests use the long inverse series of § 6.3; the chains of
+the paired 100-digit cases carry the samples of the branch tracing. That
+tree also has the test `machine_numbers_stay_out_of_the_arithmetic` of
+§ 7.1 (phase 10: 28 tests), and the default tier passed on it again.
 
 ## 11. References
 

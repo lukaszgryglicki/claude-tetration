@@ -37,7 +37,6 @@ pub mod kneser;
 pub mod kneser_complex;
 pub mod kouznetsov;
 pub mod lambertw;
-pub mod linear_approx;
 pub mod mt;
 pub mod regions;
 pub mod schroder;

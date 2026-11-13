@@ -1,3 +1,39 @@
+# Status Update — 2026-11-13, later (fixed-size numbers guarded by a test; slow suites verified)
+
+No solver code changed in this update, and no value did.
+
+**The review of fixed-size numbers is now a test.**
+`machine_numbers_stay_out_of_the_arithmetic` (`tests/phase10_honesty.rs`)
+scans `src/` and `examples/` for machine float types, floating-point
+literals, MPFR numbers whose size is a literal number of bits or digits and
+constants that name such a number. Whatever the table of README § 7.1 does
+not list fails it. The table gained the rows the review had left out: the
+order in which the two-sided solver tries its contours (from `ln b` at 128
+bits), `GUARD_DIGITS` and `CHECK_DIGITS`, the statistics of the two grid
+tools and the 8-digit diagnostic `examples/test_w0.rs`.
+
+**The decimal constants of the Cauchy solver were read one by one** (about
+fifty: damping factors, step caps, schedules, starting guesses, contour
+geometry, thresholds; all MPFR numbers at the working precision). Each
+starts an iteration, steers it or rejects; none accepts a result. The
+loosest, the residual up to which a stalled iterate is kept as a warm start,
+cannot reach an answer: a state is evaluated only below `10^−(digits+3)`,
+the cut-base walk must end at `ε = 0` under the same gate, and a state
+solved for fewer digits than the request plus the measured loss is solved
+again.
+
+**`linear_approx` is removed.** The module was an entry point that only
+returned an error, and nothing used it.
+
+**Slow suites 13–15: all 17 tests pass** (FreeBSD host, `TET_MT=2`, one test
+per invocation; table in README § 10). Phase 13 took 22 s, 43 s, 66 s and
+549 s (the 100-digit `closer_attractor` case, deferred in the October
+ledger); phase 14 6 s, 124 s, 313 s and 785 s; phase 15 46 s, 40 s and 35 s
+for the cache and the two native heights (12 and 15 minutes in October,
+before the long inverse series), 228 s, 419 s and 1071 s for the real base
+at 20, 50 and 100 digits and 276 s, 524 s and 1311 s for the complex one.
+The default tier passed on the same tree.
+
 # Status Update — 2026-11-13 (branch fix in regular iteration; wider domain; rules for every change)
 
 **A wrong logarithm branch in regular iteration (fixed).** The height

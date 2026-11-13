@@ -742,22 +742,25 @@ The grammar, the names and their meanings are those of the plotters
 [`rust-opengl-complex-drawer`](https://github.com/lukaszgryglicki/rust-opengl-complex-drawer),
 which read the same expressions with a variable for the function they draw
 and the same constant expressions for their ranges. On 13 November 2026,
-135 expressions with the operators, every shared function and the 42
+140 expressions with the operators, every shared function and the 42
 constants had the same value here and in the drawer's `f64` parser to 12
-digits. The differences:
+digits, and so had 31 more with `tet(b, h)` and with values on branch cuts
+(`sqrt(-4)`, `ln(-1)`, `(-8)^(1/3)`, `asin(2)`, `atanh(-2)`,
+`asinh(-2i)`, …): a zero part has no sign in the plotters either, so a
+negative real number lies on the same side of a cut in all three. The
+differences:
 
-* a zero part has no sign here, so a negative real number lies on the cut
-  itself and `sqrt(-4)` is `2i`; the plotters work with IEEE numbers, read
-  `-4` as `−4 − 0i` and give `−2i` (likewise `ln(-1)`, `(-8)^(1/3)`,
-  `cbrt(-8)`; `sqrt(0-4)` is `2i` in all three);
 * `gamma` and `fact` take real numbers only (there is no arbitrary-precision
   complex gamma function underneath), `arg(0)` is an error, and a function
   with a real second argument (`scale`, `unscale`, `powf`, `expf`) refuses
   a complex one instead of dropping its imaginary part;
 * there are no `inf`, `nan` and `is_nan`-like names, because an argument is
   a finite number, and two numbers in a row are an error, not a product;
-* `tet(b, h)`, `atan2`, `w`, `min`, `max`, `hypot`, `agm`, `lgamma`,
-  `digamma`, `zeta`, `erf`, `erfc`, `ei`, `li2` and `**` exist only here.
+* a zero that only inexact operations produce is refused here (**Zeros**
+  below) and is a rounding residue in the plotters: `exp(ln(-3))` is an
+  error here and `−3 + 3.7e-16i` there;
+* `atan2`, `w`, `min`, `max`, `hypot`, `agm`, `lgamma`, `digamma`, `zeta`,
+  `erf`, `erfc`, `ei`, `li2` and `**` exist only here.
 
 **Precision.** Every operation of an expression is a correctly rounded MPFR
 or MPC operation, or a tetration of this library. The expression is

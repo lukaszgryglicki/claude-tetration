@@ -78,9 +78,10 @@ constant expressions for their ranges.
 * *Tests.* Every constant against a 70-digit mpmath reference; expressions,
   branch cuts and all functions against mpmath; the zero rule; the grammar;
   CLI tests `t712`–`t714` (digits of π at 200, `--help` and README list
-  every name). 135 expressions give the same value in `tet` and in the
-  `f64` parser of the drawer to 12 digits; the plotters differ where a
-  signed zero decides a branch (`sqrt(-4)` is `−2i` there, `2i` here).
+  every name). 140 expressions give the same value in `tet` and in the
+  `f64` parser of the drawer to 12 digits, and so do 31 more with
+  `tet(b, h)` and values on branch cuts: the plotters now drop the sign of
+  a zero as well (`sqrt(-4)` is `2i` in all three) and have `tet(b, h)`.
 
 **Validation.** The default tier passed on the final tree, one target at a
 time (library 70, phases 1–5, 7–12, 16–18, grid and edge runners,

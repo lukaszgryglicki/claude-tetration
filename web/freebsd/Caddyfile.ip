@@ -1,0 +1,7 @@
+# tet-web behind Caddy, plain HTTP on every address of this machine.
+# Used while the machine has no name: web/freebsd/install.sh with SITE=ip.
+
+:80 {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+}

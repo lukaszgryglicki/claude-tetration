@@ -1,3 +1,50 @@
+# Status Update — 2026-11-14 (web page and HTTP API; expressions of astronomic size)
+
+**`web/`: a page and an API in front of the binary.** `tet-web` (Rust,
+standard library only, a crate of its own in `web/server`) serves a page
+with the precision, the function (`tet`, `ate`/`slog`, `ssrt`/`sroot`) and
+two complex numbers or four real ones, and the same as an API:
+`/?prec=20&func=ate&base=2&value=65536` answers in JSON,
+`&format=text` with the two lines of `tet`. Each computation is one `tet`
+process, so the numerical crate is neither linked nor changed and the
+numbers are those of the command line. A `+` in a query is a plus sign.
+
+**Cache, in memory only.** Finished results and the refusals of `tet` are
+kept until the server stops; nothing is written anywhere. The same request
+again is answered at once, a request whose computation is running waits for
+it, and the cache is bounded in bytes (the entries used longest ago go
+first).
+
+**Limits.** A time limit per computation (the process is stopped; the
+kernel limits its processor time as well), a number of computations at a
+time with a bounded queue, a largest precision, optionally the address space
+and the niceness of each `tet`. The statuses tell the cases apart: 422 is a
+refusal of `tet` with its message, 400 a request that is not a computation,
+503 a busy server, 504 the time limit.
+
+**Installation.** `web/freebsd/install.sh` and `web/deploy.sh` put it on a
+FreeBSD machine as an rc.d service behind Caddy: plain HTTP on the bare
+address, or `https://name` only once a domain points to the machine (Caddy
+obtains and renews the certificate). [web/README.md](web/README.md)
+describes the API, the settings and the installation; README § 3.3 points
+to it.
+
+**Tests.** 18 unit tests and 9 tests of the server as a process, with a
+shell script in the place of `tet` (`cd web/server && cargo test`).
+
+**Expressions of astronomic size.** Found with the API: an expression whose
+value has a binary exponent beyond ±2^31 stopped `tet` with a panic
+(`e^(1e12)`, `2^(2^31)`, `2^-(2^32)`, `1e1000000000000 + 0`), where the
+decimal number of that size is read (`tet 20 1e1000000000000 0 1 0`). The
+reader of expressions took the exponent from rug, where it is an `i32`; it
+now takes it from MPFR (`cnum::exponent`). Such a value is read like the
+decimal number when there is no bit to read before its point
+(`2^(2^32)`, `e^(-1e12)`: the printed digits are those of decimal arithmetic
+outside MPFR), and refused with a reason when its whole part has more than
+2^31 − 1 bits (`e^(1e12)`). Below that size nothing changes: the whole part
+is read in full, however long that takes (`fact(1e6)` has 18 million bits).
+Test `t716` and a unit test of `src/expression.rs`.
+
 # Status Update — 2026-11-14 (two complex numbers or four real ones)
 
 **Two arguments instead of four.** The two numbers of a run can each be one

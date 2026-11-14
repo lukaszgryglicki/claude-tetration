@@ -1,0 +1,71 @@
+#!/bin/sh
+
+# PROVIDE: tet_web
+# REQUIRE: LOGIN NETWORKING
+# KEYWORD: shutdown
+
+# The web page and HTTP API of tet: web/ in
+# https://github.com/lukaszgryglicki/claude-tetration
+#
+# Enable with:  sysrc tet_web_enable=YES
+#
+# Settings for /etc/rc.conf, with their defaults. (rc.subr gives its own
+# meaning to tet_web_program, tet_web_user and tet_web_flags: they are not
+# used here.)
+#
+# tet_web_runas (user):       the user the server and tet run as (tetweb)
+# tet_web_server (path):      the server (/usr/local/bin/tet-web)
+# tet_web_tet (path):         the tet binary (/usr/local/bin/tet)
+# tet_web_listen (address):   where the server listens; a reverse proxy
+#                             faces the network (127.0.0.1:8080)
+# tet_web_max_prec (number):  largest precision in digits (1000)
+# tet_web_timeout (seconds):  time one computation may take (120)
+# tet_web_jobs (number):      computations at a time (2)
+# tet_web_queue (number):     requests that may wait for a slot (16)
+# tet_web_threads (number):   threads of one tet; empty is serial ()
+# tet_web_memory_mb (number): address space of one tet in MiB (1024)
+# tet_web_cache_mb (number):  memory for kept results in MiB (64)
+# tet_web_revision (text):    shown by the page and by /stats ()
+# tet_web_log (path):         the log (/var/log/tet-web.log)
+# tet_web_nice (number):      niceness of each tet (10)
+
+. /etc/rc.subr
+
+name="tet_web"
+rcvar="tet_web_enable"
+desc="Web page and HTTP API of tet"
+
+load_rc_config $name
+
+: ${tet_web_enable:="NO"}
+: ${tet_web_runas:="tetweb"}
+: ${tet_web_server:="/usr/local/bin/tet-web"}
+: ${tet_web_tet:="/usr/local/bin/tet"}
+: ${tet_web_listen:="127.0.0.1:8080"}
+: ${tet_web_max_prec:="1000"}
+: ${tet_web_timeout:="120"}
+: ${tet_web_jobs:="2"}
+: ${tet_web_queue:="16"}
+: ${tet_web_threads:=""}
+: ${tet_web_memory_mb:="1024"}
+: ${tet_web_cache_mb:="64"}
+: ${tet_web_revision:=""}
+: ${tet_web_log:="/var/log/tet-web.log"}
+: ${tet_web_nice:="10"}
+
+tet_web_env="TET_WEB_LISTEN=${tet_web_listen} TET_WEB_TET=${tet_web_tet} \
+TET_WEB_MAX_PREC=${tet_web_max_prec} TET_WEB_TIMEOUT=${tet_web_timeout} \
+TET_WEB_JOBS=${tet_web_jobs} TET_WEB_QUEUE=${tet_web_queue} \
+TET_WEB_THREADS=${tet_web_threads} TET_WEB_MEMORY_MB=${tet_web_memory_mb} \
+TET_WEB_NICE=${tet_web_nice} TET_WEB_CACHE_MB=${tet_web_cache_mb} \
+TET_WEB_REVISION=${tet_web_revision}"
+
+# daemon(8) keeps the server running and writes its log; the pid file is
+# the one of daemon, which hands a stop on to the server. -f takes the
+# terminal (or the ssh session) of whoever starts the service away from it.
+pidfile="/var/run/${name}.pid"
+command="/usr/sbin/daemon"
+command_args="-f -P ${pidfile} -r -R 5 -H -o ${tet_web_log} -u ${tet_web_runas} -t ${name} ${tet_web_server}"
+required_files="${tet_web_server} ${tet_web_tet}"
+
+run_rc_command "$1"

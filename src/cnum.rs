@@ -102,6 +102,16 @@ pub fn exponent_range() -> (mpfr::exp_t, mpfr::exp_t) {
     unsafe { (mpfr::get_emin(), mpfr::get_emax()) }
 }
 
+/// The binary exponent `e` of a normal number `m·2^e` with `1/2 ≤ |m| < 1`.
+/// `Float::get_exp` panics where it does not fit an `i32`, and the range
+/// that `init_mpfr` sets goes far beyond.
+pub fn exponent(value: &Float) -> Option<mpfr::exp_t> {
+    // SAFETY: MPFR defines the exponent of a normal number.
+    value
+        .is_normal()
+        .then(|| unsafe { mpfr::get_exp(value.as_raw()) })
+}
+
 pub fn check_precision(prec: u64) -> Result<(), String> {
     let max = rug::float::prec_max_64();
     if prec < u64::from(rug::float::prec_min()) || prec > max {

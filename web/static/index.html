@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tet: complex tetration to any precision</title>
+<meta name="description" content="Arbitrary-precision complex tetration b^^h, its super-logarithm and its super-root.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<main>
+<h1>tet <small>complex tetration to any precision</small></h1>
+
+<div class="row">
+  <label for="prec">Precision (decimal digits)</label>
+  <input id="prec" type="number" min="1" step="1" value="20" inputmode="numeric">
+</div>
+
+<fieldset>
+  <legend>Function</legend>
+  <label><input type="radio" name="func" value="tet" checked>
+    <b>tet</b>: the value <i>b</i>^^<i>h</i></label>
+  <label><input type="radio" name="func" value="ate">
+    <b>ate</b> (slog): the height <i>h</i> with <i>b</i>^^<i>h</i> = <i>z</i></label>
+  <label><input type="radio" name="func" value="ssrt">
+    <b>ssrt</b> (sroot): the base <i>b</i> with <i>b</i>^^<i>h</i> = <i>z</i></label>
+</fieldset>
+
+<fieldset>
+  <legend>Arguments</legend>
+  <label><input type="radio" name="form" value="2" checked>
+    2 complex numbers</label>
+  <label><input type="radio" name="form" value="4">
+    4 real numbers (real and imaginary parts)</label>
+  <div id="arguments"></div>
+  <p class="hint">Each argument is a number or a constant expression:
+    <code>2</code>, <code>-0.5</code>, <code>1.5+0.5i</code>, <code>pi</code>, <code>e^(1/e)</code>,
+    <code>sqrt(2)</code>, <code>2^^0.5</code>, <code>ate(2, 16)</code>.
+    Of four numbers each must be real. <a href="help">Syntax, constants and functions</a>.</p>
+</fieldset>
+
+<button id="calculate" type="button">Calculate</button>
+<span id="status" role="status"></span>
+
+<section id="result" hidden>
+  <h2 id="result-title">Result</h2>
+  <dl>
+    <dt>real part</dt><dd id="re"></dd>
+    <dt>imaginary part</dt><dd id="im"></dd>
+  </dl>
+  <p id="error" class="error" hidden></p>
+  <p class="hint">
+    <span id="timing"></span><br>
+    command: <code id="command"></code><br>
+    API: <a id="api" href="."></a>
+  </p>
+</section>
+
+<noscript><p class="error">This page needs JavaScript. The API works without it:
+  <code>/?prec=20&amp;func=tet&amp;base=2&amp;height=0.5</code></p></noscript>
+
+<footer>
+  <p><b>API</b>: <code>/?prec=20&amp;func=tet&amp;base=2&amp;height=0.5</code>,
+    <code>/?func=ate&amp;base=2&amp;value=65536</code>,
+    <code>/?func=ssrt&amp;value=16&amp;height=3</code>, or with four real numbers
+    <code>/?func=tet&amp;base_re=1.5&amp;base_im=0.5&amp;height_re=1&amp;height_im=0.7</code>.
+    The reply is JSON; <code>&amp;format=text</code> gives the two lines that <code>tet</code> prints.
+    In a URL a <code>+</code> is a plus sign and a space is <code>%20</code>.</p>
+  <p>Results are computed by <code>tet</code> on this server, within a time limit
+    (<span id="limits">see <a href="stats">stats</a></span>), and kept in memory until the server restarts.
+    Source: <a href="https://github.com/lukaszgryglicki/claude-tetration">claude-tetration</a>
+    (AGPL-3.0)<span id="revision"></span>.</p>
+</footer>
+</main>
+</body>
+</html>

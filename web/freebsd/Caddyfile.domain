@@ -1,0 +1,15 @@
+# tet-web behind Caddy at https://@SITE@ only.
+# Caddy obtains and renews the certificate of the name by itself (ACME) and
+# sends http://@SITE@ to https. Installed by web/freebsd/install.sh with
+# SITE=@SITE@ once the name points to this machine.
+
+@SITE@ {
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy 127.0.0.1:8080
+}
+
+# Whatever else arrives by plain HTTP (the bare address) is sent to the name.
+:80 {
+	redir https://@SITE@{uri} permanent
+}

@@ -1,0 +1,14 @@
+[package]
+name = "tet-web"
+version = "0.1.0"
+edition = "2021"
+description = "Web page and HTTP API in front of the tet binary"
+license = "AGPL-3.0-only"
+publish = false
+
+[[bin]]
+name = "tet-web"
+path = "src/main.rs"
+
+# Not a member of a workspace: the numerical crate one level up stays as it is.
+[workspace]

@@ -1,0 +1,68 @@
+:root { color-scheme: light dark; }
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, sans-serif;
+}
+main {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+h1 { font-size: 1.6rem; margin: 0.5rem 0 1rem; }
+h1 small { font-size: 1rem; font-weight: normal; opacity: 0.75; }
+h2 { font-size: 1.15rem; margin: 0 0 0.5rem; }
+fieldset {
+  margin: 1rem 0;
+  padding: 0.5rem 1rem 0.75rem;
+  border: 1px solid #8886;
+  border-radius: 0.4rem;
+}
+fieldset > label { display: block; padding: 0.15rem 0; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
+.row label { min-width: 7rem; }
+#arguments .row { margin-top: 0.6rem; }
+input[type="text"], input[type="number"] {
+  font: inherit;
+  font-family: ui-monospace, monospace;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #8889;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+}
+input[type="text"] { flex: 1 1 14rem; min-width: 0; }
+input[type="number"] { width: 7rem; }
+button {
+  font: inherit;
+  padding: 0.5rem 1.4rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.6; cursor: progress; }
+#status { margin-left: 0.8rem; opacity: 0.8; }
+#result {
+  margin: 1.25rem 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid #8886;
+  border-radius: 0.4rem;
+}
+dl { margin: 0; }
+dt { font-size: 0.85rem; opacity: 0.75; }
+dd {
+  margin: 0 0 0.6rem;
+  font-family: ui-monospace, monospace;
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.hint { font-size: 0.88rem; opacity: 0.85; margin: 0.6rem 0 0; }
+.error { color: #c0262d; font-weight: 600; overflow-wrap: anywhere; }
+footer { margin-top: 2rem; font-size: 0.85rem; opacity: 0.85; }
+a { color: #2563eb; }
+@media (prefers-color-scheme: dark) {
+  a { color: #7aa7ff; }
+  .error { color: #ff7b7b; }
+}

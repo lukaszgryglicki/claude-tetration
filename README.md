@@ -167,6 +167,7 @@ zero imaginary part.
 3. [Command-line usage](#3-command-line-usage)
    1. [The inverse modes: super-logarithm and super-root](#31-the-inverse-modes-super-logarithm-and-super-root)
    2. [Constants and expressions in the arguments](#32-constants-and-expressions-in-the-arguments)
+   3. [Web page and HTTP API](#33-web-page-and-http-api)
 4. [Library usage](#4-library-usage)
 5. [Coverage map](#5-coverage-map)
    1. [✅ Verified](#51--verified)
@@ -989,6 +990,28 @@ whole; names in one row mean the same.
 
 `tet --help`, and `tet` without arguments, print both lists.
 
+### 3.3 Web page and HTTP API
+
+`web/` holds `tet-web`, a small server (Rust, standard library only, a crate
+of its own) that puts a page and an HTTP API in front of the `tet` binary.
+The page asks for the precision, the function (`tet`, `ate`/`slog` or
+`ssrt`/`sroot`) and two complex numbers or four real ones; the API takes the
+same as a query and answers in JSON, or with the two lines of `tet`. With
+the server started in `web/server` by
+`TET_WEB_TET=../../target/release/tet cargo run --release`:
+
+```console
+$ curl 'http://127.0.0.1:8080/?prec=20&func=ate&base=2&value=65536&format=text'
+4.0000000000000000000
+0
+```
+
+Every computation is one `tet` process with a time limit, so the numbers are
+those of the command line. Finished results are kept in memory only, until
+the server stops. [web/README.md](web/README.md) has the parameters, the
+replies, the settings and the installation on FreeBSD behind Caddy, with or
+without a domain name and HTTPS.
+
 ---
 
 ## 4. Library usage
@@ -1026,7 +1049,10 @@ digits when choosing working precision, without changing requested output
 digits. This prevents a near-one base, fractional height or huge odd integer
 from rounding into a different exact special case before dispatch. Redundant
 padding and exponent text do not inflate that significand count. A number
-written inside an expression is counted in the same way.
+written inside an expression is counted in the same way. An expression too
+large for this precision to hold its whole part is read with that many more
+bits (`0^^(10^100 + 1)` is `0`), up to 2^31 − 1 of them: `e^(1e12)` is
+refused, and a decimal number of that size is read as it is written.
 
 Lower-level entry points (`dispatch::tetrate`, per-method `setup_*` /
 `eval_*` pairs that amortize per-base work across many heights) are
@@ -2521,6 +2547,9 @@ src/
 tests/               phase1…phase18 plus Python plotting/Makefile regressions
                      batteries (CLI, regions, Schröder, Kouznetsov,
                      regression witnesses incl. the t860 case)
+web/                 web page and HTTP API in front of the tet binary (§ 3.3):
+                     server/ (crate tet-web), static/ (the page),
+                     freebsd/ and deploy.sh (installation)
 FAILURE_CASES.md     current failure contracts + labeled historical observations
 updates.md           dated research log (current campaign status)
 ```
@@ -2542,6 +2571,7 @@ $ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_plott
 $ cargo test --release --doc
 $ cargo clippy --release --all-targets -- -D warnings
 $ cargo fmt --all -- --check
+$ (cd web/server && cargo test)    # the web server of § 3.3, a crate of its own (a few seconds)
 ```
 
 Ignored legacy cases require explicit `--ignored` or `--include-ignored` selection and are not

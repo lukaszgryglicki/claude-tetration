@@ -1212,8 +1212,8 @@ fn lost(low: &Float, high: &Float, wanted: u64, all: u64) -> u64 {
         return all;
     }
     let gap = Float::with_val_64(all, low - high);
-    let agreed = match (high.get_exp(), gap.get_exp()) {
-        (Some(size), Some(miss)) => u64::try_from(i64::from(size) - i64::from(miss)).unwrap_or(0),
+    let agreed = match (cnum::exponent(high), cnum::exponent(&gap)) {
+        (Some(size), Some(miss)) => u64::try_from(i128::from(size) - i128::from(miss)).unwrap_or(0),
         _ => 0,
     };
     if agreed >= wanted {
@@ -1307,7 +1307,7 @@ pub fn input_precision(inputs: &[&str], prec: u64) -> Result<u64, String> {
         let value = evaluated(text, prec)?;
         for part in [value.real(), value.imag()] {
             let rounded = Float::with_val_64(prec, part);
-            let above = part.get_exp().and_then(|above| u64::try_from(above).ok());
+            let above = cnum::exponent(part).and_then(|above| u64::try_from(above).ok());
             // Fewer than 64 bits are left below the unit, and none of them is set.
             match above {
                 Some(above)
@@ -1315,6 +1315,16 @@ pub fn input_precision(inputs: &[&str], prec: u64) -> Result<u64, String> {
                         && rounded != *part
                         && above.saturating_add(64) > prec =>
                 {
+                    // Every bit before the point is read; beyond the
+                    // exponents of an `i32` that has never been possible.
+                    if i32::try_from(above).is_err() {
+                        return Err(format!(
+                            "invalid number {text:?}: the value is too large: it has {above} \
+                             bits before the point, and an expression is read with all of \
+                             them (at most {}); a decimal number may be larger",
+                            i32::MAX
+                        ));
+                    }
                     let raised = prec.checked_add(above).ok_or("precision count overflow")?;
                     needed = needed.max(raised);
                 }
@@ -1748,6 +1758,41 @@ mod tests {
         ] {
             assert_eq!(input_precision(&[text], prec).unwrap(), prec, "{text}");
         }
+    }
+
+    #[test]
+    fn a_value_beyond_the_exponents_of_an_i32_is_read_or_refused() {
+        let prec = cnum::digits_to_bits(15);
+        // A power of two and a tiny value have no bit to read before the
+        // point: they are read like the decimal numbers of their size.
+        for (text, exponent) in [
+            ("2^(2^32)", (1i128 << 32) + 1),
+            ("-2^(2^40) + 0", (1i128 << 40) + 1),
+            ("2^-(2^32)", 1 - (1i128 << 32)),
+            ("e^(-1e12)", -1_442_695_040_888),
+            ("1/10^(10^10)", -33_219_280_948),
+        ] {
+            assert_eq!(input_precision(&[text], prec).unwrap(), prec, "{text}");
+            let value = complex(text, prec).unwrap();
+            let found = cnum::exponent(value.real()).map(i128::from);
+            assert_eq!(found, Some(exponent), "{text}");
+            assert!(value.imag().is_zero(), "{text}");
+        }
+        // A value that large with bits to read before the point is refused.
+        for text in ["e^(1e12)", "10^(10^10)", "1e1000000000000 + 0"] {
+            let refused = input_precision(&[text], prec).unwrap_err();
+            assert!(
+                refused.starts_with(&format!("invalid number {text:?}: the value is too large")),
+                "{refused}"
+            );
+        }
+        // The decimal number alone is read as it is written.
+        assert_eq!(input_precision(&["1e1000000000000"], prec).unwrap(), prec);
+        let written = complex("1e1000000000000", prec).unwrap();
+        assert_eq!(
+            cnum::exponent(written.real()).map(i128::from),
+            Some(3_321_928_094_888)
+        );
     }
 
     #[test]

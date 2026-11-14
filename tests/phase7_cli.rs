@@ -465,6 +465,45 @@ fn t715_two_complex_numbers_are_the_four_parts() {
     }
 }
 
+/// An expression whose value lies beyond the exponents of an `i32` is read
+/// like the decimal number of its size, or refused with a reason. `tet`
+/// stopped with a panic there.
+#[test]
+fn t716_expressions_of_astronomic_size() {
+    let value = |arguments: &[&str]| {
+        let out = run(arguments);
+        assert!(out.status.success(), "{arguments:?}: {out:?}");
+        parse_two_lines(&out.stdout)
+    };
+    // The digits are those of decimal arithmetic outside MPFR (Python's
+    // decimal module at 80 digits).
+    for (text, digits) in [
+        ("2^-(2^32)", "3.2223963830066619484e-1292913987"),
+        ("e^(-1e12)", "5.5997978423038070054e-434294481904"),
+        ("2^(2^32)", "3.1032805438632861403e1292913986"),
+    ] {
+        let printed = value(&["-q", "20", text, "1"]);
+        assert_eq!(printed, (digits.to_string(), "0".to_string()), "{text}");
+    }
+    // slog_2(2^(2^32)) = slog_2(32) + 2.
+    let (large, _) = value(&["-q", "--slog", "20", "2", "2^(2^32)"]);
+    let (small, _) = value(&["-q", "--slog", "20", "2", "32"]);
+    assert!(large.starts_with("5.2400752293") && small.starts_with("3.2400752293"));
+    assert_eq!(large[2..19], small[2..19], "{large} {small}");
+    // With bits to read before the point such a value is refused.
+    for text in ["e^(1e12)", "10^(10^10)", "1e1000000000000 + 0"] {
+        let out = run(&["-q", "20", text, "1"]);
+        assert_eq!(out.status.code(), Some(1), "{text}");
+        assert!(out.stdout.is_empty(), "{text}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let reason = format!("error: invalid number {text:?}: the value is too large");
+        assert!(stderr.contains(&reason), "{stderr}");
+    }
+    // The decimal number alone is read as it is written.
+    let (written, _) = value(&["-q", "20", "1e1000000000000", "1"]);
+    assert_eq!(written, "1.0000000000000000000e1000000000000");
+}
+
 /// `--help`, the usage printed without arguments and the README name every
 /// constant and every function.
 #[test]

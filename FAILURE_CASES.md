@@ -613,6 +613,26 @@ contradict the integer tower`; at `|λ| = 0.9999` the tower refutes the
 first chain, sampled nine times per unit of height, and the denser repeat
 passes.
 
+At complex heights, and at real heights between `−2` and `−1`, where the
+tower cannot check, each branch is proved since November 14 (README § 6.3):
+the growth theorem of the inverse function, which is one-to-one on its
+disk, bounds how far the tetration moves between two samples, and the
+nearest branch is taken only where that bound excludes every other. No
+value changed. Three heights that the judged distances refused have
+values now, 15 others next to `−2` and next to the boundary of the
+half-plane are the same:
+
+| b | h | before | now |
+|---|---|---|---|
+| `1.5+0.5i` | `−2 + 10⁻²⁴` | `cannot be fixed by continuity` | `−80.526289837743292491+55.999291289436884543i` |
+| `1.5+0.5i` | `−2 + 10⁻²⁹` | `cannot be fixed by continuity` | `−97.355411868872404667+67.818202373366110647i` |
+| `0.2+0.4i` | `−2 + 10⁻²⁹` | `cannot be fixed by continuity` | `28.019640069217744005+39.907114582632919249i` |
+
+Each factor `10⁻⁹` in the distance from `−2` adds `ln 10⁻⁹ / ln b` to the
+value, as the logarithm of a simple zero must: `−30.29 + 21.27i` for
+`1.5+0.5i`, from `−67.062992212840002750+46.544162422293503661i` at
+`−2 + 10⁻²⁰`.
+
 ### I.6 Bases just above `e^{−e}` (multiplier next to −1)
 
 15 digits, height `0.5`; "before" is the binary of November 12.

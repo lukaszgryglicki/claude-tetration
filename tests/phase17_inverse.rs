@@ -244,10 +244,20 @@ fn t1704_sroot_round_trips() {
             cnum::DisplayFloat(&agreement(&found, &expected, high))
         );
     }
-    // A complex solution reached by continuation inside the regular region.
-    let value = forward(("1.25", "0.05"), ("0.5", "0.1"));
-    let found = inverse::sroot(&value, &parse("0.5", "0.1", high), high, digits).unwrap();
-    assert!(agreement(&found, &parse("1.25", "0.05", high), high) >= digits);
+    // Complex solutions reached by continuation inside the regular region,
+    // at complex heights: every logarithm of their height reductions is
+    // proved to lie on the branch of the tetration (README section 6.3).
+    for (base, height) in [
+        (("1.25", "0.05"), ("0.5", "0.1")),
+        (("1.3", "0.1"), ("0.3", "0.4")),
+    ] {
+        let value = forward(base, height);
+        let found = inverse::sroot(&value, &parse(height.0, height.1, high), high, digits).unwrap();
+        assert!(
+            agreement(&found, &parse(base.0, base.1, high), high) >= digits,
+            "b={base:?} h={height:?}: {found}"
+        );
+    }
 }
 
 #[test]

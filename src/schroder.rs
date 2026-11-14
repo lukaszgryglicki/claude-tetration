@@ -1151,9 +1151,11 @@ fn eval_schroder_with_conditioning(
     } else {
         Check::Tower
     };
+    // The largest height of the chain, for the rounding of its heights.
+    let span = cnum::abs(h, prec) + &shifts + 1u32;
     loop {
         let proof = if traced && check == Check::Proved {
-            Some(Proof::new(&offsets, state)?)
+            Some(Proof::new(&offsets, state, &span)?)
         } else {
             None
         };
@@ -1171,6 +1173,10 @@ fn eval_schroder_with_conditioning(
         let mut jump_error_log = Float::new_64(prec);
         let mut recurrence = cnum::Recurrence::<()>::new();
         let mut trail: Option<Trail> = None;
+        // In a proved chain: whether the curve `F(P + 1 + s)`, `s >= 0`, to
+        // the right of the samples above the chain point at `P` is known to
+        // stay next to the fixed point (see `Proof::jump`).
+        let mut settled = false;
         if traced && jumps.is_some() {
             // The samples follow every Taylor jump from the top.
             let built = Trail::new(&offsets, &top)?;
@@ -1181,6 +1187,14 @@ fn eval_schroder_with_conditioning(
                 if anchor.holds(&built, &left, state)? == Some(false) {
                     return Err(Anchor::SERIES.into());
                 }
+            }
+            if let (Some(proof), Some(last)) = (&proof, built.values.last()) {
+                // At the top the growth theorem alone holds that curve
+                // there: it begins at the last sample.
+                let above = Complex::with_val_64(prec, h + &shifts) + 3u32;
+                let depth = Complex::with_val_64(prec, above * &state.ln_lambda);
+                let apart = cnum::abs(&Complex::with_val_64(prec, last - &state.l), prec);
+                settled = proof.settled(&apart, &depth.real().clone().exp());
             }
             trail = Some(built);
         }
@@ -1220,28 +1234,35 @@ fn eval_schroder_with_conditioning(
                 // them cannot, shorter jumps are tried, and after the
                 // shortest the chain goes on in single steps. In a proved
                 // chain a jump is taken only where its logarithms are
-                // proved, for the chain point as for every sample.
-                let level = match &proof {
-                    Some(proof) => {
-                        let above = Complex::with_val_64(prec, h + &shifts) - &step + 2u32;
-                        let depth = Complex::with_val_64(prec, above * &state.ln_lambda);
-                        Some((proof, depth.real().clone().exp()))
+                // proved, for the chain point and for every sample at once:
+                // `spread` is how far from the fixed point the curve through
+                // them reaches.
+                let mut spread = None;
+                if let (Some(proof), Some(samples), true) = (&proof, &trail, jump.is_some()) {
+                    let above = Complex::with_val_64(prec, h + &shifts) - &step + 2u32;
+                    let depth = Complex::with_val_64(prec, above * &state.ln_lambda);
+                    if depth.real().is_sign_negative() {
+                        if settled {
+                            spread = proof.spread(depth.real(), &f, &speed, samples, state);
+                        }
+                    } else {
+                        // A jump has taken the chain point out of the
+                        // half-plane of the proof: nothing is traced from
+                        // here on.
+                        trail = None;
                     }
-                    None => None,
-                };
+                }
                 let mut refused = false;
-                while let Some(candidate) = &jump {
+                while let (Some(candidate), true) = (&jump, trail.is_some()) {
                     let mut followed = trail.clone();
-                    let own = level.as_ref().is_none_or(|(proof, modulus)| {
-                        let apart = cnum::abs(&Complex::with_val_64(prec, &f - &state.l), prec);
-                        proof.settled(&apart, modulus, &candidate.steps)
+                    let proved = proof.as_ref().is_none_or(|proof| {
+                        spread
+                            .as_ref()
+                            .is_some_and(|spread| proof.jump(spread, &candidate.steps))
                     });
-                    let made = own
+                    let made = proved
                         && followed.as_mut().is_some_and(|samples| {
-                            let proved = level.as_ref().map(|(proof, modulus)| (*proof, modulus));
-                            samples
-                                .descend(&candidate.steps, &mut jumps, state, proved)
-                                .is_ok()
+                            samples.descend(&candidate.steps, &mut jumps, state).is_ok()
                         });
                     if made {
                         trail = followed;
@@ -1302,7 +1323,7 @@ fn eval_schroder_with_conditioning(
                         // Only at the top of a chain without Taylor jumps:
                         // there is nothing to descend.
                         let mut built = Trail::new(&offsets, &top)?;
-                        built.descend(&step, &mut jumps, state, None)?;
+                        built.descend(&step, &mut jumps, state)?;
                         if let Some(anchor) = &mut anchor {
                             if anchor.holds(&built, &left, state)? == Some(false) {
                                 return Err(Anchor::SERIES.into());
@@ -1335,6 +1356,9 @@ fn eval_schroder_with_conditioning(
                     if let Some(speed) = &mut speed {
                         *speed /= cnum::abs(&f, prec) * cnum::abs(&state.ln_b, prec);
                     }
+                    // What a single step leaves to the right of the samples
+                    // is not looked at again.
+                    settled = false;
                 } else {
                     trail = None;
                 }
@@ -1412,6 +1436,12 @@ fn eval_schroder_with_conditioning(
             offsets.extend(missing);
             offsets.sort_by(|a, b| a.partial_cmp(b).expect("finite trail offsets"));
             offsets.dedup();
+            if offsets.len() > SAMPLES_MOST {
+                return Err(format!(
+                    "Schröder: the logarithm branches of this height need more than \
+                     {SAMPLES_MOST} samples per unit of height"
+                ));
+            }
             if cnum::verbose() {
                 eprintln!(
                     "schröder unwind: branches by continuity need {} samples per unit of height",
@@ -1612,6 +1642,11 @@ enum Rule<'a> {
 /// goes on collecting them.
 const MISSING_KEPT: usize = 1 << 16;
 
+/// A chain that needs more samples per unit of height than this is given up:
+/// its height lies too close to the boundary `|lambda^(h + 2)| = 1`, or to a
+/// zero of the tetration.
+const SAMPLES_MOST: usize = 1 << 18;
+
 /// The proof that a logarithm lies on the branch of the tetration, for the
 /// samples of a `Trail` at heights where `|lambda^(h + 2)| < 1`.
 ///
@@ -1639,16 +1674,23 @@ const MISSING_KEPT: usize = 1 << 16;
 /// is the one of the tetration: that is the proof of `pair`.
 ///
 /// A logarithm that is taken without a neighbour, by a Taylor jump or as
-/// the principal one next to the fixed point, is proved by `settled`.
+/// the principal one next to the fixed point, is proved by `jump`.
 struct Proof {
     offsets: Vec<Float>,
     /// `|ln lambda|`.
     scale: Float,
     /// `-ln |lambda|`.
     decay: Float,
+    /// `|lambda|` and `|ln b|`.
+    multiplier: Float,
+    log_size: Float,
     /// The distance of the fixed point from the cut of the principal
     /// logarithm.
     reach: Float,
+    /// The least distance of two samples that are told apart: 2^16 times
+    /// the rounding of the largest height of the chain. A pair that is
+    /// proved is then also proved for the heights as they are rounded.
+    floor: Float,
     /// `|lambda|^(2u)` for every offset `u`, and one minus that.
     powers: Vec<Float>,
     fades: Vec<Float>,
@@ -1658,8 +1700,10 @@ struct Proof {
 }
 
 impl Proof {
-    fn new(offsets: &[Float], state: &SchroderState) -> Result<Proof, String> {
+    fn new(offsets: &[Float], state: &SchroderState, span: &Float) -> Result<Proof, String> {
         let prec = state.prec;
+        let bits = usize::try_from(prec.saturating_sub(16)).map_err(|_| "precision overflow")?;
+        let floor = Float::with_val_64(prec, span) >> bits;
         let decay = -Float::with_val_64(prec, state.lam_abs.ln_ref());
         let scale = cnum::abs(&state.ln_lambda, prec);
         if !decay.is_finite() || decay <= 0 || !scale.is_finite() {
@@ -1693,7 +1737,10 @@ impl Proof {
             offsets: offsets.to_vec(),
             scale,
             decay,
+            multiplier: Float::with_val_64(prec, &state.lam_abs),
+            log_size: cnum::abs(&state.ln_b, prec),
             reach,
+            floor,
             powers,
             fades,
             links,
@@ -1705,6 +1752,23 @@ impl Proof {
     fn level(&self, depth: &Float) -> (Float, Float) {
         let twice = Float::with_val_64(depth.prec_64(), depth * 2u32);
         (-twice.clone().exp_m1(), twice.exp())
+    }
+
+    /// `1 - m^2` and `m^2`, `m = |lambda^(q + 2)|`, at the height `q` of the
+    /// sample `index` (`None`: of the chain point) of a level.
+    fn at(&self, level: &(Float, Float), index: Option<usize>) -> (Float, Float) {
+        let prec = self.scale.prec_64();
+        let (clear, square) = level;
+        match index {
+            Some(index) => (
+                Float::with_val_64(
+                    prec,
+                    clear + Float::with_val_64(prec, square * &self.fades[index]),
+                ),
+                Float::with_val_64(prec, square * &self.powers[index]),
+            ),
+            None => (clear.clone(), square.clone()),
+        }
     }
 
     /// The upper bound of `|ln b| |F(q) - F(p)|` for the sample `far` at
@@ -1719,18 +1783,7 @@ impl Proof {
         rates: &(Option<Float>, Option<Float>),
     ) -> Option<Float> {
         let prec = self.scale.prec_64();
-        let (clear, square) = level;
-        // `1 - m^2` and `m^2` at `p` and at `q`.
-        let at = |index: usize| {
-            (
-                Float::with_val_64(prec, clear + Float::with_val_64(prec, square * &self.fades[index])),
-                Float::with_val_64(prec, square * &self.powers[index]),
-            )
-        };
-        let near = match far.checked_sub(1) {
-            Some(index) => at(index),
-            None => (clear.clone(), square.clone()),
-        };
+        let near = self.at(level, far.checked_sub(1));
         let (link, size, ratio) = &self.links[far];
         let mut x = -Complex::with_val_64(prec, link * &near.1);
         x += &near.0;
@@ -1745,10 +1798,9 @@ impl Proof {
             .0
             .as_ref()
             .map(|rate| Float::with_val_64(prec, rate * &near.0) * &common);
-        let from_far = rates
-            .1
-            .as_ref()
-            .map(|rate| Float::with_val_64(prec, rate * at(far).0) * &common / ratio);
+        let from_far = rates.1.as_ref().map(|rate| {
+            Float::with_val_64(prec, rate * self.at(level, Some(far)).0) * &common / ratio
+        });
         match (from_near, from_far) {
             (Some(a), Some(b)) if a.is_finite() && b.is_finite() => Some(a.min(&b)),
             (Some(a), _) if a.is_finite() => Some(a),
@@ -1794,35 +1846,28 @@ impl Proof {
             );
         }
         let zero = Float::new_64(prec);
-        let below = far.checked_sub(1).map_or(&zero, |index| &self.offsets[index]);
+        let below = far
+            .checked_sub(1)
+            .map_or(&zero, |index| &self.offsets[index]);
         let above = &self.offsets[far];
         let gap = Float::with_val_64(prec, above - below);
-        let shift = usize::try_from(prec / 2).map_err(|_| "precision overflow")?;
-        if gap < (Float::with_val_64(prec, 1) >> shift) {
+        if !self.floor.is_normal() || Float::with_val_64(prec, &gap / 2u32) < self.floor {
             return Err(
                 "Schröder: the logarithm branches of this height cannot be fixed by continuity"
                     .into(),
             );
         }
-        let (clear, square) = level;
         // What an end allows by itself, as a power of two: the distance at
         // which its bound reaches three quarters of `pi`, less than any
         // second nearest branch is away, with the boundary taken for a
-        // straight line. There `z = g / sqrt(g^2 + w^2)` for the distance
-        // `g` and `w = (1 - m^2) / (m |ln lambda|)`, and the bound is
-        // `rate w z / (1 - z)^2`.
+        // straight line along the samples. There `z = g / sqrt(g^2 + w^2)`
+        // for the distance `g` and `w = (1 - m^2) / (m |ln lambda|)`, and
+        // the bound is `rate w z / (1 - z)^2`.
         let allowed = |index: Option<usize>, rate: &Option<Float>| -> Option<Float> {
-            let rate = rate.as_ref().filter(|rate| rate.is_finite() && **rate > 0)?;
-            let (clear, square) = match index {
-                Some(index) => (
-                    Float::with_val_64(
-                        prec,
-                        clear + Float::with_val_64(prec, square * &self.fades[index]),
-                    ),
-                    Float::with_val_64(prec, square * &self.powers[index]),
-                ),
-                None => (clear.clone(), square.clone()),
-            };
+            let rate = rate
+                .as_ref()
+                .filter(|rate| rate.is_finite() && **rate > 0)?;
+            let (clear, square) = self.at(level, index);
             let width = clear / (square.sqrt() * &self.scale);
             let target = Float::with_val_64(prec, Constant::Pi) * 3u32
                 / (Float::with_val_64(prec, rate * &width) * 4u32);
@@ -1873,31 +1918,106 @@ impl Proof {
         Ok(())
     }
 
+    /// Whether the curve `F(p + s)`, `s >= 0`, of the tetration stays inside
+    /// the disk around the fixed point that the cut of the principal
+    /// logarithm does not reach, for a point of it `apart` from the fixed
+    /// point at a height `p` with `modulus = |lambda^(p + 2)|`. The
+    /// coordinates of that curve are no larger than the one of the point,
+    /// and there the growth theorem bounds `|psi|` by
+    /// `apart ((1 + m) / (1 - m))^2`, `m = modulus`.
+    fn settled(&self, apart: &Float, modulus: &Float) -> bool {
+        let prec = self.scale.prec_64();
+        if !modulus.is_finite() || *modulus >= 1 {
+            return false;
+        }
+        let ratio =
+            Float::with_val_64(prec, 1u32 + modulus) / Float::with_val_64(prec, 1u32 - modulus);
+        let bound = ratio.square() * apart;
+        bound.is_finite() && bound * 17u32 < Float::with_val_64(prec, &self.reach * 16u32)
+    }
+
+    /// How far from the fixed point, in units of `1 / |ln b|`, the curve
+    /// `F(P + s)`, `0 <= s <= 1`, reaches. It passes through the chain point
+    /// `point` (speed `speed`) at the height `P` with
+    /// `depth = Re((P + 2) ln lambda)` and through the samples of `trail`,
+    /// and between two of them it stays within the growth bound of the lower
+    /// one: that of `bound`, with the largest `|E|` and the smallest `|x|`
+    /// of the piece. `None` where there is no such bound.
+    fn spread(
+        &self,
+        depth: &Float,
+        point: &Complex,
+        speed: &Option<Float>,
+        trail: &Trail,
+        state: &SchroderState,
+    ) -> Option<Float> {
+        let prec = self.scale.prec_64();
+        let level = self.level(depth);
+        let away = |value: &Complex| {
+            cnum::abs(&Complex::with_val_64(prec, value - &state.l), prec) * &self.log_size
+        };
+        let mut below = Float::new_64(prec);
+        let mut reach = away(trail.values.last()?);
+        for (far, offset) in self.offsets.iter().enumerate() {
+            let (value, speed) = match far.checked_sub(1) {
+                Some(index) => (trail.values.get(index)?, trail.speeds.get(index)?),
+                None => (point, speed),
+            };
+            let rate = Float::with_val_64(prec, speed.as_ref()? * &self.log_size);
+            let (clear, square) = self.at(&level, far.checked_sub(1));
+            let gap = Float::with_val_64(prec, offset - &below);
+            let size = Float::with_val_64(prec, &gap * &self.scale).exp_m1();
+            let x = Float::with_val_64(prec, &clear - Float::with_val_64(prec, &square * &size));
+            if !x.is_finite() || x <= 0 {
+                return None;
+            }
+            let z = square.sqrt() * &size / &x;
+            if !z.is_finite() || z >= 1 {
+                return None;
+            }
+            let room = Float::with_val_64(prec, 1u32 - z).square();
+            let piece = away(value) + rate * clear * size / (x * room * &self.scale);
+            if !piece.is_finite() {
+                return None;
+            }
+            reach = reach.max(&piece);
+            below = offset.clone();
+        }
+        Some(reach)
+    }
+
     /// Whether `steps` logarithms next to the fixed point, as a Taylor jump
     /// takes them and as principal logarithms are, are those of the
-    /// tetration, for a point of it `apart` from the fixed point at a height
-    /// `p` with `modulus = |lambda^(p + 2)|`.
+    /// tetration at every point of the curve `F(P + s)`, `0 <= s <= 1`, a
+    /// piece that lies within `spread / |ln b|` of the fixed point. The
+    /// curve `F(P + 1 + s)`, `s >= 0`, to the right of the piece has to be
+    /// known to stay inside the disk around the fixed point that the cut
+    /// does not reach; the same then holds `steps` levels down.
     ///
-    /// They are, where the curve `F(p - j + s)`, `s >= 0`, stays for
-    /// `j < steps` inside the disk around the fixed point that the cut does
-    /// not reach: the logarithm continues along that curve, it is the
-    /// principal one at its far end, and inside that disk the principal one
-    /// is continuous. The coordinates of the curve are no larger than
-    /// `|t| / |lambda|^(steps - 1)`, `t` the coordinate of the point, and the
-    /// growth theorem bounds `|psi|` there by
-    /// `apart (1 + m)^2 g / (1 - m g)^2`, `m = modulus`,
-    /// `g = |lambda|^(1 - steps)`.
-    fn settled(&self, apart: &Float, modulus: &Float, steps: &Integer) -> bool {
+    /// The logarithm of the tetration continues along the curve of real
+    /// shifts, and at its far end it is the one next to the fixed point,
+    /// which is continuous in that disk. So at the height `P - j` it is that
+    /// one where the curve to the right stays inside the disk: the piece,
+    /// its first `j` logarithms, and the curve beyond `P + 1`. In the
+    /// coordinate `y = (F - L) ln b` the logarithm is `ln(1 + y / lambda)`,
+    /// of modulus at most `x (1 + x)` for `x = |y / lambda| <= 1/2`. With
+    /// `X = 2 x_0 |lambda|^(1 - steps)` for the `x_0` of the piece, and
+    /// `(steps - 1) X <= 1/2`, every `x` of its first `steps - 1`
+    /// logarithms is at most `x_0 ((1 + X) / |lambda|)^(steps - 1) <= X`.
+    fn jump(&self, spread: &Float, steps: &Integer) -> bool {
         let prec = self.scale.prec_64();
         let before = Integer::from(steps - 1u32);
         let growth = Float::with_val_64(prec, &self.decay * &before).exp();
-        let outer = Float::with_val_64(prec, modulus * &growth);
-        if !outer.is_finite() || outer >= 1 {
+        let most = Float::with_val_64(prec, spread * &growth) * 2u32 / &self.multiplier;
+        if !most.is_finite()
+            || Float::with_val_64(prec, &most * 2u32) > 1u32
+            || Float::with_val_64(prec, &most * &before) * 2u32 > 1u32
+        {
             return false;
         }
-        let bound = Float::with_val_64(prec, 1u32 + modulus).square() * apart * growth
-            / Float::with_val_64(prec, 1u32 - outer).square();
-        bound.is_finite() && bound * 17u32 < Float::with_val_64(prec, &self.reach * 16u32)
+        // The disk in the coordinate `y`.
+        let disk = Float::with_val_64(prec, &self.reach * &self.log_size);
+        most * &self.multiplier * 17u32 < disk * 16u32
     }
 }
 
@@ -1910,6 +2030,9 @@ impl Proof {
 /// `u = 1` of the level below is the chain point of this level, which takes
 /// no logarithm. This fixes the branches without assuming that they are the
 /// principal ones: next to the Shell-Thron boundary the curve winds around 0.
+/// That the samples are dense enough for it is checked against the integer
+/// tower (`Anchor`) at a real height above -1 and proved (`Proof`) at every
+/// other height.
 #[derive(Clone)]
 struct Trail {
     offsets: Vec<Float>,
@@ -1967,15 +2090,13 @@ impl Trail {
     /// Take every sample `steps` logarithms down without its neighbours: by
     /// Taylor jumps, or by principal logarithms where the sample is closer to
     /// the fixed point than half the distance of the latter from the cut.
-    /// With `proved` (a proof and `|lambda^(p + 2)|` at the height `p` of the
-    /// chain point above these samples) each of those logarithms has to be
-    /// proved instead (`Proof::settled`).
+    /// In a proved chain all of those logarithms are proved before this is
+    /// called (`Proof::jump`).
     fn descend(
         &mut self,
         steps: &Integer,
         jumps: &mut Option<OrbitJumps>,
         state: &SchroderState,
-        proved: Option<(&Proof, &Float)>,
     ) -> Result<(), String> {
         let prec = state.prec;
         let reach = if state.l.real().is_sign_negative() {
@@ -1984,63 +2105,27 @@ impl Trail {
             cnum::abs(&state.l, prec)
         };
         let ln_b_size = cnum::abs(&state.ln_b, prec);
-        let unsettled =
-            || "Schröder: a logarithm branch cannot be fixed by continuity after Taylor jumps";
-        for (index, (value, speed)) in self
-            .values
-            .iter_mut()
-            .zip(self.speeds.iter_mut())
-            .enumerate()
-        {
-            // `|lambda^(p + 2)|` at the height of the sample, `1 / |lambda|`
-            // times as much after every logarithm.
-            let mut modulus = proved.map(|(proof, chain)| {
-                Float::with_val_64(prec, proof.powers[index].sqrt_ref()) * chain
-            });
+        for (value, speed) in self.values.iter_mut().zip(self.speeds.iter_mut()) {
             let mut left = steps.clone();
             while left > 0 {
-                let distance = cnum::abs(&Complex::with_val_64(prec, &*value - &state.l), prec);
-                let mut limit = left.clone();
-                let jump = loop {
-                    let found = match jumps {
-                        Some(cache) => {
-                            cache.advance(value, Some(&Float::with_val_64(prec, &limit)))?
-                        }
-                        None => None,
-                    };
-                    match (found, proved, &modulus) {
-                        (Some(jump), Some((proof, _)), Some(modulus))
-                            if !proof.settled(&distance, modulus, &jump.steps) =>
-                        {
-                            // A shorter jump stays closer to the fixed point.
-                            limit = Integer::from(&jump.steps >> 1u32);
-                        }
-                        (found, _, _) => break found,
-                    }
+                let jump = match jumps {
+                    Some(cache) => cache.advance(value, Some(&Float::with_val_64(prec, &left)))?,
+                    None => None,
                 };
                 if let Some(jump) = jump {
                     if let Some(speed) = speed {
                         *speed *= &jump.derivative;
                     }
-                    if let (Some((proof, _)), Some(modulus)) = (proved, &mut modulus) {
-                        *modulus *= Float::with_val_64(prec, &proof.decay * &jump.steps).exp();
-                    }
                     *value = jump.value;
                     left -= jump.steps;
                     continue;
                 }
-                match (proved, &mut modulus) {
-                    (Some((proof, _)), Some(modulus)) => {
-                        if !proof.settled(&distance, modulus, &Integer::from(1)) {
-                            return Err(unsettled().into());
-                        }
-                        *modulus *= proof.decay.clone().exp();
-                    }
-                    _ => {
-                        if distance * 2u32 > reach {
-                            return Err(unsettled().into());
-                        }
-                    }
+                let distance = cnum::abs(&Complex::with_val_64(prec, &*value - &state.l), prec);
+                if distance * 2u32 > reach {
+                    return Err(
+                        "Schröder: a logarithm branch cannot be fixed by continuity after Taylor jumps"
+                            .into(),
+                    );
                 }
                 if let Some(speed) = speed {
                     *speed /= cnum::abs(value, prec) * &ln_b_size;
@@ -2816,6 +2901,266 @@ mod tests {
         assert!(anchor
             .refute(&Integer::from(6), &trail, &mut missing)
             .is_err());
+    }
+
+    /// The state of the base whose attracting fixed point has the
+    /// multiplier `size e^(i angle)`.
+    fn multiplier_state(size: &str, angle: &str, prec: u64) -> SchroderState {
+        let turn = Complex::with_val_64(prec, (0, cnum::decimal(angle, prec))).exp();
+        let lambda = turn * cnum::decimal(size, prec);
+        let l = Complex::with_val_64(prec, lambda.exp_ref());
+        let ln_b = Complex::with_val_64(prec, &lambda / &l);
+        let base = cnum::checked_exp(&ln_b, prec).unwrap();
+        let fp = match crate::regions::classify(&base, prec).unwrap() {
+            crate::regions::Region::ShellThronInterior(fp) => fp,
+            other => panic!("expected strict attraction, got {other:?}"),
+        };
+        setup_schroder(&base, &fp, prec).unwrap()
+    }
+
+    #[test]
+    fn the_growth_bound_of_a_proof_holds_between_heights_of_the_tetration() {
+        let prec = cnum::digits_to_bits(40);
+        let step = cnum::decimal("1e-12", prec);
+        let offsets: Vec<Float> = ["0.001", "0.125", "1"]
+            .iter()
+            .map(|text| cnum::decimal(text, prec))
+            .collect();
+        for (size, angle) in [("0.6", "3"), ("0.9", "1")] {
+            let state = multiplier_state(size, angle, prec);
+            let size_b = cnum::abs(&state.ln_b, prec);
+            let value = |height: &Complex| eval_schroder(&state, height).unwrap();
+            // `|ln b| |F'|`, by a central difference.
+            let rate = |height: &Complex| {
+                let above = value(&Complex::with_val_64(prec, height + &step));
+                let below = value(&Complex::with_val_64(prec, height - &step));
+                let moved = cnum::abs(&Complex::with_val_64(prec, above - below), prec);
+                moved * &size_b / Float::with_val_64(prec, &step * 2u32)
+            };
+            let proof = Proof::new(&offsets, &state, &Float::with_val_64(prec, 8)).unwrap();
+            // The heights `p` with `(p + 2) ln lambda = -depth + i phase` lie
+            // inside the half-plane, next to its boundary and far from it.
+            for (depth, phase) in [("0.05", "0"), ("0.05", "2"), ("0.5", "-1.3"), ("3", "0.7")] {
+                let image = Complex::with_val_64(
+                    prec,
+                    (-cnum::decimal(depth, prec), cnum::decimal(phase, prec)),
+                );
+                let chain = Complex::with_val_64(prec, &image / &state.ln_lambda) - 2u32;
+                let level = proof.level(image.real());
+                let mut below = chain.clone();
+                for (far, offset) in offsets.iter().enumerate() {
+                    let above = Complex::with_val_64(prec, &chain + offset);
+                    let moved = Complex::with_val_64(prec, value(&above) - value(&below));
+                    let moved = cnum::abs(&moved, prec) * &size_b;
+                    let rates = (rate(&below), rate(&above));
+                    let bounds = [
+                        proof.bound(&level, far, &(Some(rates.0.clone()), None)),
+                        proof.bound(&level, far, &(None, Some(rates.1.clone()))),
+                    ]
+                    .map(|bound| bound.expect("a bound inside the half-plane"));
+                    for bound in &bounds {
+                        assert!(
+                            moved <= Float::with_val_64(prec, bound * 1.000001f64),
+                            "lambda={size} e^({angle}i) depth={depth} phase={phase} far={far}: \
+                             moved {moved:.6e}, bound {bound:.6e}"
+                        );
+                    }
+                    // Both ends together give the smaller of the two.
+                    let both = proof.bound(&level, far, &(Some(rates.0), Some(rates.1)));
+                    assert_eq!(both.unwrap(), bounds[0].clone().min(&bounds[1]));
+                    // A short step far from the boundary is bounded by
+                    // little more than what it moves.
+                    if far == 0 && depth != "0.05" {
+                        assert!(
+                            bounds[0] < Float::with_val_64(prec, &moved * 1.05f64),
+                            "depth={depth}: moved {moved:.6e}, bound {:.6e}",
+                            bounds[0]
+                        );
+                    }
+                    below = above;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_proof_accepts_a_pair_or_asks_for_samples_between_it() {
+        let prec = cnum::digits_to_bits(30);
+        let state = multiplier_state("0.9", "1", prec);
+        let exact = |value: f64| Float::with_val_64(prec, value);
+        let offsets = [exact(0.125), exact(0.25), exact(1.0)];
+        let proof = Proof::new(&offsets, &state, &exact(8.0)).unwrap();
+        let level = proof.level(&exact(-0.25));
+        let none = exact(0.0);
+        let mut missing = Vec::new();
+        // The bound of the pair (1/8, 1/4) for the rate 1 at both ends.
+        let unit = (Some(exact(1.0)), Some(exact(1.0)));
+        let bound = proof.bound(&level, 1, &unit).unwrap();
+        assert!(bound > 0.1 && bound < 0.2, "{bound}");
+        let rates = |size: f64| {
+            let rate = Float::with_val_64(prec, size / &bound);
+            (Some(rate.clone()), Some(rate))
+        };
+        // A bound of 4 is less than the distance 2 pi of the second
+        // nearest branch from a neighbour that the nearest one meets...
+        proof
+            .pair(&level, 1, &rates(4.0), (&none, &none), &mut missing)
+            .unwrap();
+        assert!(missing.is_empty());
+        // ... and no longer when the nearest one is 0.45 of a turn off:
+        // the second nearest is then 0.55 of a turn away, 3.46.
+        proof
+            .pair(&level, 1, &rates(4.0), (&exact(0.45), &none), &mut missing)
+            .unwrap();
+        assert!(!missing.is_empty());
+        // What is left along the branches counts as well: sqrt(0.55^2 + 0.5^2)
+        // of a turn is 4.67.
+        missing.clear();
+        proof
+            .pair(
+                &level,
+                1,
+                &rates(4.0),
+                (&exact(0.45), &exact(0.5)),
+                &mut missing,
+            )
+            .unwrap();
+        assert!(missing.is_empty());
+        // A fast pair gets samples between its two offsets: the middle, and
+        // from each end a ladder that starts within what the end allows.
+        proof
+            .pair(&level, 1, &rates(200.0), (&none, &none), &mut missing)
+            .unwrap();
+        assert!(missing.contains(&exact(0.1875)));
+        assert!(missing
+            .iter()
+            .all(|offset| *offset > 0.125 && *offset < 0.25));
+        let nearest = |end: f64| {
+            let gaps = missing.iter().map(|offset| (offset.clone() - end).abs());
+            gaps.fold(exact(1.0), |least, gap| least.min(&gap))
+        };
+        for end in [0.125, 0.25] {
+            assert!(nearest(end) < 0.002, "{end}: {}", nearest(end));
+            assert!(nearest(end) > 0.0002, "{end}: {}", nearest(end));
+        }
+        // The pair of the chain point and the first sample.
+        missing.clear();
+        proof
+            .pair(&level, 0, &rates(4.0), (&none, &none), &mut missing)
+            .unwrap();
+        assert!(missing.is_empty());
+        proof
+            .pair(&level, 0, &rates(200.0), (&none, &none), &mut missing)
+            .unwrap();
+        assert!(missing.contains(&exact(0.0625)));
+        assert!(missing.iter().all(|offset| *offset > 0 && *offset < 0.125));
+        // Without a derivative nothing is proved.
+        let error = proof
+            .pair(&level, 1, &(None, None), (&none, &none), &mut missing)
+            .unwrap_err();
+        assert!(error.contains("derivative"), "{error}");
+        // Neither between samples so close that the rounding of the heights
+        // of the chain, here up to 8, is more than 2^-16 of their distance.
+        assert_eq!(
+            proof.floor,
+            exact(8.0) >> usize::try_from(prec - 16).unwrap()
+        );
+        let bits = usize::try_from(prec - 18).unwrap();
+        let close = [Float::with_val_64(prec, 1) >> bits, exact(1.0)];
+        let proof = Proof::new(&close, &state, &exact(8.0)).unwrap();
+        let huge = Float::with_val_64(prec, 1) << 200u32;
+        let error = proof
+            .pair(
+                &proof.level(&exact(-0.25)),
+                0,
+                &(Some(huge.clone()), Some(huge)),
+                (&none, &none),
+                &mut missing,
+            )
+            .unwrap_err();
+        assert!(error.contains("cannot be fixed by continuity"), "{error}");
+    }
+
+    #[test]
+    fn logarithms_next_to_the_fixed_point_are_proved_where_the_curve_stays_there() {
+        let prec = cnum::digits_to_bits(40);
+        let state = multiplier_state("0.9", "1", prec);
+        let exact = |value: f64| Float::with_val_64(prec, value);
+        let offsets = [exact(0.25), exact(0.5), exact(1.0)];
+        let proof = Proof::new(&offsets, &state, &exact(64.0)).unwrap();
+        // The fixed point is e^lambda with a positive real part: the cut is
+        // as far from it as 0, and in the coordinate y that is |lambda|.
+        assert_eq!(proof.reach, cnum::abs(&state.l, prec));
+        let disk = Float::with_val_64(prec, &proof.reach * &proof.log_size);
+        assert!((disk - &state.lam_abs).abs() < 1e-30);
+        // The growth theorem keeps the curve to the right of a point within
+        // ((1 + m) / (1 - m))^2 times its distance from the fixed point:
+        // 361 times for m = 0.9, 39601 times for m = 0.99.
+        let apart = Float::with_val_64(prec, &proof.reach / 1024u32);
+        assert!(proof.settled(&apart, &exact(1e-6)));
+        assert!(proof.settled(&apart, &exact(0.9)));
+        assert!(!proof.settled(&apart, &exact(0.99)));
+        assert!(!proof.settled(&apart, &exact(1.0)));
+        assert!(!proof.settled(&proof.reach, &exact(1e-6)));
+        // A piece within 0.001 of the fixed point in the coordinate y: its
+        // logarithms grow by 1 / 0.9 each. Twenty of them are proved,
+        // X = 0.0165 and 19 X < 1/2; twenty-five are not, 24 X = 0.67.
+        let steps = |count: u32| Integer::from(count);
+        assert!(proof.jump(&exact(0.001), &steps(1)));
+        assert!(proof.jump(&exact(0.001), &steps(20)));
+        assert!(!proof.jump(&exact(0.001), &steps(25)));
+        // A piece that reaches 0.2 takes one logarithm, X = 0.44; one that
+        // reaches 0.3 none, X = 0.67.
+        assert!(proof.jump(&exact(0.2), &steps(1)));
+        assert!(!proof.jump(&exact(0.3), &steps(1)));
+
+        // How far a piece reaches, for the tetration itself: the samples of
+        // the unit above the height P with (P + 2) ln lambda = -4 + 0.7i.
+        let value = |height: &Complex| eval_schroder(&state, height).unwrap();
+        let step = cnum::decimal("1e-12", prec);
+        let speed = |height: &Complex| {
+            let above = value(&Complex::with_val_64(prec, height + &step));
+            let below = value(&Complex::with_val_64(prec, height - &step));
+            let moved = cnum::abs(&Complex::with_val_64(prec, above - below), prec);
+            Some(moved / Float::with_val_64(prec, &step * 2u32))
+        };
+        let image = Complex::with_val_64(prec, (exact(-4.0), exact(0.7)));
+        let chain = Complex::with_val_64(prec, &image / &state.ln_lambda) - 2u32;
+        let heights: Vec<Complex> = offsets
+            .iter()
+            .map(|offset| Complex::with_val_64(prec, &chain + offset))
+            .collect();
+        let trail = Trail {
+            offsets: offsets.to_vec(),
+            values: heights.iter().map(&value).collect(),
+            speeds: heights.iter().map(&speed).collect(),
+        };
+        let spread = proof
+            .spread(image.real(), &value(&chain), &speed(&chain), &trail, &state)
+            .unwrap();
+        // No point of the piece is further from the fixed point. The curve
+        // turns around it by a radian per unit of height, so the bound,
+        // which adds the way from a sample to the distance of the sample,
+        // is up to twice the furthest.
+        let mut furthest = Float::new_64(prec);
+        for part in 0..=64u32 {
+            let height = Complex::with_val_64(prec, &chain + exact(f64::from(part) / 64.0));
+            let away = Complex::with_val_64(prec, value(&height) - &state.l);
+            furthest = furthest.max(&(cnum::abs(&away, prec) * &proof.log_size));
+        }
+        assert!(furthest <= spread, "{furthest:.6e} > {spread:.6e}");
+        assert!(
+            spread < Float::with_val_64(prec, &furthest * 2u32),
+            "{spread:.6e} for {furthest:.6e}"
+        );
+        // Without the speed of a sample there is no bound.
+        let blind = Trail {
+            speeds: vec![None; 3],
+            ..trail.clone()
+        };
+        assert!(proof
+            .spread(image.real(), &value(&chain), &speed(&chain), &blind, &state)
+            .is_none());
     }
 
     #[test]

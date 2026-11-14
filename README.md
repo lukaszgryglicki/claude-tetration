@@ -98,7 +98,11 @@ zero imaginary part.
 * **Status (14 November 2026):** each of the two numbers of a run can be
   one complex argument, `tet 30 1.5+0.5i 1+0.7i`, next to the four real
   ones of `tet 30 1.5 0.5 1 0.7`; of four arguments each must now be real
-  (§ 3.2).
+  (§ 3.2). At complex heights, and at real heights between `−2` and `−1`,
+  regular iteration now proves the branch of every logarithm of its height
+  reduction, where it judged the distances of its samples before (§ 6.3).
+  The values are the same; heights as close to `−2` as `10⁻²⁹`, which were
+  refused, have values.
 * **Status (13 November 2026):** a correctness fix and several extensions.
   Regular iteration chose the principal logarithm at every step of its
   height reduction, which is the wrong branch once `F(h + s)` has gone
@@ -240,8 +244,9 @@ Precise statements of what `tet` returns:
   heights (for a real base between 1 and `e^{1/e}`: `Re h > −2`), which
   contains every real height above `−2`: there the logarithms of the height
   reduction are those that keep `F(h + s)` continuous in the real shift
-  `s` (§ 6.3), whatever their branch, and at real heights above `−1` each
-  of them is checked against the integer tower. Outside that half-plane,
+  `s` (§ 6.3), whatever their branch. At real heights above `−1` each of
+  them is checked against the integer tower; at every other height of the
+  half-plane each of them is proved to be that one. Outside that half-plane,
   where the tetration is many-valued, height reduction uses principal logs.
   The theta mappings trace their branches as described in § 6.10. A global
   single-valued function on all heights is not claimed.
@@ -1137,6 +1142,46 @@ Every row is subject to branch, domain, convergence and resource limits:
 
 Numerically cross-checked, **not interval-certified**:
 
+* **Proved branches at complex heights (14 November 2026).** Regular
+  iteration proves the branch of each logarithm of a height reduction at
+  complex heights and at real heights between `−2` and `−1` (§ 6.3).
+  *The bound.* For the bases with the multipliers `0.6·e^{3i}` and
+  `0.9·e^{i}`, at four heights each, from next to the boundary of the
+  half-plane to deep inside it, and at the distances `0.001`, `0.125` and
+  `1`, the tetration computed at 40 digits never moves further than the
+  bound allows, from either end, and for the short step the bound is within
+  5 % of what it moves.
+  *Complex heights against real ones.* At `|λ| = 0.992` (argument 1) the
+  mean of the values at 16 complex heights on the circle of radius `0.015`
+  around the real height `0.5` is the value there, which the integer tower
+  checks, to 12 digits; one of the 16 a branch off would move the mean by
+  `0.68`. The mean of 32 heights of radius `0.125` around `0.5 + 0.3i` is
+  the value at that height as well, the function passes smoothly through
+  the height `−1`, where the proof takes over from the tower, and `--slog`
+  returns the heights `0.5 + 0.25i`, `0.5 + 0.001i`, `0.3 − 0.004i` and
+  `−1.5`. (A larger circle shows what limits such a check: the continuation
+  of this tetration across the boundary of the half-plane has branch points
+  at the heights `−k` plus the period `6.283 − 0.050i`, the nearest of them,
+  `0.28 − 0.05i`, at the distance `0.41` from `0.5 + 0.3i`. The mean of 16
+  heights of radius `0.25` misses by `9·10⁻⁷`, that of 32 by `6·10⁻¹¹`.)
+  *The same values.* 44 values agree in every printed digit with those of
+  the binary without the proof: ordinary complex bases at complex heights;
+  `|λ| = 0.992`, `0.998` and `0.999` at complex heights and between `−2` and
+  `−1`; the base `1.44466786 + 10⁻¹²i`, whose chain of 112438 levels is
+  crossed by Taylor jumps, each of them proved (11.7 s, 11.2 s before);
+  heights outside the half-plane. Ordinary heights take the same time;
+  complex heights next to the real axis of the three bases next to the
+  boundary up to a third less (fewer samples); heights next to `−2` more,
+  the more the closer (`|λ| = 0.992`: 0.75 s at `−1.999`, 0.25 s before;
+  3.0 s at `−2 + 10⁻¹²`, 0.43 s before).
+  *Newly computed.* Heights within `10⁻²⁴` of `−2`, which the judged
+  distances refused: `F(−2 + 10⁻²⁹)` is `−97.355411868872404667 +
+  67.818202373366110647i` for `1.5 + 0.5i` and `28.019640069217744005 +
+  39.907114582632919249i` for `0.2 + 0.4i`. From `10⁻²⁰` to `10⁻²⁹` the first
+  moves by `ln 10⁻⁹/ln b`, as next to a simple zero of `F(h + 1)` it must,
+  to 16 digits.
+  *Inverses.* `--sroot` returns `1.3 + 0.1i` from its value at `0.3 + 0.4i`
+  and `1.25 + 0.05i` from its value at `0.5 + 0.1i` to 20 digits.
 * **Branch fix and extensions of 13 November 2026.**
   *Regular iteration.* With the branches of the height reduction fixed by
   continuity (§ 6.3), `F(h)` at `|λ| = 0.992` and `0.995` (argument 1) has no
@@ -1768,16 +1813,18 @@ samples of the curve over one unit of height above its current point,
 `F(h + j + u)` for `0 < u ≤ 1`, takes one logarithm of each per step and
 puts it on the branch next to that of its neighbour; the sample `u = 1` of
 the next level is the chain point of this level and takes no logarithm, so
-nothing is assumed about any branch. Two neighbours are accepted when the
-argument turns by at most an eighth of a turn between them and the value
-changes by less than half of itself over their distance; otherwise samples
-are added between them (densely next to a point where the value changes
-fast, which happens where a zero of `F` lies next to the path) and the
-chain is repeated. With Taylor jumps the samples make the same jumps;
-where one of them cannot, shorter jumps are tried, and after the shortest
-the chain goes on in single steps. This is done in the half-plane
-`|λ^{h+2}| < 1`, where the tetration is single-valued; outside it the
-logarithms are the principal ones (§ 1.2). The values above are now `1.5088 + 0.0616i` at `0.56` and
+nothing is assumed about any branch. That holds as long as two neighbours
+are close enough for the nearest branch to be the right one. At a real
+height above `−1` the integer tower checks that, and at every other height
+it is proved; the next two paragraphs say how. Where neighbours are too
+far apart, samples are added between them (densely next to a point where
+the value changes fast, which happens where a zero of `F` lies next to the
+path) and the chain is repeated. With Taylor jumps the samples make the
+same jumps; where one of them cannot, shorter jumps are tried, and after
+the shortest the chain goes on in single steps. This is done in the
+half-plane `|λ^{h+2}| < 1`, where the tetration is single-valued; outside
+it the logarithms are the principal ones (§ 1.2). The values above are now
+`1.5088 + 0.0616i` at `0.56` and
 `1.53538151660357 + 0.0781658334622440i` at `0.60`, and the anchor
 `F(0) = 1`, which failed on the wrong branch for `|λ| ≥ 0.998`, holds:
 `|λ| = 0.998` at the same argument gives `1.47919432026926 +
@@ -1811,13 +1858,68 @@ of the next level. After the last step the samples from that integer up are
 continued one level further from the final value itself and compared with
 `b^^(m−1)`, so a wrong branch of the result shows as well. A chain that the
 tower refutes is repeated with twice the samples and with the distances of
-neighbours judged as described above; if the next chain fails no later, the
-height is an error. For real heights above `−1` the branch of the result
-therefore rests on exact values, and the judging of distances starts only
-after a refutation (at `|λ| = 0.9999` the first chain, with nine samples,
-is refuted at its step 444 of 542). Heights between `−2` and `−1`, where
-the tower ends at `b^^(−1) = 0`, and complex heights depend on the judged
-distances alone. The tower is kept for the lowest 65536 levels of a chain.
+neighbours judged: two neighbours are then accepted when the argument
+turns by at most an eighth of a turn between them and the value changes by
+less than half of itself over their distance. If the next chain fails no
+later, the height is an error. For real heights above `−1` the branch of
+the result therefore rests on exact values, and the judging of distances
+starts only after a refutation (at `|λ| = 0.9999` the first chain, with
+nine samples, is refuted at its step 444 of 542). The tower is kept for the
+lowest 65536 levels of a chain. It cannot check a height between `−2` and
+`−1`, where it ends at `b^^(−1) = 0` above the result, nor a complex
+height, which has no integer on its line of real shifts.
+
+**At every other height each branch is proved.** There the nearest branch
+is not judged: it is proved to be the one of the tetration, from the fact
+that the inverse function `ψ` is one-to-one on its whole disk `|t| < R`
+(next paragraph). For a function that is one-to-one on a disk, Koebe's
+growth theorem bounds how far it moves between two points by its
+derivative at one of them. Carried to the heights `p` and `q = p + g` of
+two neighbouring samples, with `m = |λ^{p+2}|`, which is less than 1 exactly
+in the half-plane, and `E = λ^g − 1`, it reads
+
+```
+|F(q) − F(p)|  ≤  |F′(p)| (1 − m²) |E| / ( |ln λ| · |x| · (1 − z)² ),
+x = 1 − m² (1 + E),    z = m |E| / |x|,
+```
+
+and the same from `q`, with `|F′(q)|`, `1 − |λ^{q+2}|²` and one more factor
+`1/|1 + E|`. Of the function it needs the derivative at one of the two
+heights, which the chain carries with every sample, and nothing else: not
+the normalization `s₁`, and no value. The logarithm of the sample
+`F(p + 1)` is `F(p)` or lies whole branches from it, `2π/|ln b|` apart. Once
+the bound is smaller than the distance of the neighbour `F(q)` from the
+second nearest of those branches, `F(p)` can only be the nearest. A pair
+that fails gets samples between it, and the chain is repeated; where those
+samples go is an estimate, but each pair that they form is proved in its
+turn, and so is every logarithm of the chain point. Deep inside the
+half-plane the eight samples per unit of height that a chain starts with
+are enough. Next to its boundary, where `1 − m²` is small, and next to the
+height `−2` they grow denser: the base above (`|λ| = 0.992`) takes 8 at
+`0.56 + 0.1i`, 20 at `0.5 + 10⁻¹²i`, 37 at `−1.5` and 244 at `−1.999`, where
+the judged distances took 16, 29, 29 and 44. A height whose chain would
+need more than 262144 is an error.
+
+A Taylor jump, and a logarithm that a sample takes by itself after one,
+has no neighbour. It is the logarithm next to the fixed point, and that is
+the right one where the curve `F(p + s)`, `s ≥ 0`, stays inside the disk
+around the fixed point that does not reach the cut: the logarithm
+continues along the curve, and it is the principal one at the far end.
+The same theorem keeps the curve within `((1 + m)/(1 − m))²` times the
+distance of the point from the fixed point, and for a jump over `n` levels
+within `(1 + m)² γ/(1 − mγ)²` times it, `γ = |λ|^{1−n}`. In a proved chain a
+jump is taken only where that lies inside the disk; otherwise shorter
+jumps are tried, then single steps.
+
+The proof rests on three things: that `ψ` is one-to-one on its disk; the
+derivative of the series at the samples, which is summed to the working
+precision as the values are; and floating-point arithmetic, for which
+every comparison keeps a sixteenth in reserve and two samples are never
+closer than `2¹⁶` roundings of a height. It is a proof of the branch, not
+an enclosure of the digits (§ 7). Outside the half-plane nothing is
+proved, because the principal logarithms there are a convention (§ 1.2).
+§ 5.1 has the checks: the bound against computed values, complex heights
+against the tower-checked real ones, and independent references.
 
 **A long series for nearly neutral multipliers.** The inverse series
 `ψ(t) = t + c₂t² + …`, with `F(h) = L + ψ(s₁ λ^h)`, was summed only on a
@@ -2462,6 +2564,7 @@ digits, and fails on any that is not permitted there by name.
 | `expression.rs` | 16 bits beyond the precision of the run on which the two evaluations must agree; 20 digits between them; 64 guard bits of a named constant before its directed rounding; three total cancellations, and 64 times the digits, before an input is refused; the 64 bits below the unit place that a large value must keep; the 8 values remembered; the 10 digits of an imaginary part in the message that refuses it | margins and limits of the precision and one width of a message, never a value: they raise the precision or end in an error |
 | `constants.rs` | starting values `3/4`, `2/3`, `3/8` of the Newton iterations; guard bits 64 | exact small ratios at the working precision; each iteration ends on a residual test there |
 | `schroder::LongSeries`, `schroder::Anchor` | step and term counts (256, 4096) and cost weights that choose between the short series, the long series and Taylor jumps; the 65536 levels of the integer tower kept for the branch check | each choice is between methods that converge to the same value; the check can only reject |
+| `schroder::Proof`, `schroder::Trail` | the sixteenth kept in reserve in every comparison of a branch proof and the `2¹⁶` roundings below which two samples are not told apart; where samples are added (the bound `3π/4`, 64 parts of a gap, ladders by powers of two); 65536 offsets collected before they are sorted; 262144 samples per unit of height at most | the first two can only refuse a pair, and a refused pair gets more samples or ends in an error; the others set how densely a curve is sampled and when a chain is given up, never a value |
 | `kouznetsov.rs` | `as_secs_f64` | timing output |
 | `examples/grid_runner.rs`, `examples/edge_runner.rs` | `f64` percentages of passing cells, `as_secs_f64` | statistics and timing output of the two test-grid tools; every value they print comes from the library |
 | `examples/test_w0.rs` | a working precision of 8 digits | a diagnostic that prints one Lambert W value at the precision it names; no result of the library passes through it |
@@ -2504,7 +2607,11 @@ The same contract opens `src/lib.rs`.
   MPFR's range (§ 6.2), so `Re h = 10^30` finishes only then or if the tower
   leaves MPFR's range first. To the left the cost is bounded for the theta
   mappings; regular iteration takes one logarithm per unit until its chain
-  is periodic or, for a real base, stationary (§ 6.3).
+  is periodic or, for a real base, stationary (§ 6.3). For a complex base,
+  a height next to the boundary of the half-plane `|λ^{h+2}| < 1` needs the
+  denser samples the closer it lies, because each branch is proved there
+  (§ 6.3): closer than about `2¹⁶` roundings of a height, or where a unit of
+  height would need more than 262144 samples, it is an error.
   There is no finite value at `h=−2` consistent with the nondegenerate
   recurrence through `F(−1)=0`. Base zero has only its integer convention;
   base one is the constant-function exception.
@@ -2528,7 +2635,7 @@ The following remaining directions require separate mathematical work:
 | Real-base high-precision methods | Done for real `b > η` by the theta-mapping solver (§ 6.8); 1000 digits is hours, not impossible | Faster polynomial evaluation and a Newton–Krylov outer iteration would cut the cost further |
 | Complex bases outside Shell–Thron | Done by the two-sided theta mapping (§ 6.10) for every scanned base whose primary fixed points both repel | A proof that the iteration converges for every such base; the cost next to low-order roots of unity of the multiplier, where the disk of the inverse series shrinks (§ 5.3) |
 | The two-fixed-point function inside Shell–Thron | It exists there as well and differs from regular iteration (Paulsen 2019): at `\|λ\| = 0.998`, argument 1, height `0.5`, by `0.09 − 0.04i` | A convention for offering both families; the solver currently requires a repelling upper fixed point |
-| Regular iteration next to the boundary | With the long series (§ 6.3) it reaches `\|λ\| = 0.9999` in 45 s and `0.99999` in 9 minutes; each further factor of ten costs ten to thirty times more, mostly for the samples of the chains | Samples kept only on the levels that need them; the coefficient recursion in parallel; a branch check for complex heights like the integer tower for real ones; the branch of the many-valued region outside `\|λ^{h+2}\| < 1` (principal logarithms at present) |
+| Regular iteration next to the boundary | With the long series (§ 6.3) it reaches `\|λ\| = 0.9999` in 45 s and `0.99999` in 9 minutes; each further factor of ten costs ten to thirty times more, mostly for the samples of the chains | Samples kept only on the levels that need them; the coefficient recursion in parallel; the branch of the many-valued region outside `\|λ^{h+2}\| < 1` (principal logarithms at present). The branches inside it are proved at complex heights and checked against the integer tower at real ones (§ 6.3) |
 | Parabolic/root-of-unity cases | Sectorial Fatou coordinates exist in classical local theory; at λ=−1 use the second iterate | Truncation bounds, sector matching, inversion and the intended global normalization |
 | Near-parabolic real bases | With the long Poincaré series (§ 6.8) the theta mapping reaches `b − η ≈ 2·10⁻⁶`, at a cost like `(b − η)^{−1/2…−2/3}` | Taylor expansions of the Abel function away from the fixed point, or perturbed Fatou coordinates |
 | Other rotating near-neutral attractors | Paired steps now address strict attraction near `-1`; other near-resonances still use generic bounds | Further cancellation-aware iterates with local error/branch bounds, not relaxed precision goals |
@@ -2615,7 +2722,7 @@ $ cargo test --release --lib       # includes high-precision jump cases, constan
 $ TET_MT=2 cargo test --release --test phase12_coverage -- --test-threads=1
 $ TET_MT=2 cargo test --release --test phase13_near_neutral -- --test-threads=1
 $ TET_MT=2 cargo test --release --test phase14_complex_jumps -- --test-threads=1
-$ cargo test --release --test phase4_schroder   # regular iteration, branches, long series (about 10 s)
+$ cargo test --release --test phase4_schroder   # regular iteration, branches, long series (about 30 s)
 $ cargo test --release --test phase16_kneser    # theta-mapping solver (about 30 s)
 $ cargo test --release --test phase17_inverse   # --slog / --sroot (about 3 minutes)
 $ cargo test --release --test phase18_complex_kneser   # two-sided solver (about a minute)

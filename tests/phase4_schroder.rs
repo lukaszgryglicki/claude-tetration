@@ -268,6 +268,97 @@ fn t390_logarithm_branches_follow_the_tetration_continuously() {
 }
 
 #[test]
+fn t392_branches_at_complex_heights_agree_with_the_tower_checked_real_ones() {
+    // At a complex height, and at a real one between -2 and -1, every
+    // logarithm of the height reduction is proved to lie on the branch of the
+    // tetration (README section 6.3); at a real height above -1 the integer
+    // tower checks it. The two meet here, at |lambda| = 0.992 with a turning
+    // multiplier, where the principal logarithms are the wrong ones.
+    let (re, im) = ("1.764630858490303", "0.1690076064324368");
+    let digits = 15;
+    let prec = cnum::digits_to_bits(digits);
+    let base = parse(re, im, prec);
+    let value = |height: &Complex| dispatch::tetrate(&base, height, prec, digits).unwrap();
+    // An analytic function is the mean of its values on a circle. The mean
+    // of sixteen complex heights around the real height 0.5 is the value
+    // there: one of them a whole branch off would move it by 0.68. That
+    // circle stays inside the half-plane |lambda^(h+2)| < 1, whose boundary
+    // passes 0.02 below 0.5. The second circle is larger and has more
+    // heights: the continuation of the tetration across that boundary has
+    // its nearest branch point at 0.28 - 0.05i, the height -6 plus a period,
+    // and the mean of n values is as good as (radius / distance)^n.
+    let mean = |centre: &Complex, radius: &str, parts: u32| {
+        let radius = cnum::decimal(radius, prec);
+        let mut sum = Complex::with_val_64(prec, 0);
+        for part in 0..parts {
+            let angle = Float::with_val_64(prec, rug::float::Constant::Pi) * (2 * part) / parts;
+            let (sine, cosine) = angle.sin_cos(Float::new_64(prec));
+            let offset = Complex::with_val_64(prec, (cosine, sine)) * &radius;
+            sum += value(&Complex::with_val_64(prec, centre + offset));
+        }
+        sum / parts
+    };
+    for (centre, radius, parts) in [(("0.5", "0"), "0.015", 16), (("0.5", "0.3"), "0.125", 32)] {
+        let centre = parse(centre.0, centre.1, prec);
+        let miss = Complex::with_val_64(prec, mean(&centre, radius, parts) - value(&centre));
+        assert!(
+            abs(&miss, prec) < 1e-12,
+            "the mean around {centre} misses the value there by {miss}"
+        );
+    }
+    // The digits at four heights that are proved.
+    for (height, expected) in [
+        (
+            ("0.5", "1e-12"),
+            ("1.46553771835339", "3.79556471719874e-2"),
+        ),
+        (("0.56", "0.1"), ("1.47284358444257", "1.30650817048336e-1")),
+        (
+            ("-1.5", "0"),
+            ("-7.32234493266433e-1", "-4.84943893334985e-2"),
+        ),
+        (("-1.999", "0"), ("-11.7155707788143", "1.38899853052962")),
+    ] {
+        let found = tetration::tetrate_str("15", re, im, height.0, height.1).unwrap();
+        assert_eq!(
+            (found.0.as_str(), found.1.as_str()),
+            expected,
+            "h={height:?}"
+        );
+    }
+    // Across the height -1, where the tetration is 0 and the proof takes
+    // over from the tower, the function goes on smoothly.
+    let values: Vec<Complex> = ["-1.03", "-1.02", "-1.01", "-1", "-0.99", "-0.98", "-0.97"]
+        .iter()
+        .map(|height| value(&parse(height, "0", prec)))
+        .collect();
+    assert!(values[3].real().is_zero() && values[3].imag().is_zero());
+    for window in values.windows(4) {
+        let third = Complex::with_val_64(prec, &window[3] - &window[0])
+            - Complex::with_val_64(prec, &window[2] - &window[1]) * 3u32;
+        assert!(abs(&third, prec) < 1e-4, "third difference {third}");
+    }
+    // The super-logarithm returns those heights.
+    for height in [
+        ("0.5", "0.25"),
+        ("0.5", "0.001"),
+        ("0.3", "-0.004"),
+        ("-1.5", "0"),
+    ] {
+        let image = tetration::tetrate_str("15", re, im, height.0, height.1).unwrap();
+        let found = tetration::slog_str("15", re, im, &image.0, &image.1).unwrap();
+        let miss = Complex::with_val_64(
+            prec,
+            parse(&found.0, &found.1, prec) - parse(height.0, height.1, prec),
+        );
+        assert!(
+            abs(&miss, prec) < 1e-12,
+            "slog returned {found:?} for h={height:?}"
+        );
+    }
+}
+
+#[test]
 fn t391_long_inverse_series_for_nearly_neutral_multipliers() {
     // lambda = -0.9986. The short series of the attracting disk and its chain
     // of 7500 logarithms give these 50 digits as well; the long series is

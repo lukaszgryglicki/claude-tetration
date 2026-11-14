@@ -1194,7 +1194,8 @@ fn eval_schroder_with_conditioning(
                 let above = Complex::with_val_64(prec, h + &shifts) + 3u32;
                 let depth = Complex::with_val_64(prec, above * &state.ln_lambda);
                 let apart = cnum::abs(&Complex::with_val_64(prec, last - &state.l), prec);
-                settled = proof.settled(&apart, &depth.real().clone().exp());
+                let modulus = depth.real().clone().exp();
+                settled = proof.settled(&apart, &modulus, &Integer::from(1));
             }
             trail = Some(built);
         }
@@ -1234,10 +1235,11 @@ fn eval_schroder_with_conditioning(
                 // them cannot, shorter jumps are tried, and after the
                 // shortest the chain goes on in single steps. In a proved
                 // chain a jump is taken only where its logarithms are
-                // proved, for the chain point and for every sample at once:
-                // `spread` is how far from the fixed point the curve through
-                // them reaches.
+                // proved: for the curve through the chain point and the
+                // samples at once (`spread` is how far from the fixed point
+                // it reaches), or for each of them by itself.
                 let mut spread = None;
+                let mut modulus = None;
                 if let (Some(proof), Some(samples), true) = (&proof, &trail, jump.is_some()) {
                     let above = Complex::with_val_64(prec, h + &shifts) - &step + 2u32;
                     let depth = Complex::with_val_64(prec, above * &state.ln_lambda);
@@ -1245,6 +1247,7 @@ fn eval_schroder_with_conditioning(
                         if settled {
                             spread = proof.spread(depth.real(), &f, &speed, samples, state);
                         }
+                        modulus = Some(depth.real().clone().exp());
                     } else {
                         // A jump has taken the chain point out of the
                         // half-plane of the proof: nothing is traced from
@@ -1253,23 +1256,38 @@ fn eval_schroder_with_conditioning(
                     }
                 }
                 let mut refused = false;
-                while let (Some(candidate), true) = (&jump, trail.is_some()) {
-                    let mut followed = trail.clone();
-                    let proved = proof.as_ref().is_none_or(|proof| {
-                        spread
-                            .as_ref()
-                            .is_some_and(|spread| proof.jump(spread, &candidate.steps))
-                    });
-                    let made = proved
-                        && followed.as_mut().is_some_and(|samples| {
-                            samples.descend(&candidate.steps, &mut jumps, state).is_ok()
-                        });
-                    if made {
-                        trail = followed;
+                while let (Some(candidate), Some(samples)) = (&jump, &trail) {
+                    let steps = &candidate.steps;
+                    let along = match (&proof, &spread) {
+                        (Some(proof), Some(spread)) => proof.jump(spread, steps),
+                        _ => false,
+                    };
+                    let proved = match (&proof, &modulus) {
+                        (None, _) => true,
+                        (Some(proof), Some(modulus)) => {
+                            along || proof.apiece(modulus, &f, samples, steps, state)
+                        }
+                        (Some(_), None) => false,
+                    };
+                    let mut followed = samples.clone();
+                    if proved && followed.descend(steps, &mut jumps, state).is_ok() {
+                        if let (Some(proof), Some(modulus), false) = (&proof, &modulus, along) {
+                            // The curve to the right of the samples, which
+                            // now begins at the last of them `steps` levels
+                            // further down.
+                            let last = followed.values.last().ok_or("Schröder: empty trail")?;
+                            let apart =
+                                cnum::abs(&Complex::with_val_64(prec, last - &state.l), prec);
+                            let level = Integer::from(1) - steps;
+                            let moved = Float::with_val_64(prec, &state.lam_abs).pow(level);
+                            let modulus = Float::with_val_64(prec, modulus * moved);
+                            settled = proof.settled(&apart, &modulus, &Integer::from(1));
+                        }
+                        trail = Some(followed);
                         break;
                     }
                     refused = true;
-                    let shorter = Float::with_val_64(prec, Integer::from(&candidate.steps >> 1u32));
+                    let shorter = Float::with_val_64(prec, Integer::from(steps >> 1u32));
                     jump = match &mut jumps {
                         Some(cache) => cache.advance(&f, Some(&shorter))?,
                         None => None,
@@ -1687,9 +1705,9 @@ struct Proof {
     /// The distance of the fixed point from the cut of the principal
     /// logarithm.
     reach: Float,
-    /// The least distance of two samples that are told apart: 2^16 times
-    /// the rounding of the largest height of the chain. A pair that is
-    /// proved is then also proved for the heights as they are rounded.
+    /// 2^16 times the rounding of the largest height of the chain. A pair
+    /// is divided only while its halves stay no shorter than this: the
+    /// rounding of their heights is then less than 2^-16 of their distance.
     floor: Float,
     /// `|lambda|^(2u)` for every offset `u`, and one minus that.
     powers: Vec<Float>,
@@ -1918,22 +1936,48 @@ impl Proof {
         Ok(())
     }
 
-    /// Whether the curve `F(p + s)`, `s >= 0`, of the tetration stays inside
-    /// the disk around the fixed point that the cut of the principal
-    /// logarithm does not reach, for a point of it `apart` from the fixed
-    /// point at a height `p` with `modulus = |lambda^(p + 2)|`. The
-    /// coordinates of that curve are no larger than the one of the point,
-    /// and there the growth theorem bounds `|psi|` by
-    /// `apart ((1 + m) / (1 - m))^2`, `m = modulus`.
-    fn settled(&self, apart: &Float, modulus: &Float) -> bool {
+    /// Whether the curve `F(p - j + s)`, `s >= 0`, of the tetration stays
+    /// for every `j < steps` inside the disk around the fixed point that the
+    /// cut of the principal logarithm does not reach, for a point of it
+    /// `apart` from the fixed point at a height `p` with
+    /// `modulus = |lambda^(p + 2)|`. The coordinates of those curves are no
+    /// larger than `|t| / |lambda|^(steps - 1)`, `t` the coordinate of the
+    /// point, and there the growth theorem bounds `|psi|` by
+    /// `apart (1 + m)^2 g / (1 - m g)^2`, `m = modulus`,
+    /// `g = |lambda|^(1 - steps)`.
+    fn settled(&self, apart: &Float, modulus: &Float, steps: &Integer) -> bool {
         let prec = self.scale.prec_64();
-        if !modulus.is_finite() || *modulus >= 1 {
+        let before = Integer::from(steps - 1u32);
+        let growth = Float::with_val_64(prec, &self.decay * &before).exp();
+        let outer = Float::with_val_64(prec, modulus * &growth);
+        if !outer.is_finite() || outer >= 1 {
             return false;
         }
-        let ratio =
-            Float::with_val_64(prec, 1u32 + modulus) / Float::with_val_64(prec, 1u32 - modulus);
-        let bound = ratio.square() * apart;
+        let bound = Float::with_val_64(prec, 1u32 + modulus).square() * apart * growth
+            / Float::with_val_64(prec, 1u32 - outer).square();
         bound.is_finite() && bound * 17u32 < Float::with_val_64(prec, &self.reach * 16u32)
+    }
+
+    /// `settled` for the chain point `point` at a height `P` with
+    /// `modulus = |lambda^(P + 2)|` and for every sample of `trail`: each
+    /// of them may then take `steps` logarithms next to the fixed point,
+    /// whatever lies between them.
+    fn apiece(
+        &self,
+        modulus: &Float,
+        point: &Complex,
+        trail: &Trail,
+        steps: &Integer,
+        state: &SchroderState,
+    ) -> bool {
+        let prec = self.scale.prec_64();
+        let apart =
+            |value: &Complex| cnum::abs(&Complex::with_val_64(prec, value - &state.l), prec);
+        self.settled(&apart(point), modulus, steps)
+            && trail.values.iter().zip(&self.powers).all(|(value, power)| {
+                let modulus = Float::with_val_64(prec, power.sqrt_ref()) * modulus;
+                self.settled(&apart(value), &modulus, steps)
+            })
     }
 
     /// How far from the fixed point, in units of `1 / |ln b|`, the curve
@@ -1992,7 +2036,10 @@ impl Proof {
     /// piece that lies within `spread / |ln b|` of the fixed point. The
     /// curve `F(P + 1 + s)`, `s >= 0`, to the right of the piece has to be
     /// known to stay inside the disk around the fixed point that the cut
-    /// does not reach; the same then holds `steps` levels down.
+    /// does not reach; the same then holds `steps` levels down. (`apiece`
+    /// proves the same for the chain point and the samples one by one,
+    /// without that knowledge: it serves where the piece turns around the
+    /// fixed point too fast for a bound between the samples.)
     ///
     /// The logarithm of the tetration continues along the curve of real
     /// shifts, and at its far end it is the one next to the fixed point,
@@ -3096,16 +3143,25 @@ mod tests {
         // The growth theorem keeps the curve to the right of a point within
         // ((1 + m) / (1 - m))^2 times its distance from the fixed point:
         // 361 times for m = 0.9, 39601 times for m = 0.99.
+        let steps = |count: u32| Integer::from(count);
         let apart = Float::with_val_64(prec, &proof.reach / 1024u32);
-        assert!(proof.settled(&apart, &exact(1e-6)));
-        assert!(proof.settled(&apart, &exact(0.9)));
-        assert!(!proof.settled(&apart, &exact(0.99)));
-        assert!(!proof.settled(&apart, &exact(1.0)));
-        assert!(!proof.settled(&proof.reach, &exact(1e-6)));
+        assert!(proof.settled(&apart, &exact(1e-6), &steps(1)));
+        assert!(proof.settled(&apart, &exact(0.9), &steps(1)));
+        assert!(!proof.settled(&apart, &exact(0.99), &steps(1)));
+        assert!(!proof.settled(&apart, &exact(1.0), &steps(1)));
+        assert!(!proof.settled(&proof.reach, &exact(1e-6), &steps(1)));
+        // The curves to the right of the 49 logarithms before the last of a
+        // jump reach 0.9^-49 = 175 times as far, those of 79 logarithms 4118
+        // times; and from m = 0.5 the eighth logarithm of a jump would begin
+        // outside the disk of the inverse function, 0.5 / 0.9^7 > 1.
+        assert!(proof.settled(&apart, &exact(1e-6), &steps(50)));
+        assert!(!proof.settled(&apart, &exact(1e-6), &steps(80)));
+        let near = Float::with_val_64(prec, &apart >> 40u32);
+        assert!(proof.settled(&near, &exact(0.5), &steps(7)));
+        assert!(!proof.settled(&near, &exact(0.5), &steps(8)));
         // A piece within 0.001 of the fixed point in the coordinate y: its
         // logarithms grow by 1 / 0.9 each. Twenty of them are proved,
         // X = 0.0165 and 19 X < 1/2; twenty-five are not, 24 X = 0.67.
-        let steps = |count: u32| Integer::from(count);
         assert!(proof.jump(&exact(0.001), &steps(1)));
         assert!(proof.jump(&exact(0.001), &steps(20)));
         assert!(!proof.jump(&exact(0.001), &steps(25)));
@@ -3161,6 +3217,12 @@ mod tests {
         assert!(proof
             .spread(image.real(), &value(&chain), &speed(&chain), &blind, &state)
             .is_none());
+        // One by one, the chain point and these samples may take three
+        // logarithms and not thirty: the chain point is 0.021 / |ln b| from
+        // the fixed point at m = e^-4, and 0.9^-29 is 21.
+        let modulus = image.real().clone().exp();
+        assert!(proof.apiece(&modulus, &value(&chain), &trail, &steps(3), &state));
+        assert!(!proof.apiece(&modulus, &value(&chain), &trail, &steps(30), &state));
     }
 
     #[test]

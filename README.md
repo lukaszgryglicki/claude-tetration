@@ -1164,16 +1164,29 @@ Numerically cross-checked, **not interval-certified**:
   at the heights `−k` plus the period `6.283 − 0.050i`, the nearest of them,
   `0.28 − 0.05i`, at the distance `0.41` from `0.5 + 0.3i`. The mean of 16
   heights of radius `0.25` misses by `9·10⁻⁷`, that of 32 by `6·10⁻¹¹`.)
+  *Next to the boundary.* At `Re h = 0.5` the proved value `10⁻³⁰` inside
+  the half-plane, whose chain takes 161 samples, has the digits of the
+  principal one `10⁻³⁰` outside. Along the boundary, at 35 heights from
+  `Re h = −8` to `8` and `10⁻²⁵` to either side, the two sides print the
+  same 20 digits, except from `−2.8` to `−2.5`, where they differ by
+  `2πi/ln b`: the curve on which `F(h + 1)` is negative, the cut of the
+  principal logarithm, runs inside the half-plane there, where nothing is
+  cut, so the two branches meet at the boundary (§ 8).
   *The same values.* 44 values agree in every printed digit with those of
   the binary without the proof: ordinary complex bases at complex heights;
   `|λ| = 0.992`, `0.998` and `0.999` at complex heights and between `−2` and
   `−1`; the base `1.44466786 + 10⁻¹²i`, whose chain of 112438 levels is
   crossed by Taylor jumps, each of them proved (11.7 s, 11.2 s before);
-  heights outside the half-plane. Ordinary heights take the same time;
-  complex heights next to the real axis of the three bases next to the
-  boundary up to a third less (fewer samples); heights next to `−2` more,
-  the more the closer (`|λ| = 0.992`: 0.75 s at `−1.999`, 0.25 s before;
-  3.0 s at `−2 + 10⁻¹²`, 0.43 s before).
+  heights outside the half-plane. So do the 36 values at 18 of the heights
+  along the boundary. The two bases of the slow suites whose chains are
+  crossed by jumps print the same 20 digits at `0.5 + 0.25i` in the same
+  time: `1.444667861009766 + 10⁻¹⁵i` (125 728 476 levels) in 38 s,
+  `0.0659880358454 + 10⁻¹⁴i` (`8·10¹³` levels) in 280 s. Ordinary heights
+  take the same time; complex heights next to the real axis of the three
+  bases next to the boundary up to a third less (fewer samples); heights
+  next to `−2` more, the more the closer (`|λ| = 0.992`: 0.75 s at
+  `−1.999`, 0.25 s before; 3.0 s at `−2 + 10⁻¹²`, 0.43 s before; 15 s at
+  `−2 + 10⁻²⁰`, 2.1 s before).
   *Newly computed.* Heights within `10⁻²⁴` of `−2`, which the judged
   distances refused: `F(−2 + 10⁻²⁹)` is `−97.355411868872404667 +
   67.818202373366110647i` for `1.5 + 0.5i` and `28.019640069217744005 +
@@ -1872,11 +1885,11 @@ height, which has no integer on its line of real shifts.
 **At every other height each branch is proved.** There the nearest branch
 is not judged: it is proved to be the one of the tetration, from the fact
 that the inverse function `ψ` is one-to-one on its whole disk `|t| < R`
-(next paragraph). For a function that is one-to-one on a disk, Koebe's
-growth theorem bounds how far it moves between two points by its
-derivative at one of them. Carried to the heights `p` and `q = p + g` of
-two neighbouring samples, with `m = |λ^{p+2}|`, which is less than 1 exactly
-in the half-plane, and `E = λ^g − 1`, it reads
+(shown below, with the long series). For a function that is one-to-one
+on a disk, Koebe's growth theorem bounds how far it moves between two
+points by its derivative at one of them. Carried to the heights `p` and
+`q = p + g` of two neighbouring samples, with `m = |λ^{p+2}|`, which is
+less than 1 exactly in the half-plane, and `E = λ^g − 1`, it reads
 
 ```
 |F(q) − F(p)|  ≤  |F′(p)| (1 − m²) |E| / ( |ln λ| · |x| · (1 − z)² ),
@@ -1904,22 +1917,42 @@ A Taylor jump, and a logarithm that a sample takes by itself after one,
 has no neighbour. It is the logarithm next to the fixed point, and that is
 the right one where the curve `F(p + s)`, `s ≥ 0`, stays inside the disk
 around the fixed point that does not reach the cut: the logarithm
-continues along the curve, and it is the principal one at the far end.
-The same theorem keeps the curve within `((1 + m)/(1 − m))²` times the
-distance of the point from the fixed point, and for a jump over `n` levels
-within `(1 + m)² γ/(1 − mγ)²` times it, `γ = |λ|^{1−n}`. In a proved chain a
-jump is taken only where that lies inside the disk; otherwise shorter
-jumps are tried, then single steps.
+continues along the curve, and it is the principal one at the far end. At
+the top of a chain the growth theorem holds the curve there, within
+`((1 + m)/(1 − m))²` times the distance of its first point from the fixed
+point, and `m` is small. From then on the chain keeps what it has shown:
+the curve to the right of the unit of height that its samples cover lies
+in the disk. Before a jump over `n` levels, the samples and the growth
+bounds between them give the largest distance `ρ` of that unit from the
+fixed point, in the coordinate `y = (F − L) ln b`, in which the logarithm
+is `ln(1 + y/λ)`, at most `x(1 + x)` for `x = |y/λ| ≤ 1/2`. With
+`X = 2ρ/|λ|^n` and `(n − 1)X ≤ 1/2`, none of the first `n − 1` logarithms
+of the unit leaves `|y| ≤ X|λ|`, and the jump is taken if that lies inside
+the disk: the whole curve to the right of every point that jumps, at every
+level that the jump passes, then lies there, and so does the curve to the
+right of the samples after the jump. Where the unit turns around the fixed
+point too fast for a bound between its samples (a multiplier next to `−1`
+turns it by half a turn), the chain point and every sample are taken one
+by one instead: the growth theorem keeps the curve to the right of a
+point, and of its first `n − 1` logarithms, within `(1 + m)² γ/(1 − mγ)²`
+times the distance of the point from the fixed point, `γ = |λ|^{1−n}`, and
+the jump is taken if that lies inside the disk for each of them. Otherwise
+shorter jumps are tried, then single steps. The two bases of the slow
+suites take their jumps as they did without the proof, at the height
+`0.5 + 0.25i` and 20 digits: `1.444667861009766 + 10⁻¹⁵i`, whose chain of
+125 728 476 levels more than a thousand jumps cross, in 38 s, and
+`0.0659880358454 + 10⁻¹⁴i` (`λ` next to `−1`, `8·10¹³` levels) in 280 s.
 
 The proof rests on three things: that `ψ` is one-to-one on its disk; the
 derivative of the series at the samples, which is summed to the working
 precision as the values are; and floating-point arithmetic, for which
-every comparison keeps a sixteenth in reserve and two samples are never
-closer than `2¹⁶` roundings of a height. It is a proof of the branch, not
-an enclosure of the digits (§ 7). Outside the half-plane nothing is
-proved, because the principal logarithms there are a convention (§ 1.2).
-§ 5.1 has the checks: the bound against computed values, complex heights
-against the tower-checked real ones, and independent references.
+every comparison keeps a sixteenth in reserve, and a pair of samples is
+divided only while its halves stay longer than `2¹⁶` roundings of a
+height. It is a proof of the branch, not an enclosure of the digits
+(§ 7). Outside the half-plane nothing is proved, because the principal
+logarithms there are a convention (§ 1.2). § 5.1 has the checks: the
+bound against computed values, complex heights against the tower-checked
+real ones, the two sides of the boundary, and independent references.
 
 **A long series for nearly neutral multipliers.** The inverse series
 `ψ(t) = t + c₂t² + …`, with `F(h) = L + ψ(s₁ λ^h)`, was summed only on a
@@ -2564,7 +2597,7 @@ digits, and fails on any that is not permitted there by name.
 | `expression.rs` | 16 bits beyond the precision of the run on which the two evaluations must agree; 20 digits between them; 64 guard bits of a named constant before its directed rounding; three total cancellations, and 64 times the digits, before an input is refused; the 64 bits below the unit place that a large value must keep; the 8 values remembered; the 10 digits of an imaginary part in the message that refuses it | margins and limits of the precision and one width of a message, never a value: they raise the precision or end in an error |
 | `constants.rs` | starting values `3/4`, `2/3`, `3/8` of the Newton iterations; guard bits 64 | exact small ratios at the working precision; each iteration ends on a residual test there |
 | `schroder::LongSeries`, `schroder::Anchor` | step and term counts (256, 4096) and cost weights that choose between the short series, the long series and Taylor jumps; the 65536 levels of the integer tower kept for the branch check | each choice is between methods that converge to the same value; the check can only reject |
-| `schroder::Proof`, `schroder::Trail` | the sixteenth kept in reserve in every comparison of a branch proof and the `2¹⁶` roundings below which two samples are not told apart; where samples are added (the bound `3π/4`, 64 parts of a gap, ladders by powers of two); 65536 offsets collected before they are sorted; 262144 samples per unit of height at most | the first two can only refuse a pair, and a refused pair gets more samples or ends in an error; the others set how densely a curve is sampled and when a chain is given up, never a value |
+| `schroder::Proof`, `schroder::Trail` | the sixteenth kept in reserve in every comparison of a branch proof and the `2¹⁶` roundings of a height that the halves of a divided pair of samples keep; where samples are added (the bound `3π/4`, 64 parts of a gap, ladders by powers of two); 65536 offsets collected before they are sorted; 262144 samples per unit of height at most | the first two can only refuse a pair, and a refused pair gets more samples or ends in an error; the others set how densely a curve is sampled and when a chain is given up, never a value |
 | `kouznetsov.rs` | `as_secs_f64` | timing output |
 | `examples/grid_runner.rs`, `examples/edge_runner.rs` | `f64` percentages of passing cells, `as_secs_f64` | statistics and timing output of the two test-grid tools; every value they print comes from the library |
 | `examples/test_w0.rs` | a working precision of 8 digits | a diagnostic that prints one Lambert W value at the precision it names; no result of the library passes through it |
@@ -2609,9 +2642,19 @@ The same contract opens `src/lib.rs`.
   mappings; regular iteration takes one logarithm per unit until its chain
   is periodic or, for a real base, stationary (§ 6.3). For a complex base,
   a height next to the boundary of the half-plane `|λ^{h+2}| < 1` needs the
-  denser samples the closer it lies, because each branch is proved there
-  (§ 6.3): closer than about `2¹⁶` roundings of a height, or where a unit of
-  height would need more than 262144 samples, it is an error.
+  more samples the closer it lies, because each branch is proved there
+  (§ 6.3). Next to the boundary itself they grow slowly (`|λ| = 0.992` at
+  20 digits: 48 at the distance `10⁻³`, 137 at `10⁻²⁰`, 302 on it, in two
+  seconds); the sign of the rounded `Re((h + 2) ln λ)` decides the side
+  there, and the two sides are the same function except where a cut of
+  the principal logarithms runs inside the half-plane (§ 5.1). Next to a
+  singular height on the boundary, `−2` or `−2` plus a period `2πi/ln λ`,
+  they grow by about 70 for every factor of ten (`−2 + 10⁻²⁰i`: 1292
+  samples, 15 s; `−2 + 10⁻⁴⁰i`: 2686, 36 s). Where they would have to lie
+  closer than about `2¹⁶` roundings of a height, the height is an error
+  at that working precision (`−2 + 10⁻⁵²i` at 20 digits; 80 digits compute
+  `−2 + 10⁻⁶⁰i`), as it is where a unit of height would need more than
+  262144 samples.
   There is no finite value at `h=−2` consistent with the nondegenerate
   recurrence through `F(−1)=0`. Base zero has only its integer convention;
   base one is the constant-function exception.
@@ -2820,6 +2863,23 @@ that a complex part among four numbers is refused, and `t701` takes three
 numbers for its wrong count. Of the slow suites the five tests that run
 the binary were repeated and pass (phase 13 in 23 s, phase 14 in 123 s and
 702 s, phase 15 in 33 s and 34 s).
+
+The run of the evening of 14 November was made on the tree with the
+proved branches of § 6.3. The default tier passed, one target at a time:
+library 76, phase 4 16, phase 7 17, every other target with the counts
+above, and the 19 Python tests. New tests: `t392` (complex heights against
+the tower-checked real ones, the two sides of the boundary of the
+half-plane, the function through the height `−1`, `--slog` at complex
+heights), a second super-root round trip at a complex
+height in `t1704`, and three unit tests of the proof (the bound against the
+tetration itself; a pair that is proved or gets samples; logarithms next
+to the fixed point). The slow suites 13–15 passed, all 17 tests, six at a
+time and next to the default tier (same host and flags): phase 13 in
+17 s, 27 s, 65 s and 511 s; phase 14 in 10 s, 173 s, 404 s and 830 s;
+phase 15 in 35 s, 43 s and 42 s, the real base in 198 s, 391 s and 986 s,
+the complex one in 366 s, 637 s and 1383 s. Those are the times of the
+runs before, with the load of the default tier on top: at the complex
+height of the two complex bases every Taylor jump is proved and taken.
 
 ## 11. References
 

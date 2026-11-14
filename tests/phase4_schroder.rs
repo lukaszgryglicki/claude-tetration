@@ -326,6 +326,22 @@ fn t392_branches_at_complex_heights_agree_with_the_tower_checked_real_ones() {
             "h={height:?}"
         );
     }
+    // The boundary of the half-plane crosses the line Re h = 0.5 at the
+    // imaginary part -0.020080429243160085899981228506532. The proved value
+    // 1e-30 inside it and the principal one 1e-30 outside are the same
+    // digits: the tetration continues across the boundary there, and no cut
+    // of the principal logarithms lies along it.
+    for side in [
+        "-0.020080429243160085899981228505532",
+        "-0.020080429243160085899981228507532",
+    ] {
+        let found = tetration::tetrate_str("15", re, im, "0.5", side).unwrap();
+        assert_eq!(
+            (found.0.as_str(), found.1.as_str()),
+            ("1.47324544592111", "2.32295172577716e-2"),
+            "Im h = {side}"
+        );
+    }
     // Across the height -1, where the tetration is 0 and the proof takes
     // over from the tower, the function goes on smoothly.
     let values: Vec<Complex> = ["-1.03", "-1.02", "-1.01", "-1", "-0.99", "-0.98", "-0.97"]

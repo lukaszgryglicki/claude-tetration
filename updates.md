@@ -1,3 +1,71 @@
+# Status Update — 2026-11-14, evening (regular iteration: the branches at complex heights are proved)
+
+**At a complex height every logarithm of the height reduction is now proved
+to lie on the branch of the tetration** (README § 6.3). Regular iteration
+computes `F(h) = log_b^k F(h + k)` and puts each logarithm on the branch
+next to that of a neighbouring sample of the curve `F(h + s)`. At a real
+height above `−1` the integer tower checks the result. At a complex height
+and between `−2` and `−1` nothing did: two neighbours were accepted when
+the argument turned little and the value changed little between them, which
+is a judgement. Now the nearest branch is taken only where it is proved to
+be the right one. The inverse function `ψ` of `F(h) = L + ψ(s₁λ^h)` is
+one-to-one on its disk, so Koebe's growth theorem bounds how far the
+tetration moves between two heights by its derivative at one of them, and
+the branches of a logarithm lie `2π/|ln b|` apart: once the bound is
+smaller than the distance of the neighbour from the second nearest branch,
+only the nearest is left. The bound needs the derivative that the chain
+carries anyway, and neither the normalization nor a value of the series.
+A pair that cannot be proved gets samples between it.
+
+**Taylor jumps are proved too.** A jump takes the logarithms next to the
+fixed point, which are the right ones where the curve to the right of a
+point stays next to the fixed point. The chain keeps that fact from its
+top, where the growth theorem gives it, and checks before each jump that
+the unit of height of its samples stays there through the jump; where
+that unit turns around the fixed point too fast for a bound between the
+samples (multipliers next to `−1`), each of its points is checked by
+itself. A jump that cannot be proved is replaced by shorter ones, then by
+single steps. The two bases of the slow suites whose chains are crossed
+by jumps take the times of the morning's binary at `0.5 + 0.25i`:
+`1.444667861009766 + 10⁻¹⁵i` (125 728 476 levels) 38 s,
+`0.0659880358454 + 10⁻¹⁴i` (`8·10¹³` levels) 280 s.
+
+**No value changed.** 44 values agree in every printed digit with the
+binary of the morning: ordinary complex bases at complex heights, the
+bases with `|λ| = 0.992`, `0.998` and `0.999` at complex heights and between
+`−2` and `−1`, a base whose chain of 112438 levels is crossed by jumps,
+heights outside the half-plane `|λ^{h+2}| < 1`, where the principal
+logarithms remain the convention. Three heights within `10⁻²⁴` of `−2` that
+were refused have values, and those grow as the logarithm of the distance
+must; `−2 + 10⁻⁴⁰` has one as well (37 s).
+
+**Cost.** Ordinary heights take the same time. Complex heights next to the
+real axis of bases next to the boundary need fewer samples than the judged
+distances took (20 instead of 29 at `|λ| = 0.992`) and are up to a third
+faster. Heights next to `−2` need more (244 instead of 44 at `−1.999`) and
+are up to seven times slower: 3 s at `−2 + 10⁻¹²`, 15 s at `−2 + 10⁻²⁰`.
+Next to the boundary of the half-plane itself the samples grow slowly
+(302 on it, two seconds), and the proved value `10⁻³⁰` inside is the
+principal one `10⁻³⁰` outside. A height so close to `−2`, or to `−2` plus
+a period, that its samples would lie closer than `2¹⁶` roundings of a
+height is an error at that precision (`−2 + 10⁻⁵²i` at 20 digits; 80
+digits compute `−2 + 10⁻⁶⁰i`), as is one that would need more than 262144
+samples per unit.
+
+**Checks.** The bound against the tetration itself at 40 digits (it holds
+from either end, and is within 5 % for a short step). The mean of sixteen
+complex heights on a circle around the real height `0.5` equals the
+tower-checked value there to 12 digits. The function passes smoothly
+through `−1`, where the proof takes over from the tower. `--slog` and
+`--sroot` return heights and bases at complex heights. The slow suites
+13–15 pass, among them the complex base next to `e^{1/e}` at
+`0.5 + 0.25i` against 360-digit orbit limits.
+
+**Still open.** Cut bases from `0.065` to `e^{−e}`; repelling and
+attracting multipliers closer to the unit circle than README § 8.1 says;
+the base `e^{1/e}` itself; super-roots whose path meets the Shell–Thron
+boundary; the branch convention outside `|λ^{h+2}| < 1`.
+
 # Status Update — 2026-11-14, evening (web: the cache can be listed, references on the page)
 
 **`tet-webctl cache` lists what the cache holds.** One entry a line: the

@@ -995,22 +995,74 @@ whole; names in one row mean the same.
 `web/` holds `tet-web`, a small server (Rust, standard library only, a crate
 of its own) that puts a page and an HTTP API in front of the `tet` binary.
 The page asks for the precision, the function (`tet`, `ate`/`slog` or
-`ssrt`/`sroot`) and two complex numbers or four real ones; the API takes the
-same as a query and answers in JSON, or with the two lines of `tet`. With
-the server started in `web/server` by
-`TET_WEB_TET=../../target/release/tet cargo run --release`:
+`ssrt`/`sroot`) and two complex numbers or four real ones; it is a plain
+form, which needs no JavaScript and works in a text browser. The API takes
+the same as a query and answers in JSON, or with the two lines of `tet`. A
+public instance runs at <https://hyp4.duckdns.org/>, by HTTPS only, over
+IPv4 and IPv6:
 
 ```console
-$ curl 'http://127.0.0.1:8080/?prec=20&func=ate&base=2&value=65536&format=text'
-4.0000000000000000000
+$ curl 'https://hyp4.duckdns.org/?prec=20&func=ate&base=2&value=65536'
+{"func":"ate","prec":20,"base":"2","value":"65536","result":"height","re":"4.0000000000000000000","im":"0","seconds":1.843,"cached":false,"command":"tet --ate 20 2 65536"}
+$ curl 'https://hyp4.duckdns.org/?func=tet&base=2&height=0.5&format=text'
+1.4587818160364217007
+0
+$ curl 'https://hyp4.duckdns.org/?prec=30&func=ssrt&value=16&height=3&format=text'
+2.00000000000000000000000000000
+0
+$ curl 'https://hyp4.duckdns.org/?func=slog&base=e&value=10&format=text'
+1.8425417879229475398
+0
+$ curl 'https://hyp4.duckdns.org/?func=sroot&value=10+i&height=2&format=text'
+2.5090560476756793287
+5.1911352949733962782e-2
+$ curl 'https://hyp4.duckdns.org/?func=tet&base=1.5+0.5i&height=1+0.7i&format=text'
+1.1766384980936338172
+6.0310294707303037947e-1
+$ curl 'https://hyp4.duckdns.org/?prec=25&func=tet&base_re=1.5&base_im=0.5&height_re=1&height_im=0.7&format=text'
+1.176638498093633817179947
+6.031029470730303794686848e-1
+$ curl 'https://hyp4.duckdns.org/?prec=30&func=tet&base=2^^0.5&height=ate(2,65536)/3&format=text'
+1.56421525081821576076299857261
+0
+$ curl 'https://hyp4.duckdns.org?prec=200&func=tet&base=1.444&height=9'
+{"func":"tet","prec":200,"base":"1.444","height":"9","result":"value","re":"2.2791412188531754024460487965958041708527538273069445476337342180440070509188713438062245659382130472041611891989358361727705638706900687129222349315267379433861405147533581204785062424936783900850502","im":"0","seconds":0.004,"cached":false,"command":"tet 200 1.444 9"}
+```
+
+`func` is `tet`, `ate` (or `slog`) or `ssrt` (or `sroot`); `prec` is the
+number of digits, 20 when it is left out, and the server has no largest
+one; the two numbers are `base` and `height`, `base` and `value`, or
+`value` and `height`, each a constant expression of § 3.2, or their four
+real parts (`base_re`, `base_im`, ...). In a URL a `+` is a plus sign and a
+space is `%20`.
+
+Every computation is one `tet` process, so the numbers are those of the
+command line. Finished results are kept in memory only, until the server
+stops. A request waits two minutes for its result. A calculation that takes
+longer continues on the server, for up to three hours, and the same request
+again finds it running, or its result:
+
+```console
+$ curl 'https://hyp4.duckdns.org/?prec=300&func=tet&base=2&height=0.51&format=text'
+running: the calculation is taking longer than 2 minutes and continues on this server: ask the same again later for the result; it may take up to 3 hours
+$ curl 'https://hyp4.duckdns.org/?prec=300&func=tet&base=2&height=0.51&format=text'
+running: this calculation is already running, for 2 min 25 s now: allow it up to 3 hours to complete and ask the same again for the result
+$ curl 'https://hyp4.duckdns.org/?prec=300&func=tet&base=2&height=0.51&format=text'
+1.46850203312048047550161815289101885815248225760477496374185862244737525454441844516356899578403946925...
 0
 ```
 
-Every computation is one `tet` process with a time limit, so the numbers are
-those of the command line. Finished results are kept in memory only, until
-the server stops. [web/README.md](web/README.md) has the parameters, the
-replies, the settings and the installation on FreeBSD behind Caddy, with or
-without a domain name and HTTPS.
+As many calculations run at a time as the machine has processors, four at
+least. While all of them are busy a new one is turned away at once with
+`all slots are busy calculating; try again later`.
+
+[web/README.md](web/README.md) has more examples, the page with and
+without JavaScript, the parameters and the replies, the settings and the
+log, the installation on FreeBSD behind Caddy with HTTPS, and the
+administration of the installed service with `web/ctl.sh`: start, stop and
+status, the time limit of a calculation, which can be changed while the
+server runs, the log of what was asked for and what was returned, and the
+certificate.
 
 ---
 
@@ -2549,7 +2601,8 @@ tests/               phase1…phase18 plus Python plotting/Makefile regressions
                      regression witnesses incl. the t860 case)
 web/                 web page and HTTP API in front of the tet binary (§ 3.3):
                      server/ (crate tet-web), static/ (the page),
-                     freebsd/ and deploy.sh (installation)
+                     freebsd/ and deploy.sh (installation), ctl.sh
+                     (start, stop, status, log, time limit)
 FAILURE_CASES.md     current failure contracts + labeled historical observations
 updates.md           dated research log (current campaign status)
 ```

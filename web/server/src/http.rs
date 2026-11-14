@@ -109,7 +109,10 @@ pub fn parse_head(head: &[u8]) -> Result<Request, Unread> {
         Some(rest) => rest.find('/').map_or("/", |at| &rest[at..]),
         None => target,
     };
-    if !target.starts_with('/') || !target.is_ascii() {
+    // The target goes into the log as it is: nothing in it may be a line
+    // or a command of its own there.
+    let printable = target.bytes().all(|byte| byte.is_ascii_graphic());
+    if !target.starts_with('/') || !printable {
         return Err(bad("the request target is malformed"));
     }
     let target = target.split('#').next().unwrap_or(target);
@@ -204,7 +207,7 @@ impl Response {
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
-        204 => "No Content",
+        202 => "Accepted",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -339,6 +342,9 @@ mod tests {
             (b"get / HTTP/1.1", 400),
             (b"GET * HTTP/1.1", 400),
             (b"GET /\xc3\xa9 HTTP/1.1", 400),
+            (b"GET /a\nb HTTP/1.1", 400),
+            (b"GET /?x=\x1b[2J HTTP/1.1", 400),
+            (b"GET /\tx HTTP/1.1", 400),
             (b"GET / HTTP/1.1\r\nno colon here", 400),
             (b"", 400),
         ] {

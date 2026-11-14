@@ -1,36 +1,44 @@
 //! `tet-web`: a page and an HTTP API in front of the `tet` binary.
 //!
-//! `GET /` is the page. `GET /?func=tet&base=2&height=0.5` (or `/api?...`)
-//! runs `tet 20 2 0.5` and returns what it printed. Every computation is a
-//! child process with a deadline; finished results are kept in memory until
-//! the server stops. The server speaks plain HTTP on a local address and is
-//! meant to stand behind a reverse proxy that faces the network.
+//! `GET /` is the page, a form that works without a script.
+//! `GET /?func=tet&base=2&height=0.5` (or `/api?...`) runs `tet 20 2 0.5`
+//! and returns what it printed. Every computation is a child process with a
+//! time limit. It runs to its end whether or not the request that started
+//! it still waits: a request that has waited long enough is told to ask
+//! again, and the same request finds the computation running, or its
+//! result. Finished results are kept in memory until the server stops. The
+//! server speaks plain HTTP on a local address and is meant to stand behind
+//! a reverse proxy that faces the network.
 
 mod api;
 mod cache;
 mod http;
+mod page;
 mod run;
+mod settings;
 
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use api::{Format, Job, Limits, Outcome};
-use cache::{Cache, Source};
+use api::{Format, Job, Outcome, Pending};
+use cache::{Cache, Found, Source, Ticket};
 use http::{Request, Response, Unread};
+use page::{Form, Shown, Site};
 use run::{Runner, Slots};
+use settings::Shared;
 
-const INDEX: &str = include_str!("../../static/index.html");
 const SCRIPT: &str = include_str!("../../static/app.js");
 const STYLE: &str = include_str!("../../static/style.css");
 const ICON: &str = include_str!("../../static/favicon.svg");
 
-/// The policy of the page: its own script and style, requests to its own
-/// origin, nothing else.
+/// The policy of the page: its own script and style, requests and its form
+/// to its own origin, nothing else.
 const POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
-                      connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; \
+                      connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; \
                       frame-ancestors 'none'";
 
 /// The connections served at a time; each is one thread.
@@ -44,31 +52,42 @@ Usage: tet-web
 
     TET_WEB_LISTEN      address to listen on                 127.0.0.1:8080
     TET_WEB_TET         the tet program                      tet
-    TET_WEB_MAX_PREC    largest precision in digits          1000
-    TET_WEB_TIMEOUT     seconds one computation may take     60
-    TET_WEB_JOBS        computations at a time               2
-    TET_WEB_QUEUE       requests that may wait for a slot    16
-    TET_WEB_THREADS     threads of one tet (its TET_MT)      serial
-    TET_WEB_MEMORY_MB   address space of one tet, in MiB     unlimited
-    TET_WEB_NICE        niceness of one tet, up to 20        that of the server
     TET_WEB_CACHE_MB    memory for kept results, in MiB      64
     TET_WEB_REVISION    text shown as the version            (none)
+    TET_WEB_CONFIG      a file with the settings below       (none)
 
-  GET /                   the page
-  GET /?func=...&...      the API; also at /api
+  The settings below can stand in that file as well, as lines NAME=value.
+  The file is read again whenever it changes, and what it sets is in use
+  at once, without a restart:
+
+    TET_WEB_TIMEOUT     time one calculation may take        3h
+    TET_WEB_WAIT        time a request waits                 120
+    TET_WEB_JOBS        calculations at a time               processors, at least 4
+    TET_WEB_THREADS     threads of one tet (its TET_MT)      one
+    TET_WEB_MEMORY_MB   address space of one tet, in MiB     unlimited
+    TET_WEB_NICE        niceness of one tet, up to 20        that of the server
+
+  A time is a number of seconds, or of minutes, hours or days: 90m, 3h, 2d.
+
+  GET /                   the page, a form that needs no script
+  GET /?func=...&...      the API; also at /api. With format=html, as the
+                          form of the page sends it: the page with the result
   GET /help               the usage text of tet
-  GET /stats              counters of the server
+  GET /stats              counters of the server, as JSON
+  GET /status             the same for people
   GET /healthz            ok
+
+  A calculation that is not ready when its request has waited continues,
+  for as long as it may take: the reply says so (status 202), and the same
+  request again finds it running, or its result. When all slots are taken
+  a new calculation is turned away at once (status 503).
 ";
 
 struct Server {
-    limits: Limits,
     runner: Runner,
     slots: Slots,
-    cache: Cache,
-    /// How long a request may wait for a slot or for a running computation
-    /// before it is told that the server is busy.
-    patience: Duration,
+    cache: Arc<Cache>,
+    settings: Arc<Shared>,
     help: String,
     revision: String,
     started: Instant,
@@ -87,48 +106,23 @@ fn setting<T: std::str::FromStr>(name: &str, default: T) -> Result<T, String> {
     }
 }
 
-fn optional(name: &str) -> Result<Option<u64>, String> {
-    Ok(Some(setting(name, 0u64)?).filter(|value| *value > 0))
-}
-
-fn positive(name: &str, default: u64) -> Result<u64, String> {
-    match setting(name, default)? {
-        0 => Err(format!("{name} must be at least 1")),
-        value => Ok(value),
-    }
-}
+/// What a request finds for its job: the outcome, or a computation that
+/// has not ended.
+type Answer = Result<Arc<Outcome>, Pending>;
 
 impl Server {
     fn from_environment() -> Result<(Server, String), String> {
         let listen = setting("TET_WEB_LISTEN", "127.0.0.1:8080".to_string())?;
-        let timeout = Duration::from_secs(positive("TET_WEB_TIMEOUT", 60)?);
-        let megabytes = |name: &str| -> Result<Option<u64>, String> {
-            optional(name)?
-                .map(|value| {
-                    value
-                        .checked_mul(1 << 20)
-                        .ok_or_else(|| format!("{name} is too large"))
-                })
-                .transpose()
-        };
-        let memory = megabytes("TET_WEB_MEMORY_MB")?;
-        if memory.is_some() && !run::memory_supported() {
-            return Err("TET_WEB_MEMORY_MB is not supported on this system".into());
-        }
-        let nice = optional("TET_WEB_NICE")?
-            .map(|nice| {
-                i32::try_from(nice)
-                    .ok()
-                    .filter(|nice| *nice <= 20)
-                    .ok_or("TET_WEB_NICE is at most 20")
-            })
-            .transpose()?;
+        let environment = settings::NAMES
+            .iter()
+            .filter_map(|name| Some((name.to_string(), std::env::var(name).ok()?)))
+            .collect();
+        let file = std::env::var_os("TET_WEB_CONFIG")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
+        let settings = Arc::new(Shared::load(environment, file)?);
         let runner = Runner {
             tet: setting("TET_WEB_TET", "tet".to_string())?,
-            timeout,
-            threads: optional("TET_WEB_THREADS")?,
-            memory,
-            nice,
         };
         // The usage text of tet: it shows that the program runs, and it is
         // the syntax help of the page.
@@ -139,20 +133,15 @@ impl Server {
         if !help.status.success() || help.stdout.is_empty() {
             return Err(format!("{} --help failed ({})", runner.tet, help.status));
         }
-        let jobs = usize::try_from(positive("TET_WEB_JOBS", 2)?)
-            .map_err(|_| "TET_WEB_JOBS is too large")?;
-        let queue = usize::try_from(setting("TET_WEB_QUEUE", 16u64)?)
-            .map_err(|_| "TET_WEB_QUEUE is too large")?;
-        let cache = megabytes("TET_WEB_CACHE_MB")?.unwrap_or(64 << 20);
+        let cache = setting("TET_WEB_CACHE_MB", 64u64)?
+            .checked_mul(1 << 20)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or("TET_WEB_CACHE_MB is too large")?;
         let server = Server {
-            limits: Limits {
-                max_prec: positive("TET_WEB_MAX_PREC", 1000)?,
-                max_argument: 4000,
-            },
             runner,
-            slots: Slots::new(jobs, queue),
-            cache: Cache::new(usize::try_from(cache).map_err(|_| "TET_WEB_CACHE_MB is too large")?),
-            patience: timeout,
+            slots: Slots::default(),
+            cache: Arc::new(Cache::new(cache)),
+            settings,
             help: String::from_utf8_lossy(&help.stdout).into_owned(),
             revision: setting("TET_WEB_REVISION", String::new())?,
             started: Instant::now(),
@@ -162,69 +151,233 @@ impl Server {
         Ok((server, listen))
     }
 
-    /// The reply to a query of the API, and what the log says about it.
-    fn computed(&self, query: &str, format_hint: Format) -> (Response, String) {
-        let parsed = http::parse_query(query)
-            .map_err(|message| api::Rejected {
-                status: 400,
-                message,
-            })
-            .and_then(|query| Job::parse(&query, &self.limits));
-        let (job, format) = match parsed {
+    /// What there is for a job, and how this request came to it. A job that
+    /// nobody asked for before is started; the request then waits for it,
+    /// as do the others, until the computation is as old as a request
+    /// waits. One that comes later is answered at once.
+    fn asked(self: &Arc<Self>, job: &Job) -> (Answer, Source) {
+        let now = self.settings.now();
+        let key = job.key();
+        let (running, source) = loop {
+            match self.cache.find(&key) {
+                Found::Kept(outcome) => {
+                    // What was stopped at a lower limit than the one of
+                    // now may end today.
+                    let limit = now.timeout.as_secs();
+                    if matches!(*outcome, Outcome::Timeout { limit: then } if then < limit) {
+                        self.cache.forget(&key, &outcome);
+                        continue;
+                    }
+                    return (Ok(outcome), Source::Hit);
+                }
+                Found::Running(running) => break (running, Source::Wait),
+                Found::New(ticket) => {
+                    let running = ticket.running();
+                    self.start(job.clone(), ticket);
+                    break (running, Source::Miss);
+                }
+            }
+        };
+        let deadline = running.asked() + now.wait;
+        let waited = Instant::now() < deadline;
+        match running.awaited(deadline) {
+            Some(outcome) => (Ok(outcome), source),
+            None => {
+                let pending = Pending {
+                    waited,
+                    age: running.asked().elapsed(),
+                    wait: now.wait.as_secs(),
+                    limit: self.settings.now().timeout.as_secs(),
+                };
+                (Err(pending), source)
+            }
+        }
+    }
+
+    /// Starts the computation of a job in a thread of its own, where it
+    /// runs to its end whatever becomes of the requests for it.
+    fn start(self: &Arc<Self>, job: Job, ticket: Ticket) {
+        let server = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("computation".into())
+            .stack_size(512 * 1024)
+            .spawn(move || server.compute(&job, ticket));
+        if let Err(error) = spawned {
+            // The ticket went with the thread: the entry has failed.
+            eprintln!("tet-web: no thread for a computation: {error}");
+        }
+    }
+
+    fn compute(&self, job: &Job, ticket: Ticket) {
+        let asked = ticket.running().asked();
+        let outcome = match self.slots.take(self.settings.now().jobs) {
+            Some(_slot) => self.runner.run(job, &self.settings),
+            None => Outcome::Busy,
+        };
+        // No request waited for the end of a long computation: the log has it.
+        let age = asked.elapsed();
+        if age > self.settings.now().wait {
+            println!(
+                "{} - DONE {} -> {} {:.3}s{}",
+                timestamp(SystemTime::now()),
+                api::brief(&job.command(), 300),
+                outcome.status(),
+                age.as_secs_f64(),
+                outcome.logged(),
+            );
+        }
+        ticket.finish(outcome);
+    }
+
+    /// The reply to a query of the API, and what the log says about it;
+    /// nothing, for a request that is not worth a line.
+    fn computed(self: &Arc<Self>, query: &str, format_hint: Format) -> (Response, Option<String>) {
+        if query.split('&').any(|piece| piece == "format=html") {
+            return self.shown(query);
+        }
+        let refused = |rejected: api::Rejected| {
+            let body = api::rendered_rejection(&rejected, format_hint);
+            let note = format!("rejected: {}", rejected.message);
+            (reply(rejected.status, format_hint, body), Some(note))
+        };
+        let query = match http::parse_query(query) {
+            Ok(query) => query,
+            Err(message) => {
+                return refused(api::Rejected {
+                    status: 400,
+                    message,
+                })
+            }
+        };
+        let (job, format) = match Job::parse(&query) {
             Ok(parsed) => parsed,
-            Err(rejected) => {
-                let body = api::rendered_rejection(&rejected, format_hint);
-                let note = format!("rejected: {}", rejected.message);
-                return (reply(rejected.status, format_hint, body), note);
+            Err(rejected) => return refused(rejected),
+        };
+        let (answer, source) = self.asked(&job);
+        let body = match &answer {
+            Ok(outcome) => api::rendered(&job, outcome, source == Source::Hit, format),
+            Err(pending) => api::rendered_pending(&job, pending, format),
+        };
+        let status = answer.as_ref().map_or(202, |outcome| outcome.status());
+        let response = reply(status, format, body).with("X-Cache", source.header());
+        (response, note(&job, source, &answer))
+    }
+
+    /// The page for a query with `format=html`: the form of the page as a
+    /// browser sends it, and the page with the result as the reply.
+    fn shown(self: &Arc<Self>, query: &str) -> (Response, Option<String>) {
+        let refused = |form: &Form, rejected: api::Rejected| {
+            let shown = Shown::Rejected {
+                message: &rejected.message,
+                status: rejected.status,
+            };
+            let note = format!("rejected: {}", rejected.message);
+            (self.page(form, &shown), Some(note))
+        };
+        // A form sends a space as a plus sign, and a plus sign as an escape.
+        let query = match http::parse_query(&query.replace('+', "%20")) {
+            Ok(query) => query,
+            Err(message) => {
+                let rejected = api::Rejected {
+                    status: 400,
+                    message,
+                };
+                return refused(&Form::from_query(&[]), rejected);
             }
         };
-        let deadline = Instant::now() + self.patience + self.runner.timeout;
-        let (outcome, source) = self.cache.outcome(&job.key(), deadline, || {
-            match self.slots.take(Instant::now() + self.patience) {
-                Some(_slot) => self.runner.run(&job),
-                None => Outcome::Busy,
-            }
-        });
-        let body = api::rendered(&job, &outcome, source == Source::Hit, format);
-        let response = reply(outcome.status(), format, body).with("X-Cache", source.header());
-        let seconds = match &*outcome {
-            Outcome::Value { seconds, .. } | Outcome::Refused { seconds, .. } => {
-                format!(" {seconds:.3}s")
-            }
-            _ => String::new(),
+        let form = Form::from_query(&query);
+        if !form.complete {
+            return (self.page(&form, &Shown::Fields), Some(String::new()));
+        }
+        let job = match Job::parse(&form.api_query()) {
+            Ok((job, _)) => job,
+            Err(rejected) => return refused(&form, rejected),
         };
-        (
-            response,
-            format!("{}{seconds} {}", source.header(), job.command()),
-        )
+        let (answer, source) = self.asked(&job);
+        let shown = match &answer {
+            Ok(outcome) => Shown::Outcome {
+                job: &job,
+                outcome,
+                cached: source == Source::Hit,
+            },
+            Err(pending) => Shown::Running { job: &job, pending },
+        };
+        let response = self.page(&form, &shown).with("X-Cache", source.header());
+        (response, note(&job, source, &answer))
+    }
+
+    fn page(&self, form: &Form, shown: &Shown) -> Response {
+        let now = self.settings.now();
+        let site = Site {
+            wait: now.wait.as_secs(),
+            limit: now.timeout.as_secs(),
+            jobs: now.jobs,
+            revision: &self.revision,
+        };
+        let body = page::rendered(&site, form, shown);
+        Response::new(200, "text/html; charset=utf-8", body)
+            .with("Cache-Control", "no-cache")
+            .with("Content-Security-Policy", POLICY)
+            .with("Referrer-Policy", "no-referrer")
     }
 
     fn stats(&self) -> String {
         let counts = self.cache.counts();
-        let (running, waiting) = self.slots.load();
+        let now = self.settings.now();
         format!(
-            "{{\"revision\":{},\"uptime_seconds\":{},\"requests\":{},\"running\":{running},\
-             \"waiting\":{waiting},\"cache\":{{\"entries\":{},\"bytes\":{},\"hits\":{},\"misses\":{},\
-             \"waits\":{},\"dropped\":{}}},\"limits\":{{\"max_prec\":{},\"timeout_seconds\":{}}}}}\n",
+            "{{\"revision\":{},\"uptime_seconds\":{},\"requests\":{},\"running\":{},\
+             \"cache\":{{\"entries\":{},\"bytes\":{},\"hits\":{},\"misses\":{},\"waits\":{},\
+             \"dropped\":{}}},\"limits\":{{\"wait_seconds\":{},\"timeout_seconds\":{},\
+             \"jobs\":{}}}}}\n",
             api::json_string(&self.revision),
             self.started.elapsed().as_secs(),
             self.requests.load(Ordering::Relaxed),
+            self.slots.taken(),
             counts.entries,
             counts.bytes,
             counts.hits,
             counts.misses,
             counts.waits,
             counts.dropped,
-            self.limits.max_prec,
-            self.runner.timeout.as_secs(),
+            now.wait.as_secs(),
+            now.timeout.as_secs(),
+            now.jobs,
         )
     }
 
-    fn respond(&self, request: &Request) -> (Response, String) {
+    /// The counters of `stats` as a text for people.
+    fn status(&self) -> String {
+        let counts = self.cache.counts();
+        let now = self.settings.now();
+        let revision = match self.revision.as_str() {
+            "" => String::new(),
+            revision => format!(" {revision}"),
+        };
+        format!(
+            "tet-web{revision}: up {}, requests {}\n\
+             calculations: {} running, at most {} at a time\n\
+             cache: kept {} ({} bytes), hits {}, misses {}, waits {}, dropped {}\n\
+             limits: a request waits {}, a calculation may take {}\n",
+            api::span(self.started.elapsed().as_secs()),
+            self.requests.load(Ordering::Relaxed),
+            self.slots.taken(),
+            now.jobs,
+            counts.entries,
+            counts.bytes,
+            counts.hits,
+            counts.misses,
+            counts.waits,
+            counts.dropped,
+            api::span(now.wait.as_secs()),
+            api::span(now.timeout.as_secs()),
+        )
+    }
+
+    fn respond(self: &Arc<Self>, request: &Request) -> (Response, Option<String>) {
         if request.method != "GET" && request.method != "HEAD" {
             let response = Response::text(405, "only GET and HEAD are served here\n")
                 .with("Allow", "GET, HEAD");
-            return (response, String::new());
+            return (response, Some(String::new()));
         }
         let query = request.query.as_deref().unwrap_or("");
         // The format of the reply to a request that cannot be parsed.
@@ -233,7 +386,7 @@ impl Server {
         } else {
             Format::Json
         };
-        let page = |body: &'static str, kind: &'static str| {
+        let file = |body: &'static str, kind: &'static str| {
             Response::new(200, kind, body)
                 .with("Cache-Control", "no-cache")
                 .with("Content-Security-Policy", POLICY)
@@ -249,20 +402,21 @@ impl Server {
         let response = match request.path.as_str() {
             "/api" => return self.computed(query, hint),
             "/" if asks => return self.computed(query, hint),
-            "/" => page(INDEX, "text/html; charset=utf-8"),
-            "/app.js" => page(SCRIPT, "text/javascript; charset=utf-8"),
-            "/style.css" => page(STYLE, "text/css; charset=utf-8"),
-            "/favicon.svg" | "/favicon.ico" => page(ICON, "image/svg+xml"),
+            "/" => self.page(&Form::from_query(&[]), &Shown::Nothing),
+            "/app.js" => file(SCRIPT, "text/javascript; charset=utf-8"),
+            "/style.css" => file(STYLE, "text/css; charset=utf-8"),
+            "/favicon.svg" | "/favicon.ico" => file(ICON, "image/svg+xml"),
             "/help" => Response::text(200, self.help.clone()),
             "/healthz" => Response::text(200, "ok\n"),
             "/stats" => reply(200, Format::Json, self.stats()),
+            "/status" => Response::text(200, self.status()),
             "/robots.txt" => Response::text(200, "User-agent: *\nDisallow: /api\nDisallow: /*?\n"),
             _ => Response::text(404, "there is nothing here; the page is at /\n"),
         };
-        (response, String::new())
+        (response, Some(String::new()))
     }
 
-    fn serve(&self, mut stream: TcpStream, peer: String) {
+    fn serve(self: &Arc<Self>, mut stream: TcpStream, peer: String) {
         let started = Instant::now();
         let request = match http::read_request(&mut stream) {
             Ok(request) => request,
@@ -280,23 +434,55 @@ impl Server {
         self.requests.fetch_add(1, Ordering::Relaxed);
         let (response, note) = self.respond(&request);
         let _ = http::write_response(&mut stream, &response, request.method != "HEAD");
+        let Some(note) = note else {
+            return;
+        };
         // The proxy on this machine names the client it speaks for.
         let client = request
             .header("x-forwarded-for")
             .and_then(|list| list.split(',').next())
-            .map_or(peer, |first| first.trim().to_string());
+            .map(str::trim)
+            .filter(|first| !first.is_empty() && first.bytes().all(|byte| byte.is_ascii_graphic()))
+            .map_or(peer, str::to_string);
         let target: String = match &request.query {
             Some(query) => format!("{}?{query}", request.path),
             None => request.path.clone(),
         };
+        let note = match note.as_str() {
+            "" => note,
+            said => format!(" {said}"),
+        };
         println!(
-            "{} {client} {} {} -> {} {:.3}s {note}",
+            "{} {client} {} {} -> {} {:.3}s{note}",
             timestamp(SystemTime::now()),
             request.method,
-            target.chars().take(300).collect::<String>(),
+            api::brief(&target, 300),
             response.status,
             started.elapsed().as_secs_f64(),
         );
+    }
+}
+
+/// What the log says about the answer to a job: how the request came to
+/// it, the command, and the result or the reason why there is none. A
+/// request that only finds a computation still running, without having
+/// waited for it, has no line: a page asks like that every few seconds.
+fn note(job: &Job, source: Source, answer: &Answer) -> Option<String> {
+    let command = api::brief(&job.command(), 300);
+    match answer {
+        Ok(outcome) => {
+            let seconds = outcome
+                .seconds()
+                .map_or(String::new(), |seconds| format!(" {seconds:.3}s"));
+            let found = outcome.logged();
+            Some(format!("{}{seconds} {command}{found}", source.header()))
+        }
+        Err(pending) if pending.waited => Some(format!(
+            "{} {command}: still running after {}",
+            source.header(),
+            api::span(pending.age.as_secs())
+        )),
+        Err(_) => None,
     }
 }
 
@@ -363,13 +549,20 @@ fn main() -> ExitCode {
         .local_addr()
         .map_or(listen, |address| address.to_string());
     println!(
-        "{} tet-web listening on {address}: tet={} max_prec={} timeout={}s revision={:?}",
+        "{} tet-web listening on {address}: tet={} revision={:?}; {}",
         timestamp(SystemTime::now()),
         server.runner.tet,
-        server.limits.max_prec,
-        server.runner.timeout.as_secs(),
         server.revision,
+        server.settings.now().described(),
     );
+    // The settings file is read again whenever it changes.
+    server.settings.watch(|read| {
+        let time = timestamp(SystemTime::now());
+        match read {
+            Ok(new) => println!("{time} - SETTINGS {}", new.described()),
+            Err(reason) => println!("{time} - SETTINGS not changed: {reason}"),
+        }
+    });
     let server = Arc::new(server);
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
@@ -430,7 +623,7 @@ mod tests {
     fn the_page_asks_only_its_own_origin() {
         // Nothing is loaded from elsewhere, and nothing is inline: the
         // policy sent with the page allows neither.
-        for file in [INDEX, SCRIPT, STYLE] {
+        for file in [page::TEMPLATE, SCRIPT, STYLE] {
             for loaded in [
                 "src=\"http",
                 "src=\"//",
@@ -442,10 +635,13 @@ mod tests {
                 assert!(!file.contains(loaded), "{loaded}");
             }
         }
-        assert!(INDEX.contains("<script src=\"app.js\" defer></script>"));
-        assert!(INDEX.contains("<link rel=\"stylesheet\" href=\"style.css\">"));
-        assert_eq!(INDEX.matches("<script").count(), 1);
-        assert!(!INDEX.contains("onclick=") && !SCRIPT.contains("innerHTML"));
+        assert!(page::TEMPLATE.contains("<script src=\"app.js\" defer></script>"));
+        assert!(page::TEMPLATE.contains("<link rel=\"stylesheet\" href=\"style.css\">"));
+        assert_eq!(page::TEMPLATE.matches("<script").count(), 1);
+        assert!(!page::TEMPLATE.contains("onclick=") && !SCRIPT.contains("innerHTML"));
+        // The form goes to this server, which the policy has to allow.
+        assert!(page::TEMPLATE.contains("<form id=\"form\" method=\"get\" action=\"/\" "));
+        assert!(POLICY.contains("form-action 'self'"));
         assert!(ICON.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
     }
 }

@@ -1,14 +1,7 @@
 //! From a query to a `tet` command line, and from its outcome to a reply.
 
 use std::fmt::Write as _;
-
-/// What the server allows a request to ask for.
-#[derive(Clone, Debug)]
-pub struct Limits {
-    pub max_prec: u64,
-    /// The longest argument, in bytes.
-    pub max_argument: usize,
-}
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Func {
@@ -18,12 +11,21 @@ pub enum Func {
 }
 
 impl Func {
-    fn named(name: &str) -> Option<Func> {
+    pub fn named(name: &str) -> Option<Func> {
         match name {
             "tet" => Some(Func::Tet),
             "slog" | "ate" => Some(Func::Slog),
             "sroot" | "ssrt" => Some(Func::Sroot),
             _ => None,
+        }
+    }
+
+    /// The name that the page has for the function.
+    pub fn title(self) -> &'static str {
+        match self {
+            Func::Tet => "tet",
+            Func::Slog => "ate",
+            Func::Sroot => "ssrt",
         }
     }
 
@@ -86,7 +88,7 @@ const FLAGS: [&str; 9] = [
 
 impl Job {
     /// The job that a query asks for, and the format of the reply.
-    pub fn parse(query: &[(String, String)], limits: &Limits) -> Result<(Job, Format), Rejected> {
+    pub fn parse(query: &[(String, String)]) -> Result<(Job, Format), Rejected> {
         let get = |name: &str| {
             query
                 .iter()
@@ -96,7 +98,11 @@ impl Job {
         let format = match get("format") {
             None | Some("json") => Format::Json,
             Some("text") => Format::Text,
-            Some(other) => return Err(rejected(format!("format is json or text, not {other:?}"))),
+            Some(other) => {
+                return Err(rejected(format!(
+                    "format is json, text or html, not {other:?}"
+                )))
+            }
         };
         let spelled = get("func")
             .ok_or_else(|| rejected("func is missing: tet, ate (slog) or ssrt (sroot)"))?;
@@ -110,13 +116,12 @@ impl Job {
             Some(text) => text
                 .parse::<u64>()
                 .ok()
-                .filter(|prec| (1..=limits.max_prec).contains(prec))
+                .filter(|prec| *prec >= 1)
                 // Only digits: no sign, no space.
                 .filter(|_| text.bytes().all(|byte| byte.is_ascii_digit()))
                 .ok_or_else(|| {
                     rejected(format!(
-                        "prec is the number of digits, a whole number from 1 to {}, not {text:?}",
-                        limits.max_prec
+                        "prec is the number of digits, a whole number from 1 on, not {text:?}"
                     ))
                 })?,
         };
@@ -149,12 +154,6 @@ impl Job {
         let mut arguments = Vec::new();
         for name in names {
             let value = get(name).unwrap_or_default();
-            if value.len() > limits.max_argument {
-                return Err(rejected(format!(
-                    "{name} is longer than {} bytes",
-                    limits.max_argument
-                )));
-            }
             if value.chars().any(char::is_control) || FLAGS.contains(&value) {
                 return Err(rejected(format!("{name} is not a number: {value:?}")));
             }
@@ -209,6 +208,21 @@ pub fn shell_quoted(word: &str) -> String {
     }
 }
 
+/// A number of seconds as people say it: `45 s`, `2 minutes`, `3 hours`,
+/// `2 min 30 s`, `4 h 57 min`.
+pub fn span(seconds: u64) -> String {
+    let (hours, minutes, rest) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
+    let counted =
+        |count: u64, unit: &str| format!("{count} {unit}{}", if count == 1 { "" } else { "s" });
+    match (hours, minutes, rest) {
+        (0, 0, _) => format!("{rest} s"),
+        (0, _, 0) => counted(minutes, "minute"),
+        (_, 0, 0) => counted(hours, "hour"),
+        (0, _, _) => format!("{minutes} min {rest} s"),
+        _ => format!("{hours} h {minutes} min"),
+    }
+}
+
 /// How a computation ended.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
@@ -222,7 +236,7 @@ pub enum Outcome {
     Refused { message: String, seconds: f64 },
     /// No answer within the time limit of the server, in seconds.
     Timeout { limit: u64 },
-    /// No free slot within the time a request may wait.
+    /// No free slot: as many computations run as may run at a time.
     Busy,
     /// Something that is neither an answer nor a refusal of `tet`.
     Failed { message: String },
@@ -239,30 +253,56 @@ impl Outcome {
         }
     }
 
-    /// A finished run of `tet` is the same whenever it is repeated; the
-    /// other outcomes depend on the load of the moment.
+    /// A finished run of `tet` is the same whenever it is repeated, and a
+    /// computation that the time limit stopped would be stopped again,
+    /// after as long a time. The other outcomes depend on the load of the
+    /// moment.
     pub fn lasting(&self) -> bool {
-        matches!(self, Outcome::Value { .. } | Outcome::Refused { .. })
+        matches!(
+            self,
+            Outcome::Value { .. } | Outcome::Refused { .. } | Outcome::Timeout { .. }
+        )
     }
 
-    fn error(&self) -> Option<String> {
+    pub fn error(&self) -> Option<String> {
         match self {
             Outcome::Value { .. } => None,
             Outcome::Refused { message, .. } | Outcome::Failed { message } => Some(message.clone()),
             Outcome::Timeout { limit } => Some(format!(
-                "no result within {limit} s, the limit of this server; tet itself has no limit: \
-                 build it and run the command"
+                "no result within {}, the limit of this server; tet itself has no limit: \
+                 build it and run the command",
+                span(*limit)
             )),
-            Outcome::Busy => Some("the server is busy with other computations; try again".into()),
+            Outcome::Busy => Some("all slots are busy calculating; try again later".into()),
         }
     }
 
-    fn seconds(&self) -> Option<f64> {
+    pub fn seconds(&self) -> Option<f64> {
         match self {
             Outcome::Value { seconds, .. } | Outcome::Refused { seconds, .. } => Some(*seconds),
             _ => None,
         }
     }
+
+    /// What the log says about the outcome: the two numbers of a result,
+    /// or the reason why there is none.
+    pub fn logged(&self) -> String {
+        match self {
+            Outcome::Value { re, im, .. } => format!(" = {} {}", brief(re, 100), brief(im, 100)),
+            other => format!(": {}", brief(&other.error().unwrap_or_default(), 300)),
+        }
+    }
+}
+
+/// A text for a line of the log: of a long one the beginning, and its
+/// length.
+pub fn brief(text: &str, most: usize) -> String {
+    let length = text.chars().count();
+    if length <= most {
+        return text.to_string();
+    }
+    let beginning: String = text.chars().take(most).collect();
+    format!("{beginning}...({length} characters)")
 }
 
 /// A string as a JSON string.
@@ -286,6 +326,70 @@ pub fn json_string(text: &str) -> String {
     quoted
 }
 
+/// What a request is told about a computation that has not ended.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pending {
+    /// Whether the request waited for the computation. One that arrives
+    /// when the others have stopped waiting is answered at once.
+    pub waited: bool,
+    /// How long ago the computation was asked for first.
+    pub age: Duration,
+    /// How long a request waits, and how long a computation may take, in
+    /// seconds.
+    pub wait: u64,
+    pub limit: u64,
+}
+
+impl Pending {
+    pub fn message(&self) -> String {
+        let limit = span(self.limit);
+        if self.waited {
+            format!(
+                "the calculation is taking longer than {} and continues on this server: ask \
+                 the same again later for the result; it may take up to {limit}",
+                span(self.wait)
+            )
+        } else {
+            format!(
+                "this calculation is already running, for {} now: allow it up to {limit} to \
+                 complete and ask the same again for the result",
+                span(self.age.as_secs())
+            )
+        }
+    }
+}
+
+/// The request as the first fields of a JSON reply.
+fn request_fields(job: &Job) -> Vec<String> {
+    let mut fields = vec![
+        format!("\"func\":{}", json_string(&job.spelled)),
+        format!("\"prec\":{}", job.prec),
+    ];
+    for (name, value) in &job.arguments {
+        fields.push(format!("{}:{}", json_string(name), json_string(value)));
+    }
+    fields
+}
+
+/// The body of the reply about a job whose computation has not ended.
+pub fn rendered_pending(job: &Job, pending: &Pending, format: Format) -> String {
+    if format == Format::Text {
+        return format!("running: {}\n", pending.message());
+    }
+    let mut fields = request_fields(job);
+    fields.push("\"running\":true".into());
+    fields.push(format!("\"message\":{}", json_string(&pending.message())));
+    fields.push("\"status\":202".into());
+    fields.push(format!(
+        "\"running_seconds\":{:.3}",
+        pending.age.as_secs_f64()
+    ));
+    fields.push(format!("\"limit_seconds\":{}", pending.limit));
+    fields.push("\"cached\":false".into());
+    fields.push(format!("\"command\":{}", json_string(&job.command())));
+    format!("{{{}}}\n", fields.join(","))
+}
+
 /// The body of the reply to a job.
 pub fn rendered(job: &Job, outcome: &Outcome, cached: bool, format: Format) -> String {
     if format == Format::Text {
@@ -294,13 +398,7 @@ pub fn rendered(job: &Job, outcome: &Outcome, cached: bool, format: Format) -> S
             other => format!("error: {}\n", other.error().unwrap_or_default()),
         };
     }
-    let mut fields = vec![
-        format!("\"func\":{}", json_string(&job.spelled)),
-        format!("\"prec\":{}", job.prec),
-    ];
-    for (name, value) in &job.arguments {
-        fields.push(format!("{}:{}", json_string(name), json_string(value)));
-    }
+    let mut fields = request_fields(job);
     match outcome {
         Outcome::Value { re, im, .. } => {
             fields.push(format!("\"result\":{}", json_string(job.func.result())));
@@ -339,13 +437,6 @@ pub fn rendered_rejection(rejected: &Rejected, format: Format) -> String {
 mod tests {
     use super::*;
 
-    fn limits() -> Limits {
-        Limits {
-            max_prec: 1000,
-            max_argument: 64,
-        }
-    }
-
     fn query(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
             .iter()
@@ -354,7 +445,7 @@ mod tests {
     }
 
     fn job(pairs: &[(&str, &str)]) -> Result<(Job, Format), Rejected> {
-        Job::parse(&query(pairs), &limits())
+        Job::parse(&query(pairs))
     }
 
     #[test]
@@ -482,7 +573,6 @@ mod tests {
     #[test]
     fn requests_that_are_not_a_computation_say_why() {
         let takes = "func=tet takes base and height, or base_re, base_im, height_re and height_im";
-        let long = "1".repeat(65);
         for (pairs, message) in [
             (&[("base", "2")][..], "func is missing: tet, ate (slog) or ssrt (sroot)".to_string()),
             (&[("func", "exp")], "func is tet, ate, slog, sroot or ssrt, not \"exp\"".to_string()),
@@ -519,11 +609,7 @@ mod tests {
             ),
             (
                 &[("func", "tet"), ("base", "2"), ("height", "3"), ("format", "xml")],
-                "format is json or text, not \"xml\"".to_string(),
-            ),
-            (
-                &[("func", "tet"), ("base", &long), ("height", "3")],
-                "base is longer than 64 bytes".to_string(),
+                "format is json, text or html, not \"xml\"".to_string(),
             ),
         ] {
             let error = job(pairs).unwrap_err();
@@ -531,7 +617,6 @@ mod tests {
         }
         for prec in [
             "0",
-            "1001",
             "-5",
             "+5",
             " 5",
@@ -551,7 +636,7 @@ mod tests {
             assert!(
                 error
                     .message
-                    .starts_with("prec is the number of digits, a whole number from 1 to 1000"),
+                    .starts_with("prec is the number of digits, a whole number from 1 on, not "),
                 "{prec}: {}",
                 error.message
             );
@@ -564,6 +649,19 @@ mod tests {
             let error = job(&[("func", "tet"), ("base", word), ("height", "3")]).unwrap_err();
             assert_eq!(error.message, format!("base is not a number: {word:?}"));
         }
+        // Any number of digits may be asked for, and a number may be long.
+        let digits = "1".repeat(5000);
+        let (many, _) = job(&[
+            ("func", "tet"),
+            ("base", &digits),
+            ("height", "3"),
+            ("prec", "1000000000"),
+        ])
+        .unwrap();
+        assert_eq!(
+            (many.prec, many.arguments[0].1.len()),
+            (1_000_000_000, 5000)
+        );
         // What only looks like one goes to tet.
         for word in ["-2", "--2", " -q", "-qq", "", "-pi"] {
             assert!(
@@ -629,12 +727,17 @@ mod tests {
         );
         for (outcome, status, lasting, word) in [
             (
-                Outcome::Timeout { limit: 60 },
+                Outcome::Timeout { limit: 10_800 },
                 504,
-                false,
-                "no result within 60 s",
+                true,
+                "no result within 3 hours, the limit of this server",
             ),
-            (Outcome::Busy, 503, false, "busy"),
+            (
+                Outcome::Busy,
+                503,
+                false,
+                "all slots are busy calculating; try again later",
+            ),
             (
                 Outcome::Failed {
                     message: "tet could not be run".into(),
@@ -660,6 +763,90 @@ mod tests {
             rendered_rejection(&rejection, Format::Text),
             "error: func is missing\n"
         );
+    }
+
+    #[test]
+    fn a_computation_that_has_not_ended_is_reported_as_running() {
+        let (job, _) = job(&[("func", "ssrt"), ("value", "10+i"), ("height", "0.3-i")]).unwrap();
+        let first = Pending {
+            waited: true,
+            age: Duration::from_millis(120_004),
+            wait: 120,
+            limit: 10_800,
+        };
+        let message = "the calculation is taking longer than 2 minutes and continues on this \
+                       server: ask the same again later for the result; it may take up to 3 hours";
+        assert_eq!(
+            rendered_pending(&job, &first, Format::Json),
+            format!(
+                "{{\"func\":\"ssrt\",\"prec\":20,\"value\":\"10+i\",\"height\":\"0.3-i\",\
+                 \"running\":true,\"message\":\"{message}\",\"status\":202,\
+                 \"running_seconds\":120.004,\"limit_seconds\":10800,\"cached\":false,\
+                 \"command\":\"tet --ssrt 20 10+i 0.3-i\"}}\n"
+            )
+        );
+        assert_eq!(
+            rendered_pending(&job, &first, Format::Text),
+            format!("running: {message}\n")
+        );
+        let later = Pending {
+            waited: false,
+            age: Duration::from_secs(345),
+            ..first
+        };
+        assert_eq!(
+            rendered_pending(&job, &later, Format::Text),
+            "running: this calculation is already running, for 5 min 45 s now: allow it up to \
+             3 hours to complete and ask the same again for the result\n"
+        );
+    }
+
+    #[test]
+    fn the_log_has_the_result_or_the_reason_and_cuts_what_is_long() {
+        let value = Outcome::Value {
+            re: "1.4587818160364217007".into(),
+            im: "0".into(),
+            seconds: 1.0,
+        };
+        assert_eq!(value.logged(), " = 1.4587818160364217007 0");
+        let long = Outcome::Value {
+            re: format!("1.{}", "4".repeat(300)),
+            im: "-2.5e-7".into(),
+            seconds: 1.0,
+        };
+        assert_eq!(
+            long.logged(),
+            format!(" = 1.{}...(302 characters) -2.5e-7", "4".repeat(98))
+        );
+        let refused = Outcome::Refused {
+            message: "invalid number \"x\": unknown name x".into(),
+            seconds: 0.0,
+        };
+        assert_eq!(refused.logged(), ": invalid number \"x\": unknown name x");
+        assert_eq!(
+            Outcome::Busy.logged(),
+            ": all slots are busy calculating; try again later"
+        );
+        assert_eq!(brief("πππππ", 5), "πππππ");
+        assert_eq!(brief("ππππππ", 5), "πππππ...(6 characters)");
+    }
+
+    #[test]
+    fn seconds_are_spelled_for_people() {
+        for (seconds, text) in [
+            (0, "0 s"),
+            (45, "45 s"),
+            (60, "1 minute"),
+            (120, "2 minutes"),
+            (150, "2 min 30 s"),
+            (3_600, "1 hour"),
+            (10_800, "3 hours"),
+            (5_400, "1 h 30 min"),
+            (17_844, "4 h 57 min"),
+            (3_605, "1 h 0 min"),
+        ] {
+            assert_eq!(span(seconds), text);
+        }
     }
 
     #[test]

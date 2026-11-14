@@ -1,3 +1,59 @@
+# Status Update — 2026-11-14, afternoon (web: https://hyp4.duckdns.org, long calculations, a page without scripts)
+
+**The public instance is <https://hyp4.duckdns.org/>, by HTTPS only.** Caddy
+obtains and renews the certificate (Let's Encrypt) by itself; plain HTTP,
+for the name and for the bare address, answers with nothing but a redirect.
+The site is reachable over IPv4 and IPv6: the certificate authority
+validated it over IPv6 from seven places.
+
+**A calculation runs in the server, not in its request.** It ends with its
+result, with a refusal of `tet` or at the time limit, whether or not
+anybody still waits. The requests for it wait until it is two minutes old;
+after that the reply has the status 202 and says that the calculation
+continues, and the same request again finds it running, or its result: a
+calculation is never started twice. On the public instance `2^^0.51` at
+300 digits took 271 s: 202 after two minutes, 202 at once for each
+repetition, then the 300 digits of `tet 300 2 0.51`.
+
+**Limits.** The precision has no largest value on the server. As many
+calculations run at a time as the machine has processors, four at least;
+there is no queue: while all slots are busy a new calculation is turned
+away at once (503, `all slots are busy calculating; try again later`). A
+calculation may take three hours; one that is stopped there is kept as
+such, so that the same request is answered at once, and is calculated
+again once the limit has been raised. On Linux and FreeBSD a `tet` ends
+with the server.
+
+**Settings that change while the server runs.** The time limit, the time a
+request waits, the number of slots, and the threads, memory and niceness of
+one `tet` stand in a settings file (`/usr/local/etc/tet-web.conf`). The
+server looks at it every two seconds: a change is in use at once, also for
+the calculations that run, without a restart. `tet-webctl timeout 6h` sets
+the time limit in one command.
+
+**The page needs no JavaScript.** It is a plain form that the server
+answers with the same page and the result in it, so it works in `links`
+and `lynx`; a calculation that still runs makes the page ask again (a
+refresh, and a link for the browsers that do not refresh). With JavaScript
+the same page saves the reloads. Both were driven in Firefox, with scripts
+and without, and in `links` 2.30.
+
+**The log has the results.** Every request for a calculation is one line
+with the client, the command and the result or the reason; a calculation
+that no request waited for has a line of its own when it ends.
+
+**Start, stop, status, log.** `web/ctl.sh` (installed as `tet-webctl`):
+`start|up`, `stop|down`, `restart`, `status` (with the certificate and the
+calculations that run), `log [N]`, `log -f`, `timeout [TIME]`, on the
+machine itself or from a checkout over ssh. A stop ends the calculations
+that run and takes two seconds. `web/README.md` has an administration part
+with all of it, the certificate included.
+
+**Tests.** 36 unit tests and 17 tests of the server as a process: the form
+without a script, the page that asks again, any precision and a result of
+200 000 digits, all slots busy, the settings file read again while a
+calculation runs, the log lines, calculations that end with the server.
+
 # Status Update — 2026-11-14 (web page and HTTP API; expressions of astronomic size)
 
 **`web/`: a page and an API in front of the binary.** `tet-web` (Rust,

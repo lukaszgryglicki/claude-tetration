@@ -1,114 +1,57 @@
 //! Running `tet`: a bounded number of computations at a time, each a child
-//! process with a deadline.
+//! process with a deadline, which ends with this server at the latest.
 
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::{Job, Outcome};
+use crate::settings::Shared;
 
-/// How `tet` is run.
-#[derive(Clone, Debug)]
-pub struct Runner {
-    /// The program: a path, or a name for the search path.
-    pub tet: String,
-    /// The time one computation may take.
-    pub timeout: Duration,
-    /// `TET_MT` for the child: its number of threads; `None` is serial.
-    pub threads: Option<u64>,
-    /// The address space one child may use, in bytes.
-    pub memory: Option<u64>,
-    /// The niceness of a child; `None` leaves it that of the server.
-    pub nice: Option<i32>,
-}
+/// The most that is kept of what a child writes: about eight million
+/// digits for each of the two numbers of a result.
+const OUTPUT_LIMIT: usize = 16 << 20;
 
-/// The most that is kept of what a child writes.
-const OUTPUT_LIMIT: u64 = 1 << 20;
-
-/// The slots for computations and the requests that wait for one.
+/// The computations that run. There is no queue: a computation gets a slot
+/// at once, or none.
+#[derive(Default)]
 pub struct Slots {
-    jobs: usize,
-    queue: usize,
-    state: Mutex<(usize, usize)>,
-    freed: Condvar,
+    taken: AtomicUsize,
 }
 
 /// A slot that is given back when it is dropped.
 pub struct Slot<'a>(&'a Slots);
 
 impl Slots {
-    /// `jobs` computations at a time, and at most `queue` requests waiting.
-    pub fn new(jobs: usize, queue: usize) -> Slots {
-        Slots {
-            jobs,
-            queue,
-            state: Mutex::new((0, 0)),
-            freed: Condvar::new(),
-        }
+    /// How many computations run.
+    pub fn taken(&self) -> usize {
+        self.taken.load(Ordering::SeqCst)
     }
 
-    /// The numbers of running computations and of waiting requests.
-    pub fn load(&self) -> (usize, usize) {
-        *self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// A slot, as soon as one is free; `None` when too many requests wait
-    /// already or none is free by `deadline`.
-    pub fn take(&self, deadline: Instant) -> Option<Slot<'_>> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.0 >= self.jobs {
-            if state.1 >= self.queue {
-                return None;
-            }
-            state.1 += 1;
-            while state.0 >= self.jobs {
-                let left = deadline
-                    .checked_duration_since(Instant::now())
-                    .filter(|left| !left.is_zero());
-                let Some(left) = left else {
-                    state.1 -= 1;
-                    return None;
-                };
-                state = self
-                    .freed
-                    .wait_timeout(state, left)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .0;
-            }
-            state.1 -= 1;
-        }
-        state.0 += 1;
-        Some(Slot(self))
+    /// A slot, if fewer than `jobs` are taken.
+    pub fn take(&self, jobs: usize) -> Option<Slot<'_>> {
+        let free = |taken: usize| (taken < jobs).then_some(taken + 1);
+        self.taken
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, free)
+            .ok()
+            .map(|_| Slot(self))
     }
 }
 
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
-        let mut state = self
-            .0
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.0 -= 1;
-        drop(state);
-        self.0.freed.notify_one();
+        self.0.taken.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 #[cfg(unix)]
 mod limits {
-    //! Limits that the kernel enforces on a child, whatever becomes of
-    //! this server: processor time, so that a computation cannot outlive
-    //! its deadline for long, address space, and a lower priority than the
-    //! server that has to keep answering.
+    //! What the kernel enforces on a child, whatever becomes of this
+    //! server: its address space, a lower priority than the server that
+    //! has to keep answering, and its end when the server ends.
 
+    use std::io;
     use std::os::raw::c_int;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
@@ -124,9 +67,51 @@ mod limits {
         fn setpriority(which: c_int, who: c_int, priority: c_int) -> c_int;
     }
 
-    const CPU: c_int = 0;
     /// `PRIO_PROCESS`, and 0 for the calling process.
     const PROCESS: (c_int, c_int) = (0, 0);
+    /// `SIGKILL`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    const KILL: c_int = 9;
+
+    /// Asks the kernel to end the calling process, a child that has not
+    /// run `tet` yet, as soon as its parent ends: a computation may take
+    /// hours, and nobody would stop it or read its result after the server.
+    #[cfg(target_os = "freebsd")]
+    fn end_with_parent() -> io::Result<()> {
+        extern "C" {
+            fn procctl(kind: c_int, id: i64, command: c_int, data: *mut c_int) -> c_int;
+        }
+        /// `P_PID` with the id 0 is the calling process.
+        const BY_PID: c_int = 0;
+        /// `PROC_PDEATHSIG_CTL`.
+        const SIGNAL_AT_END_OF_PARENT: c_int = 11;
+        let mut signal = KILL;
+        // SAFETY: `procctl` reads the one `int` that `data` points to.
+        match unsafe { procctl(BY_PID, 0, SIGNAL_AT_END_OF_PARENT, &mut signal) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn end_with_parent() -> io::Result<()> {
+        extern "C" {
+            fn prctl(option: c_int, ...) -> c_int;
+        }
+        /// `PR_SET_PDEATHSIG`. The signal is sent when the thread that
+        /// started the child ends: here that thread waits for the child.
+        const SIGNAL_AT_END_OF_PARENT: c_int = 1;
+        // SAFETY: this option takes one more argument, an `unsigned long`.
+        match unsafe { prctl(SIGNAL_AT_END_OF_PARENT, KILL as std::os::raw::c_ulong) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    fn end_with_parent() -> io::Result<()> {
+        Ok(())
+    }
     #[cfg(target_os = "linux")]
     const ADDRESS_SPACE: Option<c_int> = Some(9);
     #[cfg(target_os = "freebsd")]
@@ -139,7 +124,11 @@ mod limits {
         ADDRESS_SPACE.is_some()
     }
 
-    pub fn apply(command: &mut Command, cpu_seconds: u64, memory: Option<u64>, nice: Option<i32>) {
+    pub fn apply(command: &mut Command, memory: Option<u64>, nice: Option<i32>) {
+        extern "C" {
+            fn getppid() -> c_int;
+        }
+        let server = std::process::id();
         let set = move |resource: c_int, value: u64| {
             let limit = Limit {
                 soft: value,
@@ -150,20 +139,24 @@ mod limits {
             if unsafe { setrlimit(resource, &limit) } == 0 {
                 Ok(())
             } else {
-                Err(std::io::Error::last_os_error())
+                Err(io::Error::last_os_error())
             }
         };
         // SAFETY: the closure runs in the child between fork and exec and
-        // only makes the system calls `setpriority` and `setrlimit`, which
-        // allocate nothing and take no lock.
+        // only makes system calls, which allocate nothing and take no lock.
         unsafe {
             command.pre_exec(move || {
+                end_with_parent()?;
+                // A server that ended before the kernel was asked is not
+                // noticed any more: `tet` is not started then (`ESRCH`).
+                if u32::try_from(getppid()) != Ok(server) {
+                    return Err(io::Error::from_raw_os_error(3));
+                }
                 if let Some(nice) = nice {
                     // Only a higher number is allowed: a child that is nicer
                     // already stays as it is.
                     let _ = setpriority(PROCESS.0, PROCESS.1, nice);
                 }
-                set(CPU, cpu_seconds)?;
                 match (ADDRESS_SPACE, memory) {
                     (Some(resource), Some(bytes)) => set(resource, bytes),
                     _ => Ok(()),
@@ -179,51 +172,66 @@ mod limits {
         false
     }
 
-    pub fn apply(_: &mut std::process::Command, _: u64, _: Option<u64>, _: Option<i32>) {}
+    pub fn apply(_: &mut std::process::Command, _: Option<u64>, _: Option<i32>) {}
 }
 
 pub use limits::memory_supported;
 
-/// Everything a pipe delivers, of which the first megabyte is kept.
-fn collected(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+/// Everything a pipe delivers, of which the first sixteen megabytes are
+/// kept, and whether there was more.
+fn collected(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
     std::thread::spawn(move || {
         let mut kept = Vec::new();
+        let mut more = false;
         if let Some(pipe) = pipe {
-            let mut pipe = pipe.take(OUTPUT_LIMIT);
+            let mut pipe = pipe.take(OUTPUT_LIMIT as u64);
             let _ = pipe.read_to_end(&mut kept);
             // The rest, if any, is read and dropped so that the child never
             // blocks on a full pipe.
-            let _ = std::io::copy(&mut pipe.into_inner(), &mut std::io::sink());
+            let rest = std::io::copy(&mut pipe.into_inner(), &mut std::io::sink());
+            more = rest.is_ok_and(|bytes| bytes > 0);
         }
-        kept
+        (kept, more)
     })
 }
 
-/// Waits for the child until `deadline`; `None` when it is still running.
+/// Waits for the child that was started at `started` while it has run for
+/// less than `limit`, which is asked for again and again: it can change.
+/// `None` when the child still runs at its limit, which is returned too.
 fn exited(
     child: &mut Child,
-    deadline: Instant,
-) -> std::io::Result<Option<std::process::ExitStatus>> {
-    let mut pause = Duration::from_micros(500);
+    started: Instant,
+    limit: impl Fn() -> Duration,
+) -> std::io::Result<(Option<std::process::ExitStatus>, Duration)> {
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
+            return Ok((Some(status), limit()));
         }
-        let Some(left) = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|left| !left.is_zero())
-        else {
-            return Ok(None);
+        let (age, limit) = (started.elapsed(), limit());
+        let Some(left) = limit.checked_sub(age).filter(|left| !left.is_zero()) else {
+            return Ok((None, limit));
         };
+        // The longer a child runs, the more rarely it is looked at: its end
+        // is seen within a sixty-fourth of its time, a quarter of a second
+        // at most.
+        let pause = (age / 64).clamp(Duration::from_micros(500), Duration::from_millis(250));
         std::thread::sleep(pause.min(left));
-        pause = (pause * 2).min(Duration::from_millis(20));
     }
 }
 
+/// How `tet` is run.
+pub struct Runner {
+    /// The program: a path, or a name for the search path.
+    pub tet: String,
+}
+
 impl Runner {
-    /// Runs `tet` for the job and reads what it printed.
-    pub fn run(&self, job: &Job) -> Outcome {
+    /// Runs `tet` for the job and reads what it printed. The settings are
+    /// those of the moment: the threads, the memory and the niceness when
+    /// the child starts, the time limit for as long as it runs.
+    pub fn run(&self, job: &Job, settings: &Shared) -> Outcome {
         let failed = |message: String| Outcome::Failed { message };
+        let now = settings.now();
         let mut command = Command::new(&self.tet);
         command
             .args(job.argv())
@@ -232,13 +240,10 @@ impl Runner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let threads = self.threads.unwrap_or(1).max(1);
-        if let Some(threads) = self.threads {
+        if let Some(threads) = now.threads {
             command.env("TET_MT", threads.to_string());
         }
-        // Processor time runs `threads` times faster than the clock at most.
-        let cpu = (self.timeout.as_secs() + 5).saturating_mul(threads);
-        limits::apply(&mut command, cpu, self.memory, self.nice);
+        limits::apply(&mut command, now.memory, now.nice);
         let started = Instant::now();
         let mut child = match command.spawn() {
             Ok(child) => child,
@@ -248,13 +253,13 @@ impl Runner {
             collected(child.stdout.take()),
             collected(child.stderr.take()),
         );
-        let status = match exited(&mut child, started + self.timeout) {
-            Ok(Some(status)) => status,
-            Ok(None) => {
+        let status = match exited(&mut child, started, || settings.now().timeout) {
+            Ok((Some(status), _)) => status,
+            Ok((None, limit)) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Outcome::Timeout {
-                    limit: self.timeout.as_secs(),
+                    limit: limit.as_secs(),
                 };
             }
             Err(error) => {
@@ -264,10 +269,18 @@ impl Runner {
             }
         };
         let seconds = started.elapsed().as_secs_f64();
-        let text = |bytes: std::thread::Result<Vec<u8>>| {
-            String::from_utf8_lossy(&bytes.unwrap_or_default()).into_owned()
-        };
-        let (stdout, stderr) = (text(stdout.join()), text(stderr.join()));
+        let (stdout, more) = stdout.join().unwrap_or_default();
+        let (stderr, _) = stderr.join().unwrap_or_default();
+        if more {
+            return failed(format!(
+                "the result is longer than the {} MiB that this server returns",
+                OUTPUT_LIMIT >> 20
+            ));
+        }
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr),
+        );
         match status.code() {
             Some(0) => {
                 let mut lines = stdout.lines();
@@ -293,8 +306,8 @@ impl Runner {
             }
             Some(code) => failed(format!("tet ended with the unexpected exit code {code}")),
             None => failed(format!(
-                "tet was stopped by the system ({status}): the computation needs more memory or \
-                 processor time than this server allows"
+                "tet was stopped by the system ({status}): it needed more memory than this \
+                 server allows, or it was ended by hand"
             )),
         }
     }
@@ -303,36 +316,26 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
-    fn slots_are_bounded_and_waiting_is_bounded() {
-        let slots = Arc::new(Slots::new(2, 1));
-        let far = Instant::now() + Duration::from_secs(30);
-        let first = slots.take(far).unwrap();
-        let second = slots.take(far).unwrap();
-        assert_eq!(slots.load(), (2, 0));
-        // No slot is free: one request may wait, until its deadline.
+    fn slots_are_taken_at_once_or_not_at_all() {
+        let slots = Slots::default();
+        let first = slots.take(2).unwrap();
+        let second = slots.take(2).unwrap();
+        assert_eq!(slots.taken(), 2);
+        // None is free, and nothing waits for one.
         let started = Instant::now();
-        assert!(slots.take(started + Duration::from_millis(100)).is_none());
-        assert!(started.elapsed() >= Duration::from_millis(100));
-        assert_eq!(slots.load(), (2, 0));
-        let waiter = {
-            let slots = slots.clone();
-            std::thread::spawn(move || slots.take(far).is_some())
-        };
-        while slots.load().1 == 0 {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        // The queue is full: the next request is turned away at once.
-        let started = Instant::now();
-        assert!(slots.take(far).is_none());
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(slots.take(2).is_none());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(slots.taken(), 2);
+        // The number of slots can change while some are taken.
+        let third = slots.take(3).unwrap();
+        assert!(slots.take(3).is_none() && slots.take(1).is_none());
         drop(first);
-        assert!(waiter.join().unwrap());
-        assert_eq!(slots.load(), (1, 0));
-        drop(second);
-        assert_eq!(slots.load(), (0, 0));
-        assert!(slots.take(Instant::now()).is_some());
+        assert!(slots.take(2).is_none());
+        drop((second, third));
+        assert_eq!(slots.taken(), 0);
+        assert!(slots.take(1).is_some());
+        assert!(slots.take(0).is_none());
     }
 }

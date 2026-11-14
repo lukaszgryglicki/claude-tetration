@@ -1,5 +1,11 @@
 'use strict';
 
+// The page is a form that works without this script: sending it asks the
+// server for the page again, which then has the result in it. With the
+// script the page stays where it is: the fields follow the choices at once,
+// the result is taken out of the page that the server answers with, and a
+// calculation that takes longer is asked for again until it has ended.
+
 // The two numbers of each function, in the order of the command line.
 const numbers = { tet: ['base', 'height'], ate: ['base', 'value'], ssrt: ['value', 'height'] };
 const symbols = { base: 'b', height: 'h', value: 'z' };
@@ -9,15 +15,21 @@ const examples = {
   ssrt: { value: '16', height: '3' },
 };
 
-// What was typed, for each function and each form, so that switching keeps it.
+// What was typed, for each function and each kind of arguments, so that
+// switching keeps it.
 const typed = {};
+
+// The number of the calculation that the page shows. One that takes longer
+// is asked for again until its result is there, or until another is started.
+let latest = 0;
 
 const byId = (id) => document.getElementById(id);
 const checked = (name) => document.querySelector(`input[name="${name}"]:checked`).value;
+const fields = () => Array.from(byId('arguments').querySelectorAll('input'));
 
-function names(func, form) {
+function names(func, count) {
   const [first, second] = numbers[func];
-  return form === '2' ? [first, second] : [`${first}_re`, `${first}_im`, `${second}_re`, `${second}_im`];
+  return count === '2' ? [first, second] : [`${first}_re`, `${first}_im`, `${second}_re`, `${second}_im`];
 }
 
 function initial(func, name) {
@@ -26,17 +38,16 @@ function initial(func, name) {
 }
 
 function remember() {
-  for (const input of byId('arguments').querySelectorAll('input')) {
-    typed[input.dataset.key] = input.value;
-  }
+  for (const input of fields()) typed[input.dataset.key] = input.value;
 }
 
+// The fields of the chosen function and kind of arguments, as the server
+// writes them into the page.
 function showArguments() {
   const func = checked('func');
-  const form = checked('form');
   const box = byId('arguments');
   box.replaceChildren();
-  for (const name of names(func, form)) {
+  for (const name of names(func, checked('numbers'))) {
     const key = `${func}.${name}`;
     const row = document.createElement('div');
     row.className = 'row';
@@ -48,6 +59,7 @@ function showArguments() {
     const input = document.createElement('input');
     input.type = 'text';
     input.id = name;
+    input.name = name;
     input.dataset.key = key;
     input.value = key in typed ? typed[key] : initial(func, name);
     input.spellcheck = false;
@@ -58,51 +70,42 @@ function showArguments() {
   }
 }
 
-// A value in a query: everything that could be misread is escaped, and
-// what a person would type (2+i, pi/e, 2^^0.5) stays readable.
-function readable(value) {
-  return encodeURIComponent(value)
-    .replace(/%2B/g, '+')
-    .replace(/%2F/g, '/')
-    .replace(/%2C/g, ',')
-    .replace(/%5E/g, '^');
+// The address of the page for what the form says: what the browser asks
+// for when it sends the form, with every value escaped in full.
+function address() {
+  const parts = [
+    'format=html',
+    `prec=${encodeURIComponent(byId('prec').value.trim())}`,
+    `func=${checked('func')}`,
+    `numbers=${checked('numbers')}`,
+  ];
+  for (const input of fields()) parts.push(`${input.name}=${encodeURIComponent(input.value)}`);
+  return `/?${parts.join('&')}`;
 }
 
-function query(encode) {
-  const func = checked('func');
-  const parts = [`prec=${encode(byId('prec').value.trim())}`, `func=${func}`];
-  for (const name of names(func, checked('form'))) {
-    parts.push(`${name}=${encode(byId(name).value)}`);
-  }
-  return `?${parts.join('&')}`;
-}
-
-function show(data, status) {
-  const failed = Boolean(data.error);
-  byId('result').hidden = false;
-  byId('result-title').textContent = failed ? 'No result' : `Result: the ${data.result}`;
-  byId('re').textContent = failed ? '' : data.re;
-  byId('im').textContent = failed ? '' : data.im;
-  byId('result').querySelector('dl').hidden = failed;
-  byId('error').hidden = !failed;
-  byId('error').textContent = failed ? data.error + (status ? ` (HTTP ${status})` : '') : '';
-  const seconds = typeof data.seconds === 'number' ? `computed in ${data.seconds} s` : '';
-  byId('timing').textContent = data.cached ? `${seconds}, returned from the cache` : seconds;
-  byId('command').textContent = data.command || '';
+// Says why there is no page to take a result from.
+function fail(message) {
+  const title = document.createElement('h2');
+  title.id = 'result-title';
+  title.textContent = 'No result';
+  const error = document.createElement('p');
+  error.id = 'error';
+  error.className = 'error';
+  error.textContent = message;
+  const result = byId('result');
+  delete result.dataset.running;
+  result.replaceChildren(title, error);
 }
 
 async function calculate() {
   const button = byId('calculate');
   const status = byId('status');
-  const precision = byId('prec').value.trim();
-  if (!/^[0-9]+$/.test(precision) || Number(precision) < 1) {
-    show({ error: 'the precision is a whole number of digits, at least 1' }, 0);
-    return;
-  }
+  latest += 1;
+  const mine = latest;
   remember();
-  const link = byId('api');
-  link.href = query(encodeURIComponent);
-  link.textContent = new URL(query(readable), window.location.href).href;
+  const target = address();
+  // The address says what the page shows, as it does without the script.
+  window.history.replaceState(null, '', target);
   const started = Date.now();
   const tick = () => {
     status.textContent = `calculating… ${((Date.now() - started) / 1000).toFixed(1)} s`;
@@ -110,47 +113,54 @@ async function calculate() {
   button.disabled = true;
   tick();
   const timer = setInterval(tick, 100);
-  try {
-    const response = await fetch(query(encodeURIComponent), { headers: { Accept: 'application/json' } });
-    let data;
-    try {
-      data = await response.json();
-    } catch (error) {
-      data = { error: `the server answered with status ${response.status} and no result` };
-    }
-    show(data, response.status);
-  } catch (error) {
-    show({ error: `the server could not be reached: ${error.message}` }, 0);
-  } finally {
+  const free = () => {
     clearInterval(timer);
     status.textContent = '';
     button.disabled = false;
-  }
-}
-
-async function showLimits() {
+  };
   try {
-    const stats = await (await fetch('stats')).json();
-    byId('limits').textContent =
-      `${stats.limits.timeout_seconds} s for one calculation, up to ${stats.limits.max_prec} digits`;
-    byId('prec').max = stats.limits.max_prec;
-    if (stats.revision) byId('revision').textContent = `, revision ${stats.revision}`;
+    for (;;) {
+      const response = await fetch(target, { headers: { Accept: 'text/html' } });
+      const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+      if (mine !== latest) return;
+      const result = page.getElementById('result');
+      if (!result) {
+        fail(`the server answered with status ${response.status} and no result`);
+        break;
+      }
+      byId('result').replaceWith(document.adoptNode(result));
+      const again = Number(result.dataset.running);
+      if (!again) break;
+      // The calculation continues on the server. The page is free for
+      // another one, and asks for this one again until that is started.
+      free();
+      await new Promise((resolve) => { setTimeout(resolve, again * 1000); });
+      if (mine !== latest) return;
+    }
   } catch (error) {
-    // The page works without them.
+    if (mine === latest) fail(`the server could not be reached: ${error.message}`);
+  } finally {
+    clearInterval(timer);
+    if (mine === latest) free();
   }
 }
 
-for (const radio of document.querySelectorAll('input[name="func"], input[name="form"]')) {
+for (const radio of document.querySelectorAll('input[name="func"], input[name="numbers"]')) {
   radio.addEventListener('change', () => {
     remember();
     showArguments();
   });
 }
-byId('calculate').addEventListener('click', calculate);
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && event.target.tagName === 'INPUT' && !byId('calculate').disabled) {
-    calculate();
-  }
+byId('form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  calculate();
 });
-showArguments();
-showLimits();
+// A browser may keep the choices of a page that it loads again, and not
+// the fields that the server wrote for them.
+if (fields().map((input) => input.name).join() !== names(checked('func'), checked('numbers')).join()) {
+  showArguments();
+}
+remember();
+// The server made this page for a calculation that still runs: from here
+// on the script asks for it.
+if (byId('result').dataset.running) calculate();

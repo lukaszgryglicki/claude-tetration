@@ -456,11 +456,11 @@ mod tests {
         assert_eq!(
             settings,
             Ok(Settings {
-                wait: Duration::from_secs(120),
-                timeout: Duration::from_secs(3 * 3600),
+                wait: Duration::from_secs(300),
+                timeout: Duration::from_secs(6 * 3600),
                 jobs: default_jobs(),
-                threads: None,
-                memory: Some(512 << 20),
+                threads: Some(2),
+                memory: Some(1024 << 20),
                 nice: Some(10),
             })
         );

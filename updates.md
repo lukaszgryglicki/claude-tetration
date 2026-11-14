@@ -1,3 +1,33 @@
+# Status Update — 2026-11-14, evening (web: the cache can be listed, references on the page)
+
+**`tet-webctl cache` lists what the cache holds.** One entry a line: the
+function, the precision and the numbers of the function in the order base,
+height, value, two as they were asked for and the third as it was computed
+(`f=ate prec=20 base=2 height=4.0000000000000000000 value=65536`), from the
+entry used longest ago to the one used last, then the calculations that
+run. The server answers `GET /cache` only for a request from its own
+machine that no proxy passed on; through the proxy the address is a 404
+like any other that is not served.
+
+**The cache may grow to 1024 MiB** (it was 64). That is a bound, not a
+reservation: the memory is used as the results come.
+
+**References on the page**: the thread about it on the Tetration Forum,
+[Tetration online calculator](https://tetrationforum.org/showthread.php?tid=1830),
+and the two viewers that plot with `tet`,
+[tet-line](https://github.com/lukaszgryglicki/tet-line) and
+[rust-opengl-complex-drawer](https://github.com/lukaszgryglicki/rust-opengl-complex-drawer).
+
+**The settings file of the machine is the one that counts.**
+`web/freebsd/tet-web.conf` in the repository is only what a first
+installation writes; it now sets six hours, five minutes, two threads and
+1024 MiB for each `tet`. `web/README.md` says how to copy a file to the
+machine, where the server takes it over without a restart.
+
+**Tests.** 38 unit tests and 18 tests of the server as a process; the new
+ones list a cache with results, a refusal and a running calculation, and
+ask for the listing as a proxy would.
+
 # Status Update — 2026-11-14, afternoon (web: https://hyp4.duckdns.org, long calculations, a page without scripts)
 
 **The public instance is <https://hyp4.duckdns.org/>, by HTTPS only.** Caddy

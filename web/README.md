@@ -118,7 +118,12 @@ $ curl -sL 'http://hyp4.duckdns.org/?func=tet&base=2&height=3&format=text'
 changed), the function (`tet`, `ate` or `ssrt`), two complex numbers or four
 real ones, and the button `Calculate`. The result is shown below it with the
 `tet` command that computed it and the address of the same request to the
-API.
+API. Below the form are links to this documentation, to the thread about
+the page on the Tetration Forum
+([Tetration online calculator](https://tetrationforum.org/showthread.php?tid=1830))
+and to the two viewers that plot with `tet`,
+[tet-line](https://github.com/lukaszgryglicki/tet-line) and
+[rust-opengl-complex-drawer](https://github.com/lukaszgryglicki/rust-opengl-complex-drawer).
 
 The page needs no JavaScript. Its form is sent to the server as it is
 (`GET /?format=html&prec=20&func=tet&numbers=2&base=2&height=0.5`), and the
@@ -209,6 +214,8 @@ request started the calculation) or `WAIT` (an earlier one had),
 `Cache-Control: no-store` and `Access-Control-Allow-Origin: *`. The other
 paths: `/help` is the usage text of `tet`, `/stats` the counters and limits
 of the server as JSON, `/status` the same as text, `/healthz` answers `ok`.
+`/cache` lists what the cache holds, for the machine of the server alone
+([The cache](#the-cache)).
 
 ## Calculations that take longer
 
@@ -255,8 +262,36 @@ once (`"cached":true`, `X-Cache: HIT`). Kept are results, the refusals of
 that the time limit stopped; a busy server or a failure is not kept. `ate`
 and `slog`, and `ssrt` and `sroot`, share their entries, and so do the API
 and the page; arguments are compared as they were written, so `2` and `2.0`
-are two entries. The cache holds at most `TET_WEB_CACHE_MB`; beyond that the
-entries used longest ago are dropped.
+are two entries. The cache holds at most `TET_WEB_CACHE_MB` (1024 MiB
+unless set): that much memory is not set aside, it is used as the results
+come, and beyond it the entries used longest ago are dropped.
+
+`GET /cache` lists the entries, one a line: the function, the precision and
+the three numbers of the function in the order base, height, value, of
+which two are as they were asked for and the third is the result. A
+complex result of two complex numbers is one number (`1.17+6.03e-1i`); of
+four real numbers the result has its two parts as well (`value_re`,
+`value_im`). A word that a shell would not take as it is stands in quotes.
+The kept entries come first, from the one used longest ago to the one used
+last, then the calculations that run:
+
+```console
+$ curl -s http://127.0.0.1:8080/cache
+f=ate prec=20 base=2 height=4.0000000000000000000 value=65536
+f=tet prec=20 base=1.5+0.5i height=1+0.7i value=1.1766384980936338172+6.0310294707303037947e-1i
+f=tet prec=20 base_re=1.5 base_im=0.5 height_re=1 height_im=0.7 value_re=1.1766384980936338172 value_im=6.0310294707303037947e-1
+f=ssrt prec=20 base=2.0000000000000000000 height=3 value=16
+f=tet prec=20 base=x height=0.5 error='invalid number "x": unknown name x (an input has no variables; --help lists the constants)'
+f=tet prec=15 base=0.2+0.4i height=2.5-i value=2.01498533063010-9.63361309384064e-1i
+f=tet prec=300 base=2 height=0.51 running=147s
+```
+
+That is what everybody asked for, so the server shows it only to a request
+that comes from its own machine and that no proxy passed on: a request
+with a header by which a proxy names its client (`X-Forwarded-For` and its
+kin, `Forwarded`, `Via`, `X-Real-IP`) gets the 404 of an address where
+nothing is. Caddy sets such headers on everything that it passes on; a
+proxy that does not must not pass `/cache` on.
 
 ## Settings
 
@@ -267,7 +302,7 @@ when it starts:
 |---|---|---|
 | `TET_WEB_LISTEN` | `127.0.0.1:8080` | address to listen on |
 | `TET_WEB_TET` | `tet` | the `tet` program: a path, or a name on `PATH` |
-| `TET_WEB_CACHE_MB` | `64` | memory for kept results |
+| `TET_WEB_CACHE_MB` | `1024` | the most memory for kept results, in MiB |
 | `TET_WEB_REVISION` | none | text that the page and `/stats` show as the version |
 | `TET_WEB_CONFIG` | none | the settings file |
 
@@ -288,8 +323,11 @@ cannot be read as settings changes nothing, and the log says why.
 | `TET_WEB_NICE` | that of the server | niceness of each `tet`, up to 20 |
 
 A time is a number of seconds, or of minutes, hours or days: `90`, `90m`,
-`3h`, `2d`. [freebsd/tet-web.conf](freebsd/tet-web.conf) is the file that is
-installed: it sets three hours, two minutes, 512 MiB and niceness 10.
+`3h`, `2d`. [freebsd/tet-web.conf](freebsd/tet-web.conf) is the file that a
+first installation puts on the machine: it sets six hours, five minutes,
+two threads and 1024 MiB for each `tet`, and niceness 10. What the server
+reads is the file on its machine, not the one in a checkout
+([The other limits](#the-other-limits)).
 
 The server speaks plain HTTP/1.1, one request per connection, and is meant
 to listen on a local address behind a reverse proxy that faces the network
@@ -378,7 +416,8 @@ to `https://name` for the name and for the bare address, and the replies
 carry `Strict-Transport-Security`. The name has to point to the machine
 before that, because the certificate authority checks it there. The contact
 address for the certificate authority is `ACME_EMAIL`, or the first line of
-`web/email.secret` (a file that is not in the repository); it is optional.
+`web/acme-email.secret` (a file that is not in the repository); it is
+optional, and without it the address that is installed stays.
 With `SITE=ip` Caddy serves plain HTTP on every address
 (`freebsd/Caddyfile.ip`).
 
@@ -397,6 +436,7 @@ runs the same over ssh (on `lgryglicki@ovh`, the machine of
 | what runs, counters, limits, certificate | `tet-webctl status` |
 | the longest time of a calculation | `tet-webctl timeout` shows it, `tet-webctl timeout 6h` sets it |
 | what was asked for and what was returned | `tet-webctl log`, `tet-webctl log 200`, `tet-webctl log -f` |
+| what the cache holds | `tet-webctl cache` |
 | install a new version | `web/deploy.sh` in the checkout |
 
 ### Start, stop, restart, status
@@ -470,11 +510,12 @@ those requests end.
 
 ### The longest time of a calculation
 
-Three hours as installed. `tet-webctl timeout` shows it; with a time it
-sets it: a number of seconds, or of minutes, hours or days (`90m`, `6h`,
-`2d`). Nothing is restarted and nothing is lost: the server takes the new
-limit within a few seconds, also for the calculations that run. Raise it to
-let one finish; lower it, and the ones that are beyond it stop.
+Six hours as installed (three without a settings file). `tet-webctl
+timeout` shows it; with a time it sets it: a number of seconds, or of
+minutes, hours or days (`90m`, `6h`, `2d`). Nothing is restarted and nothing
+is lost: the server takes the new limit within a few seconds, also for the
+calculations that run. Raise it to let one finish; lower it, and the ones
+that are beyond it stop.
 
 ```console
 $ web/ctl.sh timeout
@@ -495,6 +536,45 @@ time (`TET_WEB_JOBS`), and the threads, the memory and the niceness of one
 `tet` ([Settings](#settings)). After a change, `tet-webctl status` shows
 the limits in use, and `tet-webctl log 1` the line `SETTINGS`, or
 `SETTINGS not changed:` with the reason when the file has a mistake.
+
+### The other limits
+
+The server reads `/usr/local/etc/tet-web.conf` on its machine. The file
+`web/freebsd/tet-web.conf` of the repository is only what a first
+installation puts there: a change of it in a checkout changes nothing on
+the machine, and `web/deploy.sh` leaves the file of the machine alone, so
+that what was set there survives an update. To change a limit, edit the
+file on the machine, or copy one there; nothing is restarted:
+
+```console
+# vi /usr/local/etc/tet-web.conf       # on the machine
+$ scp web/freebsd/tet-web.conf lgryglicki@ovh:tet-web.conf.new          # or from a checkout
+$ ssh lgryglicki@ovh 'sudo install -m 0644 -o root -g wheel tet-web.conf.new /usr/local/etc/tet-web.conf && rm tet-web.conf.new'
+$ web/ctl.sh log 1
+2026-11-14T16:24:30Z - SETTINGS a request waits 5 minutes, a calculation may take 6 hours, 4 at a time, threads of one tet: 2, its memory: 1024 MiB, its niceness: 10
+```
+
+### The cache
+
+```console
+# tet-webctl cache                     # every entry, one a line; then the calculations that run
+# tet-webctl cache | wc -l             # how many
+# tet-webctl cache | grep '^f=ate '    # the super-logarithms
+# tet-webctl cache | cut -c 1-200      # long results cut short
+```
+
+```console
+$ web/ctl.sh cache
+f=ate prec=20 base=2 height=4.0000000000000000000 value=65536
+f=ssrt prec=20 base=2.0000000000000000000 height=3 value=16
+f=tet prec=300 base=2 height=0.51 running=147s
+```
+
+[The cache](#the-cache) explains the lines. An empty cache prints nothing
+but `the cache is empty`. The cache is in the memory of the server only: a
+restart empties it, and nothing else does. It may grow to 1024 MiB
+(`tet_web_cache_mb` in `/etc/rc.conf`, read when the server starts);
+`tet-webctl status` has its size in the line `cache: kept ...`.
 
 ### The log
 
@@ -605,7 +685,8 @@ a week, so this is nothing to repeat.
 `hyp4.duckdns.org` is a name of DuckDNS with the two addresses of the
 machine. They do not change by themselves. If the machine ever gets other
 addresses, the name is set to them with the token of the DuckDNS account
-(`web/token.secret` in the checkout, a file that is not in the repository):
+(`web/token.secret` in the checkout, a file that is not in the repository;
+`web/email.secret` next to it is the address of that account):
 
 ```console
 $ curl "https://www.duckdns.org/update?domains=hyp4&token=$(cat web/token.secret)&ip=57.129.175.142&ipv6=2001:41d0:801:2000::1082&verbose=true"
@@ -637,7 +718,7 @@ ends the calculations that run and empties the cache.
 | the site does not answer | `tet-webctl status` says which of the two services is down; `tet-webctl start` |
 | `all slots are busy calculating; try again later` | `tet-webctl status` lists the calculations that run and their times; wait, end one with `kill` and its PID, or raise `TET_WEB_JOBS` in the settings file |
 | `no result within 3 hours, the limit of this server` | `tet-webctl timeout 12h`, then ask the same again: it is calculated again |
-| `tet was stopped by the system (signal: ...): it needed more memory than this server allows, or it was ended by hand` | if nobody ended it: raise `TET_WEB_MEMORY_MB` in the settings file (512 as installed) |
+| `tet was stopped by the system (signal: ...): it needed more memory than this server allows, or it was ended by hand` | if nobody ended it: raise `TET_WEB_MEMORY_MB` in the settings file (1024 as installed) |
 | a setting that was changed is not in use | `tet-webctl log 1`: `SETTINGS not changed:` and the reason |
 | the browser warns about the certificate | `tet-webctl status`, then `/var/log/caddy/caddy.log`; the ports 80 and 443 have to be reachable from outside |
 | a calculation should stop now | `kill` and its PID from `tet-webctl status` |

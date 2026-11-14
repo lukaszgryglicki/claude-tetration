@@ -15,6 +15,10 @@
 #                              shows it, or sets it to TIME (seconds, or
 #                              90m, 3h, 2d) in the settings file, which the
 #                              server reads again without a restart
+#   tet-webctl cache           every entry of the cache, one a line, as
+#                              f=ate prec=20 base=2 height=4.0000000000000000000 value=65536
+#                              from the one used longest ago to the one used
+#                              last, then the calculations that run
 #
 # It works as root and calls sudo for that. On a machine without the
 # service, as in a checkout of the repository, it runs the installed script
@@ -27,14 +31,14 @@
 set -eu
 
 usage() {
-    echo "usage: $0 start|up|stop|down|restart|status|log [N|-f]|timeout [TIME] [user@host]" >&2
+    echo "usage: $0 start|up|stop|down|restart|status|log [N|-f]|timeout [TIME]|cache [user@host]" >&2
     exit 2
 }
 [ $# -ge 1 ] || usage
 case "$1" in
     start | up) action=start ;;
     stop | down) action=stop ;;
-    restart | status | log | timeout) action=$1 ;;
+    restart | status | log | timeout | cache) action=$1 ;;
     *) usage ;;
 esac
 shift
@@ -199,6 +203,18 @@ limit() {
     }
 }
 
+# The entries of the cache. The server lists them for a request from this
+# machine only, and for none that the proxy passes on.
+entries() {
+    answers "http://$listen" || {
+        echo "tet-web does not answer on $listen" >&2
+        return 1
+    }
+    # grep passes every line on and tells whether there was one.
+    fetch -q -T 60 -o - "http://$listen/cache" 2> /dev/null | grep '' ||
+        echo "the cache is empty" >&2
+}
+
 case "$action" in
     start)
         start
@@ -217,4 +233,5 @@ case "$action" in
     status) status ;;
     log) calculations ;;
     timeout) limit ;;
+    cache) entries ;;
 esac

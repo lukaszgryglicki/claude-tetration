@@ -1144,10 +1144,19 @@ fn eval_schroder_with_conditioning(
     }
     // The integer tower checks every branch of a real height above -1, the
     // final value included (see `Anchor`): the distances of neighbouring
-    // samples are then judged only once it has refuted a chain. Other heights
-    // depend on that judgement.
-    let mut judged = anchor.as_ref().is_none_or(|anchor| anchor.ceiling < 0);
+    // samples are then judged only once it has refuted a chain. At the other
+    // heights every branch is proved (see `Proof`).
+    let mut check = if anchor.as_ref().is_none_or(|anchor| anchor.ceiling < 0) {
+        Check::Proved
+    } else {
+        Check::Tower
+    };
     loop {
+        let proof = if traced && check == Check::Proved {
+            Some(Proof::new(&offsets, state)?)
+        } else {
+            None
+        };
         let (mut f, mut log_amplification) = start.clone();
         let mut speed = start_speed.clone();
         let mut step = Integer::new();
@@ -1209,13 +1218,31 @@ fn eval_schroder_with_conditioning(
             if trail.is_some() {
                 // The samples have to make the jump as well. Where one of
                 // them cannot, shorter jumps are tried, and after the
-                // shortest the chain goes on in single steps.
+                // shortest the chain goes on in single steps. In a proved
+                // chain a jump is taken only where its logarithms are
+                // proved, for the chain point as for every sample.
+                let level = match &proof {
+                    Some(proof) => {
+                        let above = Complex::with_val_64(prec, h + &shifts) - &step + 2u32;
+                        let depth = Complex::with_val_64(prec, above * &state.ln_lambda);
+                        Some((proof, depth.real().clone().exp()))
+                    }
+                    None => None,
+                };
                 let mut refused = false;
                 while let Some(candidate) = &jump {
                     let mut followed = trail.clone();
-                    let made = followed.as_mut().is_some_and(|samples| {
-                        samples.descend(&candidate.steps, &mut jumps, state).is_ok()
+                    let own = level.as_ref().is_none_or(|(proof, modulus)| {
+                        let apart = cnum::abs(&Complex::with_val_64(prec, &f - &state.l), prec);
+                        proof.settled(&apart, modulus, &candidate.steps)
                     });
+                    let made = own
+                        && followed.as_mut().is_some_and(|samples| {
+                            let proved = level.as_ref().map(|(proof, modulus)| (*proof, modulus));
+                            samples
+                                .descend(&candidate.steps, &mut jumps, state, proved)
+                                .is_ok()
+                        });
                     if made {
                         trail = followed;
                         break;
@@ -1263,17 +1290,19 @@ fn eval_schroder_with_conditioning(
                 // real shifts of the height fixes the branch. Outside, the
                 // logarithms are the principal ones.
                 let beyond = Complex::with_val_64(prec, h + &shifts) - &step + 1u32;
-                let inside = Complex::with_val_64(prec, beyond * &state.ln_lambda)
-                    .real()
-                    .is_sign_negative();
+                let depth = Complex::with_val_64(prec, beyond * &state.ln_lambda);
+                let depth = depth.real();
+                let inside = depth.is_sign_negative();
                 let continuous = traced && inside;
                 if continuous {
                     let left = (shifts.clone() - &step)
                         .to_integer()
                         .ok_or("Schröder height shift is not finite")?;
                     if trail.is_none() {
+                        // Only at the top of a chain without Taylor jumps:
+                        // there is nothing to descend.
                         let mut built = Trail::new(&offsets, &top)?;
-                        built.descend(&step, &mut jumps, state)?;
+                        built.descend(&step, &mut jumps, state, None)?;
                         if let Some(anchor) = &mut anchor {
                             if anchor.holds(&built, &left, state)? == Some(false) {
                                 return Err(Anchor::SERIES.into());
@@ -1282,12 +1311,23 @@ fn eval_schroder_with_conditioning(
                         trail = Some(built);
                     }
                     if let Some(samples) = &mut trail {
-                        samples.step(&f, &speed, &mut next, &state.ln_b, judged, &mut missing)?;
+                        let rule = match (&proof, check) {
+                            (Some(proof), _) => Rule::Proved { proof, depth },
+                            (None, Check::Judged) => Rule::Judged,
+                            (None, _) => Rule::Tower,
+                        };
+                        samples.step(&f, &speed, &mut next, &state.ln_b, &rule, &mut missing)?;
+                        if missing.len() > MISSING_KEPT {
+                            missing.sort_by(|a, b| a.partial_cmp(b).expect("finite trail offsets"));
+                            missing.dedup();
+                        }
                         if let Some(anchor) = &mut anchor {
                             let left = Integer::from(&left - 1u32);
                             if anchor.holds(samples, &left, state)? == Some(false) {
                                 anchor.refute(&step, samples, &mut missing)?;
-                                judged = true;
+                                if check == Check::Tower {
+                                    check = Check::Judged;
+                                }
                                 break;
                             }
                         }
@@ -1345,8 +1385,8 @@ fn eval_schroder_with_conditioning(
         if missing.is_empty() {
             // One level further down, the samples from the anchor up are
             // continued from the final value itself: the tower value there
-            // confirms its branch. Where that cannot be checked, the samples
-            // have to be judged.
+            // confirms its branch. Where that cannot be checked, the
+            // branches have to be proved.
             let verdict = match (&mut anchor, &trail) {
                 (Some(anchor), Some(samples)) if anchor.ceiling >= 0 => {
                     let verdict = anchor.confirms(samples, &f, state)?;
@@ -1357,13 +1397,14 @@ fn eval_schroder_with_conditioning(
                 }
                 _ => None,
             };
-            if verdict != Some(true) && !judged {
-                judged = true;
-                if missing.is_empty() {
+            match (verdict, check) {
+                (Some(false), Check::Tower) => check = Check::Judged,
+                (None, Check::Tower) => {
+                    check = Check::Proved;
                     continue;
                 }
+                _ => {}
             }
-            judged |= verdict == Some(false);
         }
         if !missing.is_empty() {
             // Some neighbours were too far apart to fix a branch: add samples
@@ -1544,6 +1585,322 @@ impl Anchor {
 /// A value of the tetration and, where known, `|dF/ds|` along real shifts `s`.
 type Sample = (Complex, Option<Float>);
 
+/// What makes sure of the branches of a traced chain.
+#[derive(Clone, Copy, PartialEq)]
+enum Check {
+    /// The integer tower, at every level and below the result (`Anchor`).
+    Tower,
+    /// The tower and, since it has refuted a chain, judged distances of
+    /// neighbouring samples.
+    Judged,
+    /// A proof of every branch (`Proof`).
+    Proved,
+}
+
+/// How `Trail::step` treats the distances of neighbouring samples.
+enum Rule<'a> {
+    /// Not at all.
+    Tower,
+    /// By the turn of the argument and the relative change of the value.
+    Judged,
+    /// By the growth theorem; `depth` is `Re((p + 2) ln lambda)` at the
+    /// height `p` that the logarithm of the chain point belongs to.
+    Proved { proof: &'a Proof, depth: &'a Float },
+}
+
+/// More offsets than this are sorted and freed of repetitions while a chain
+/// goes on collecting them.
+const MISSING_KEPT: usize = 1 << 16;
+
+/// The proof that a logarithm lies on the branch of the tetration, for the
+/// samples of a `Trail` at heights where `|lambda^(h + 2)| < 1`.
+///
+/// There `F(h) = L + psi(s1 lambda^h)`, and `psi` is one-to-one on the disk
+/// `|t| < R = |s1 / lambda^2|` (see `LongSeries`). Its growth theorem
+/// (Koebe), carried to a point `t0` of the disk by the Mobius map of the
+/// disk that takes 0 there, bounds how far it moves between two points:
+///
+/// `|psi(t1) - psi(t0)| <= |psi'(t0)| (R^2 - |t0|^2) / R * z / (1 - z)^2`,
+/// `z = R |t1 - t0| / |R^2 - conj(t0) t1|`.
+///
+/// For the heights `p` and `q = p + g` of two samples, with
+/// `m = |lambda^(p + 2)|` and `E = lambda^g - 1`, this is
+///
+/// `|F(q) - F(p)| <= |F'(p)| (1 - m^2) |E| / (|ln lambda| |x| (1 - z)^2)`,
+/// `x = 1 - m^2 (1 + E)`, `z = m |E| / |x|`,
+///
+/// and the same from `q` with `|F'(q)|`, `1 - |lambda^(q + 2)|^2` and one
+/// more factor `1 / |1 + E|`. Neither `s1` nor a value of the series enters
+/// but through `|F'|`.
+///
+/// The logarithm of `F(p + 1)` is `F(p)` or lies whole branches from it,
+/// `2 pi / |ln b|` apart. So once the bound is smaller than the distance of
+/// the neighbour `F(q)` from the second nearest branch, the nearest branch
+/// is the one of the tetration: that is the proof of `pair`.
+///
+/// A logarithm that is taken without a neighbour, by a Taylor jump or as
+/// the principal one next to the fixed point, is proved by `settled`.
+struct Proof {
+    offsets: Vec<Float>,
+    /// `|ln lambda|`.
+    scale: Float,
+    /// `-ln |lambda|`.
+    decay: Float,
+    /// The distance of the fixed point from the cut of the principal
+    /// logarithm.
+    reach: Float,
+    /// `|lambda|^(2u)` for every offset `u`, and one minus that.
+    powers: Vec<Float>,
+    fades: Vec<Float>,
+    /// `E = lambda^g - 1`, `|E|` and `|1 + E|` for the distance `g` of every
+    /// offset from the one below it, the first one from 0.
+    links: Vec<(Complex, Float, Float)>,
+}
+
+impl Proof {
+    fn new(offsets: &[Float], state: &SchroderState) -> Result<Proof, String> {
+        let prec = state.prec;
+        let decay = -Float::with_val_64(prec, state.lam_abs.ln_ref());
+        let scale = cnum::abs(&state.ln_lambda, prec);
+        if !decay.is_finite() || decay <= 0 || !scale.is_finite() {
+            return Err("Schröder: a branch proof needs an attracting multiplier".into());
+        }
+        let mut below = Float::new_64(prec);
+        let mut powers = Vec::with_capacity(offsets.len());
+        let mut fades = Vec::with_capacity(offsets.len());
+        let mut links = Vec::with_capacity(offsets.len());
+        for offset in offsets {
+            let exponent = -Float::with_val_64(prec, offset * &decay) * 2u32;
+            powers.push(exponent.clone().exp());
+            fades.push(-exponent.exp_m1());
+            // `exp(z) - 1` without the cancellation of a small `z`.
+            let gap = Float::with_val_64(prec, offset - &below);
+            let z = Complex::with_val_64(prec, &state.ln_lambda * &gap);
+            let (sine, cosine) = z.imag().clone().sin_cos(Float::new_64(prec));
+            let half = Float::with_val_64(prec, z.imag() / 2u32).sin();
+            let grown = z.real().clone().exp();
+            let real = z.real().clone().exp_m1() * &cosine - half.square() * 2u32;
+            let link = Complex::with_val_64(prec, (real, Float::with_val_64(prec, &grown * sine)));
+            links.push((link.clone(), cnum::abs(&link, prec), grown));
+            below = offset.clone();
+        }
+        let reach = if state.l.real().is_sign_negative() {
+            Float::with_val_64(prec, state.l.imag().abs_ref())
+        } else {
+            cnum::abs(&state.l, prec)
+        };
+        Ok(Proof {
+            offsets: offsets.to_vec(),
+            scale,
+            decay,
+            reach,
+            powers,
+            fades,
+            links,
+        })
+    }
+
+    /// `1 - M^2` and `M^2` for `M = |lambda^(p + 2)|` at a height `p` with
+    /// `depth = Re((p + 2) ln lambda)`.
+    fn level(&self, depth: &Float) -> (Float, Float) {
+        let twice = Float::with_val_64(depth.prec_64(), depth * 2u32);
+        (-twice.clone().exp_m1(), twice.exp())
+    }
+
+    /// The upper bound of `|ln b| |F(q) - F(p)|` for the sample `far` at
+    /// the height `q` and the one below it at `p` (the chain point below
+    /// the first one), from whichever of the two has the smaller bound.
+    /// `rates` are `|ln b| |F'|` at `p` and at `q`. `None` where there is no
+    /// bound.
+    fn bound(
+        &self,
+        level: &(Float, Float),
+        far: usize,
+        rates: &(Option<Float>, Option<Float>),
+    ) -> Option<Float> {
+        let prec = self.scale.prec_64();
+        let (clear, square) = level;
+        // `1 - m^2` and `m^2` at `p` and at `q`.
+        let at = |index: usize| {
+            (
+                Float::with_val_64(prec, clear + Float::with_val_64(prec, square * &self.fades[index])),
+                Float::with_val_64(prec, square * &self.powers[index]),
+            )
+        };
+        let near = match far.checked_sub(1) {
+            Some(index) => at(index),
+            None => (clear.clone(), square.clone()),
+        };
+        let (link, size, ratio) = &self.links[far];
+        let mut x = -Complex::with_val_64(prec, link * &near.1);
+        x += &near.0;
+        let x = cnum::abs(&x, prec);
+        let z = Float::with_val_64(prec, near.1.sqrt_ref()) * size / &x;
+        if !z.is_finite() || z >= 1 {
+            return None;
+        }
+        let room = Float::with_val_64(prec, 1u32 - &z).square();
+        let common = Float::with_val_64(prec, size / (x * room)) / &self.scale;
+        let from_near = rates
+            .0
+            .as_ref()
+            .map(|rate| Float::with_val_64(prec, rate * &near.0) * &common);
+        let from_far = rates
+            .1
+            .as_ref()
+            .map(|rate| Float::with_val_64(prec, rate * at(far).0) * &common / ratio);
+        match (from_near, from_far) {
+            (Some(a), Some(b)) if a.is_finite() && b.is_finite() => Some(a.min(&b)),
+            (Some(a), _) if a.is_finite() => Some(a),
+            (_, Some(b)) if b.is_finite() => Some(b),
+            _ => None,
+        }
+    }
+
+    /// One logarithm between the sample `far` and the one below it, whose
+    /// nearest branch left `turn` across the branches and `along` them, both
+    /// in units of their distance (see `continue_branch`). Proved, or the
+    /// offsets that the pair lacks are added to `missing`: next to an end
+    /// where the tetration moves fast or the boundary `|lambda^(h + 2)| = 1`
+    /// is near at distances doubling from what that end allows, between the
+    /// two at the distance that the easier end allows, and in the middle.
+    /// Those offsets only set how densely the curve is sampled: each of the
+    /// pairs that they make is proved in its turn.
+    fn pair(
+        &self,
+        level: &(Float, Float),
+        far: usize,
+        rates: &(Option<Float>, Option<Float>),
+        apart: (&Float, &Float),
+        missing: &mut Vec<Float>,
+    ) -> Result<(), String> {
+        let prec = self.scale.prec_64();
+        let (turn, along) = apart;
+        let bound = self.bound(level, far, rates);
+        if let Some(bound) = &bound {
+            // The second nearest branch, in the units of `bound`.
+            let other = Float::with_val_64(prec, 1u32 - turn).square();
+            let other = (other + Float::with_val_64(prec, along.square_ref())).sqrt();
+            let other = other * Float::with_val_64(prec, Constant::Pi) * 2u32;
+            // One sixteenth for the rounding of both sides.
+            if Float::with_val_64(prec, bound * 17u32) < other * 16u32 {
+                return Ok(());
+            }
+        }
+        if rates.0.is_none() && rates.1.is_none() {
+            return Err(
+                "Schröder: a logarithm branch cannot be proved without the derivative of the series"
+                    .into(),
+            );
+        }
+        let zero = Float::new_64(prec);
+        let below = far.checked_sub(1).map_or(&zero, |index| &self.offsets[index]);
+        let above = &self.offsets[far];
+        let gap = Float::with_val_64(prec, above - below);
+        let shift = usize::try_from(prec / 2).map_err(|_| "precision overflow")?;
+        if gap < (Float::with_val_64(prec, 1) >> shift) {
+            return Err(
+                "Schröder: the logarithm branches of this height cannot be fixed by continuity"
+                    .into(),
+            );
+        }
+        let (clear, square) = level;
+        // What an end allows by itself, as a power of two: the distance at
+        // which its bound reaches three quarters of `pi`, less than any
+        // second nearest branch is away, with the boundary taken for a
+        // straight line. There `z = g / sqrt(g^2 + w^2)` for the distance
+        // `g` and `w = (1 - m^2) / (m |ln lambda|)`, and the bound is
+        // `rate w z / (1 - z)^2`.
+        let allowed = |index: Option<usize>, rate: &Option<Float>| -> Option<Float> {
+            let rate = rate.as_ref().filter(|rate| rate.is_finite() && **rate > 0)?;
+            let (clear, square) = match index {
+                Some(index) => (
+                    Float::with_val_64(
+                        prec,
+                        clear + Float::with_val_64(prec, square * &self.fades[index]),
+                    ),
+                    Float::with_val_64(prec, square * &self.powers[index]),
+                ),
+                None => (clear.clone(), square.clone()),
+            };
+            let width = clear / (square.sqrt() * &self.scale);
+            let target = Float::with_val_64(prec, Constant::Pi) * 3u32
+                / (Float::with_val_64(prec, rate * &width) * 4u32);
+            // `z / (1 - z)^2 = target`, without the cancellation at either end.
+            let root = (Float::with_val_64(prec, &target * 4u32) + 1u32).sqrt();
+            let sum = Float::with_val_64(prec, &target * 2u32) + 1u32 + &root;
+            let z = Float::with_val_64(prec, &target * 2u32) / &sum;
+            let short = (root + 1u32) / sum;
+            let reach = width * &z / (short * (z + 1u32)).sqrt();
+            if !reach.is_finite() || reach <= 0 {
+                return None;
+            }
+            Some(Float::with_val_64(prec, 2).pow(reach.log2().floor()))
+        };
+        let near = allowed(far.checked_sub(1), &rates.0);
+        let distant = allowed(Some(far), &rates.1);
+        for (from, reach, forward) in [(below, &near, true), (above, &distant, false)] {
+            let Some(reach) = reach else { continue };
+            let mut reach = reach.clone();
+            while reach.is_normal() && Float::with_val_64(prec, &reach * 2u32) <= gap {
+                missing.push(if forward {
+                    Float::with_val_64(prec, from + &reach)
+                } else {
+                    Float::with_val_64(prec, from - &reach)
+                });
+                reach *= 2u32;
+            }
+        }
+        // Between the ladders, the grid of the end that allows more, no
+        // finer than 64 parts of the gap.
+        let fill = match (near, distant) {
+            (Some(a), Some(b)) => Some(a.max(&b)),
+            (a, b) => a.or(b),
+        };
+        if let Some(fill) = fill {
+            let fill = fill.max(&Float::with_val_64(prec, &gap / 64u32));
+            if fill.is_normal() && Float::with_val_64(prec, &fill * 2u32) <= gap {
+                let mut point = Float::with_val_64(prec, below / &fill).floor() * &fill + &fill;
+                while point < *above {
+                    if point > *below {
+                        missing.push(point.clone());
+                    }
+                    point += &fill;
+                }
+            }
+        }
+        missing.push(Float::with_val_64(prec, below + gap / 2u32));
+        Ok(())
+    }
+
+    /// Whether `steps` logarithms next to the fixed point, as a Taylor jump
+    /// takes them and as principal logarithms are, are those of the
+    /// tetration, for a point of it `apart` from the fixed point at a height
+    /// `p` with `modulus = |lambda^(p + 2)|`.
+    ///
+    /// They are, where the curve `F(p - j + s)`, `s >= 0`, stays for
+    /// `j < steps` inside the disk around the fixed point that the cut does
+    /// not reach: the logarithm continues along that curve, it is the
+    /// principal one at its far end, and inside that disk the principal one
+    /// is continuous. The coordinates of the curve are no larger than
+    /// `|t| / |lambda|^(steps - 1)`, `t` the coordinate of the point, and the
+    /// growth theorem bounds `|psi|` there by
+    /// `apart (1 + m)^2 g / (1 - m g)^2`, `m = modulus`,
+    /// `g = |lambda|^(1 - steps)`.
+    fn settled(&self, apart: &Float, modulus: &Float, steps: &Integer) -> bool {
+        let prec = self.scale.prec_64();
+        let before = Integer::from(steps - 1u32);
+        let growth = Float::with_val_64(prec, &self.decay * &before).exp();
+        let outer = Float::with_val_64(prec, modulus * &growth);
+        if !outer.is_finite() || outer >= 1 {
+            return false;
+        }
+        let bound = Float::with_val_64(prec, 1u32 + modulus).square() * apart * growth
+            / Float::with_val_64(prec, 1u32 - outer).square();
+        bound.is_finite() && bound * 17u32 < Float::with_val_64(prec, &self.reach * 16u32)
+    }
+}
+
 /// Samples of the curve `s -> F(h + s)`, `s` real, over one unit of height
 /// above the current point of a logarithm chain: offsets `0 < u <= 1`, the
 /// values there and, where known, the speeds `|dF/ds|`.
@@ -1610,11 +1967,15 @@ impl Trail {
     /// Take every sample `steps` logarithms down without its neighbours: by
     /// Taylor jumps, or by principal logarithms where the sample is closer to
     /// the fixed point than half the distance of the latter from the cut.
+    /// With `proved` (a proof and `|lambda^(p + 2)|` at the height `p` of the
+    /// chain point above these samples) each of those logarithms has to be
+    /// proved instead (`Proof::settled`).
     fn descend(
         &mut self,
         steps: &Integer,
         jumps: &mut Option<OrbitJumps>,
         state: &SchroderState,
+        proved: Option<(&Proof, &Float)>,
     ) -> Result<(), String> {
         let prec = state.prec;
         let reach = if state.l.real().is_sign_negative() {
@@ -1623,27 +1984,63 @@ impl Trail {
             cnum::abs(&state.l, prec)
         };
         let ln_b_size = cnum::abs(&state.ln_b, prec);
-        for (value, speed) in self.values.iter_mut().zip(self.speeds.iter_mut()) {
+        let unsettled =
+            || "Schröder: a logarithm branch cannot be fixed by continuity after Taylor jumps";
+        for (index, (value, speed)) in self
+            .values
+            .iter_mut()
+            .zip(self.speeds.iter_mut())
+            .enumerate()
+        {
+            // `|lambda^(p + 2)|` at the height of the sample, `1 / |lambda|`
+            // times as much after every logarithm.
+            let mut modulus = proved.map(|(proof, chain)| {
+                Float::with_val_64(prec, proof.powers[index].sqrt_ref()) * chain
+            });
             let mut left = steps.clone();
             while left > 0 {
-                let jump = match jumps {
-                    Some(cache) => cache.advance(value, Some(&Float::with_val_64(prec, &left)))?,
-                    None => None,
+                let distance = cnum::abs(&Complex::with_val_64(prec, &*value - &state.l), prec);
+                let mut limit = left.clone();
+                let jump = loop {
+                    let found = match jumps {
+                        Some(cache) => {
+                            cache.advance(value, Some(&Float::with_val_64(prec, &limit)))?
+                        }
+                        None => None,
+                    };
+                    match (found, proved, &modulus) {
+                        (Some(jump), Some((proof, _)), Some(modulus))
+                            if !proof.settled(&distance, modulus, &jump.steps) =>
+                        {
+                            // A shorter jump stays closer to the fixed point.
+                            limit = Integer::from(&jump.steps >> 1u32);
+                        }
+                        (found, _, _) => break found,
+                    }
                 };
                 if let Some(jump) = jump {
                     if let Some(speed) = speed {
                         *speed *= &jump.derivative;
                     }
+                    if let (Some((proof, _)), Some(modulus)) = (proved, &mut modulus) {
+                        *modulus *= Float::with_val_64(prec, &proof.decay * &jump.steps).exp();
+                    }
                     *value = jump.value;
                     left -= jump.steps;
                     continue;
                 }
-                let distance = cnum::abs(&Complex::with_val_64(prec, &*value - &state.l), prec);
-                if distance * 2u32 > reach {
-                    return Err(
-                        "Schröder: a logarithm branch cannot be fixed by continuity after Taylor jumps"
-                            .into(),
-                    );
+                match (proved, &mut modulus) {
+                    (Some((proof, _)), Some(modulus)) => {
+                        if !proof.settled(&distance, modulus, &Integer::from(1)) {
+                            return Err(unsettled().into());
+                        }
+                        *modulus *= proof.decay.clone().exp();
+                    }
+                    _ => {
+                        if distance * 2u32 > reach {
+                            return Err(unsettled().into());
+                        }
+                    }
                 }
                 if let Some(speed) = speed {
                     *speed /= cnum::abs(value, prec) * &ln_b_size;
@@ -1697,19 +2094,25 @@ impl Trail {
 
     /// One logarithm of the chain point `point` (speed `speed`), whose
     /// principal value divided by `ln b` is `next`: moves `next` and the
-    /// samples to their continuous branches. With `judged`, offsets between
-    /// neighbours that are too far apart to decide are added to `missing`.
+    /// samples to their continuous branches. Under the rules `Judged` and
+    /// `Proved`, offsets between neighbours that are too far apart to decide
+    /// are added to `missing`.
     fn step(
         &mut self,
         point: &Complex,
         speed: &Option<Float>,
         next: &mut Complex,
         ln_b: &Complex,
-        judged: bool,
+        rule: &Rule,
         missing: &mut Vec<Float>,
     ) -> Result<(), String> {
         let prec = next.prec_64().0;
         let ln_b_size = cnum::abs(ln_b, prec);
+        let judged = matches!(rule, Rule::Judged);
+        let proved = match rule {
+            Rule::Proved { proof, depth } => Some((*proof, proof.level(depth))),
+            _ => None,
+        };
         let rate = |value: &Complex, speed: &Option<Float>| {
             speed
                 .as_ref()
@@ -1723,9 +2126,10 @@ impl Trail {
         // both ends. Otherwise samples are added: next to an end where the
         // value changes fast (a zero of the tetration is near) at distances
         // doubling from about 1/(2 rate), and in the middle.
-        let mut judge = |turn: Float,
-                         near: (&Float, Option<Float>),
-                         far: (&Float, Option<Float>)|
+        let judge = |turn: Float,
+                     near: (&Float, Option<Float>),
+                     far: (&Float, Option<Float>),
+                     missing: &mut Vec<Float>|
          -> Result<(), String> {
             let gap = Float::with_val_64(prec, far.0 - near.0);
             let mut ladder = |from: &Float, rate: &Option<Float>, forward: bool| {
@@ -1770,26 +2174,30 @@ impl Trail {
                 return Err("Schröder: logarithm of zero while tracing a branch".into());
             }
             let mut candidate = cnum::ln_complex(&self.values[index], prec) / ln_b;
-            let turn = continue_branch(&mut candidate, &after[index + 1], ln_b, prec)?;
-            judge(
-                turn,
-                (
-                    &self.offsets[index],
-                    rate(&self.values[index], &self.speeds[index]),
-                ),
-                (
-                    &self.offsets[index + 1],
-                    rate(&self.values[index + 1], &self.speeds[index + 1]),
-                ),
-            )?;
+            let (turn, along) = continue_branch(&mut candidate, &after[index + 1], ln_b, prec)?;
+            let rates = (
+                rate(&self.values[index], &self.speeds[index]),
+                rate(&self.values[index + 1], &self.speeds[index + 1]),
+            );
+            match &proved {
+                Some((proof, level)) => {
+                    proof.pair(level, index + 1, &rates, (&turn, &along), missing)?
+                }
+                None => judge(
+                    turn,
+                    (&self.offsets[index], rates.0),
+                    (&self.offsets[index + 1], rates.1),
+                    missing,
+                )?,
+            }
             after[index] = candidate;
         }
-        let turn = continue_branch(next, &after[0], ln_b, prec)?;
-        judge(
-            turn,
-            (&zero, rate(point, speed)),
-            (&self.offsets[0], rate(&self.values[0], &self.speeds[0])),
-        )?;
+        let (turn, along) = continue_branch(next, &after[0], ln_b, prec)?;
+        let rates = (rate(point, speed), rate(&self.values[0], &self.speeds[0]));
+        match &proved {
+            Some((proof, level)) => proof.pair(level, 0, &rates, (&turn, &along), missing)?,
+            None => judge(turn, (&zero, rates.0), (&self.offsets[0], rates.1), missing)?,
+        }
         for index in 0..last {
             if let Some(speed) = &mut self.speeds[index] {
                 *speed /= cnum::abs(&self.values[index], prec) * &ln_b_size;
@@ -1802,14 +2210,16 @@ impl Trail {
 }
 
 /// Move `candidate`, a logarithm divided by `ln b`, to the branch nearest to
-/// `reference`. Returns the turn of the argument between the two points whose
-/// logarithms these are, as a fraction of a full turn.
+/// `reference`. Returns what then separates the two, in units of the
+/// distance `2 pi / |ln b|` of neighbouring branches: across the branches,
+/// which is the turn of the argument between the two points whose logarithms
+/// these are as a fraction of a full turn, and along them.
 fn continue_branch(
     candidate: &mut Complex,
     reference: &Complex,
     ln_b: &Complex,
     prec: u64,
-) -> Result<Float, String> {
+) -> Result<(Float, Float), String> {
     let turn = Complex::with_val_64(prec, (0, Float::with_val_64(prec, Constant::Pi) * 2u32));
     let ratio = Complex::with_val_64(prec, reference - &*candidate) * ln_b / &turn;
     if !cnum::is_finite(&ratio) {
@@ -1817,10 +2227,11 @@ fn continue_branch(
     }
     let branch = ratio.real().clone().round();
     let miss = Float::with_val_64(prec, ratio.real() - &branch).abs();
+    let along = ratio.imag().clone().abs();
     if !branch.is_zero() {
         *candidate += Complex::with_val_64(prec, &turn * &branch) / ln_b;
     }
-    Ok(miss)
+    Ok((miss, along))
 }
 
 /// `steps` further logarithms to a real base of a point whose real part `x`

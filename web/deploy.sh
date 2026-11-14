@@ -11,8 +11,9 @@
 # SITE                 the domain name that points to the machine, or ip;
 #                      without it the installed site stays (ip on a new machine)
 # ACME_EMAIL           contact address for the certificate authority; without
-#                      it the first line of web/email.secret, if that file is
-#                      there (it is not in the repository, and is not copied)
+#                      it the first line of web/acme-email.secret, if that
+#                      file is there (it is not in the repository, and is
+#                      not copied); without both the installed one stays
 # TET_WEB_REMOTE_DIR   where the tree is copied to, in the home there (tet-web/src)
 #
 # It needs ssh access to a user who may run sudo without a password there,
@@ -25,8 +26,8 @@ host=${1:-lgryglicki@ovh}
 site=${SITE:-}
 remote=${TET_WEB_REMOTE_DIR:-tet-web/src}
 email=${ACME_EMAIL:-}
-if [ -z "$email" ] && [ -r web/email.secret ]; then
-    email=$(head -n 1 web/email.secret | tr -d '[:space:]')
+if [ -z "$email" ] && [ -r web/acme-email.secret ]; then
+    email=$(head -n 1 web/acme-email.secret | tr -d '[:space:]')
 fi
 
 # The commit, with a + when the tree has changes that are not committed.

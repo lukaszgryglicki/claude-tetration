@@ -118,6 +118,15 @@ fn cost(key: &str, outcome: &Outcome) -> usize {
     2 * key.len() + texts + 256
 }
 
+/// An entry as a listing shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Listed {
+    /// The outcome of a computation that ended.
+    Kept(Arc<Outcome>),
+    /// A computation under way, and when it was asked for first.
+    Running(Instant),
+}
+
 /// What the cache has for a key.
 pub enum Found {
     /// The outcome of a computation that ended.
@@ -200,6 +209,34 @@ impl Cache {
         counts.entries = state.order.len();
         counts.bytes = state.bytes;
         counts
+    }
+
+    /// Every entry with its key: the kept ones from the one used longest
+    /// ago to the one used last, then the computations under way from the
+    /// one that was asked for first.
+    pub fn listed(&self) -> Vec<(String, Listed)> {
+        let state = self.state();
+        let mut listed = Vec::with_capacity(state.entries.len());
+        for key in state.order.values() {
+            if let Some(Entry::Kept { outcome, .. }) = state.entries.get(key) {
+                listed.push((key.clone(), Listed::Kept(outcome.clone())));
+            }
+        }
+        let mut running: Vec<(String, Instant)> = state
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| match entry {
+                Entry::Running(running) => Some((key.clone(), running.asked)),
+                Entry::Kept { .. } => None,
+            })
+            .collect();
+        running.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        listed.extend(
+            running
+                .into_iter()
+                .map(|(key, asked)| (key, Listed::Running(asked))),
+        );
+        listed
     }
 
     /// What there is for `key`: the kept outcome, the computation under
@@ -389,6 +426,47 @@ mod tests {
             assert_eq!(found, (Some(Arc::new(value("a"))), Source::Miss));
         }
         assert_eq!(tiny.counts().entries, 0);
+    }
+
+    #[test]
+    fn the_listing_has_the_kept_entries_by_their_last_use_and_then_the_running_ones() {
+        let cache = Arc::new(Cache::new(1 << 20));
+        assert_eq!(cache.listed(), []);
+        for key in ["a", "b", "c"] {
+            ask(&cache, key, LONG, move || value(key));
+        }
+        // `a` becomes the one used last; a failure is not kept.
+        ask(&cache, "a", LONG, || value("again"));
+        let failed = || Outcome::Failed {
+            message: "x".into(),
+        };
+        ask(&cache, "failed", LONG, failed);
+        let mut tickets = Vec::new();
+        for key in ["z", "y"] {
+            let Found::New(ticket) = cache.find(key) else {
+                panic!("{key} is new");
+            };
+            tickets.push(ticket);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let listed = cache.listed();
+        let keys: Vec<&str> = listed.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(keys, ["b", "c", "a", "z", "y"]);
+        assert_eq!(listed[2].1, Listed::Kept(Arc::new(value("a"))));
+        let asked = |index: usize| match &listed[index].1 {
+            Listed::Running(asked) => *asked,
+            other => panic!("{other:?}"),
+        };
+        assert!(asked(3) < asked(4));
+        // Listing is no use of an entry: the order and the counters stay.
+        assert_eq!(cache.listed(), listed);
+        assert_eq!(cache.counts().hits, 1);
+        // What ended is listed as kept, in the order of its end.
+        for ticket in tickets {
+            ticket.finish(value("done"));
+        }
+        let keys: Vec<String> = cache.listed().into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, ["b", "c", "a", "z", "y"]);
     }
 
     #[test]

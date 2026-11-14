@@ -196,6 +196,39 @@ impl Job {
         }
         key
     }
+
+    /// The job that `key` made a key from, under the name that the page
+    /// has for its function: the key does not tell `ate` from `slog`.
+    pub fn of_key(key: &str) -> Option<Job> {
+        let mut lines = key.split('\n');
+        let name = lines.next()?;
+        let func = [Func::Tet, Func::Slog, Func::Sroot]
+            .into_iter()
+            .find(|func| format!("{func:?}") == name)?;
+        let prec = lines.next()?.parse().ok()?;
+        let values: Vec<&str> = lines.collect();
+        let [first, second] = func.numbers();
+        let names = match values.len() {
+            2 => vec![first.to_string(), second.to_string()],
+            4 => vec![
+                format!("{first}_re"),
+                format!("{first}_im"),
+                format!("{second}_re"),
+                format!("{second}_im"),
+            ],
+            _ => return None,
+        };
+        let arguments = names
+            .into_iter()
+            .zip(values.iter().map(|value| value.to_string()))
+            .collect();
+        Some(Job {
+            func,
+            spelled: func.title().to_string(),
+            prec,
+            arguments,
+        })
+    }
 }
 
 /// A word as a POSIX shell reads it back.
@@ -419,6 +452,58 @@ pub fn rendered(job: &Job, outcome: &Outcome, cached: bool, format: Format) -> S
     fields.push(format!("\"cached\":{cached}"));
     fields.push(format!("\"command\":{}", json_string(&job.command())));
     format!("{{{}}}\n", fields.join(","))
+}
+
+/// The two lines that `tet` prints as one complex number.
+fn complex(re: &str, im: &str) -> String {
+    match im {
+        "0" => re.to_string(),
+        signed if signed.starts_with(['-', '+']) => format!("{re}{signed}i"),
+        _ => format!("{re}+{im}i"),
+    }
+}
+
+/// A computation as one line for people: the function, the precision and
+/// the numbers of the function in the order base, height, value. Two of
+/// them are as they were asked for, and the third is the result, of a
+/// computation that has one. Without a result the line ends with the
+/// reason why there is none or, for a computation that has not ended
+/// (`Err`), with the time that it has been running.
+pub fn listed(job: &Job, found: Result<&Outcome, Duration>) -> String {
+    let mut words = vec![
+        format!("f={}", job.func.title()),
+        format!("prec={}", job.prec),
+    ];
+    let parts = job.arguments.len() == 4;
+    for number in ["base", "height", "value"] {
+        if number != job.func.result() {
+            for (name, value) in &job.arguments {
+                let whole = name
+                    .strip_suffix("_re")
+                    .or_else(|| name.strip_suffix("_im"))
+                    .unwrap_or(name);
+                if whole == number {
+                    words.push(format!("{name}={}", shell_quoted(value)));
+                }
+            }
+        } else if let Ok(Outcome::Value { re, im, .. }) = found {
+            if parts {
+                words.push(format!("{number}_re={}", shell_quoted(re)));
+                words.push(format!("{number}_im={}", shell_quoted(im)));
+            } else {
+                words.push(format!("{number}={}", shell_quoted(&complex(re, im))));
+            }
+        }
+    }
+    match found {
+        Ok(Outcome::Value { .. }) => {}
+        Ok(other) => {
+            let reason = other.error().unwrap_or_default();
+            words.push(format!("error={}", shell_quoted(&reason)));
+        }
+        Err(age) => words.push(format!("running={}s", age.as_secs())),
+    }
+    words.join(" ")
 }
 
 /// The body of the reply to a request that is not a job.
@@ -829,6 +914,103 @@ mod tests {
         );
         assert_eq!(brief("πππππ", 5), "πππππ");
         assert_eq!(brief("ππππππ", 5), "πππππ...(6 characters)");
+    }
+
+    #[test]
+    fn an_entry_of_the_cache_is_one_line_with_its_numbers_and_its_result() {
+        let value = |re: &str, im: &str| Outcome::Value {
+            re: re.into(),
+            im: im.into(),
+            seconds: 1.0,
+        };
+        let refused = Outcome::Refused {
+            message: "invalid number \"x\": unknown name x".into(),
+            seconds: 0.0,
+        };
+        let running = Err(Duration::from_millis(150_900));
+        let four = [
+            ("func", "sroot"),
+            ("value_re", "16"),
+            ("value_im", "0"),
+            ("height_re", "3"),
+            ("height_im", "-1/2"),
+        ];
+        for (pairs, found, line) in [
+            (
+                &[("func", "ate"), ("base", "2"), ("value", "65536")][..],
+                Ok(value("4.0000000000000000000", "0")),
+                "f=ate prec=20 base=2 height=4.0000000000000000000 value=65536",
+            ),
+            (
+                &[("func", "slog"), ("value", "65536"), ("base", "2")],
+                running.clone(),
+                "f=ate prec=20 base=2 value=65536 running=150s",
+            ),
+            (
+                &[
+                    ("prec", "5"),
+                    ("func", "tet"),
+                    ("base", "1.5+0.5i"),
+                    ("height", "e^(1/e)"),
+                ],
+                Ok(value("1.1766", "6.0310e-1")),
+                "f=tet prec=5 base=1.5+0.5i height='e^(1/e)' value=1.1766+6.0310e-1i",
+            ),
+            (
+                &[("func", "tet"), ("base", "0.2+0.4i"), ("height", "2.5-i")],
+                Ok(value("2.0149853306301", "-9.63361309384064e-1")),
+                "f=tet prec=20 base=0.2+0.4i height=2.5-i value=2.0149853306301-9.63361309384064e-1i",
+            ),
+            (
+                &[("func", "ssrt"), ("value", "16"), ("height", "3")],
+                Ok(value("2.0000000000000000000", "0")),
+                "f=ssrt prec=20 base=2.0000000000000000000 height=3 value=16",
+            ),
+            (
+                &four,
+                Ok(value("2.1", "-3e-2")),
+                "f=ssrt prec=20 base_re=2.1 base_im=-3e-2 height_re=3 height_im=-1/2 \
+                 value_re=16 value_im=0",
+            ),
+            (
+                &four,
+                running,
+                "f=ssrt prec=20 height_re=3 height_im=-1/2 value_re=16 value_im=0 running=150s",
+            ),
+            (
+                &[("func", "tet"), ("base", "x"), ("height", "pi + 1")],
+                Ok(refused),
+                "f=tet prec=20 base=x height='pi + 1' \
+                 error='invalid number \"x\": unknown name x'",
+            ),
+            (
+                &[("func", "tet"), ("base", "2"), ("height", "0.5")],
+                Ok(Outcome::Timeout { limit: 10_800 }),
+                "f=tet prec=20 base=2 height=0.5 error='no result within 3 hours, the limit of \
+                 this server; tet itself has no limit: build it and run the command'",
+            ),
+        ] {
+            let (asked, _) = job(pairs).unwrap();
+            // The key of a job gives the job back, under the name of the page.
+            let kept = Job::of_key(&asked.key()).unwrap();
+            let expected = Job {
+                spelled: asked.func.title().into(),
+                ..asked.clone()
+            };
+            assert_eq!(kept, expected);
+            assert_eq!(listed(&kept, found.as_ref().map_err(|age| *age)), line);
+        }
+        for key in [
+            "",
+            "Tet",
+            "Tet\n20",
+            "Tet\n20\n2",
+            "Tet\n20\n2\n3\n4",
+            "tet\n20\n2\n3",
+        ] {
+            assert_eq!(Job::of_key(key), None, "{key:?}");
+        }
+        assert_eq!(Job::of_key("Slog\nx\n2\n3"), None);
     }
 
     #[test]

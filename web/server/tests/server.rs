@@ -268,6 +268,12 @@ fn the_page_and_its_files_are_served() {
         // The documentation is a link away.
         "/blob/main/web/README.md\">this page and its API</a>".to_string(),
         "<a href=\"help\">the syntax of the arguments</a>".to_string(),
+        // So are the thread about the page and the programs that plot with tet.
+        "<a href=\"https://tetrationforum.org/showthread.php?tid=1830\">Tetration online calculator</a>"
+            .to_string(),
+        "<a href=\"https://github.com/lukaszgryglicki/tet-line\">tet-line</a>".to_string(),
+        "<a href=\"https://github.com/lukaszgryglicki/rust-opengl-complex-drawer\">rust-opengl-complex-drawer</a>"
+            .to_string(),
     ] {
         assert!(page.body.contains(&part), "{part}\n{}", page.body);
     }
@@ -759,6 +765,79 @@ fn identical_requests_in_flight_are_one_computation() {
     assert_eq!((count("MISS"), count("WAIT")), (1, 3));
     assert_eq!(server.calls(), ["-q 20 wait 7"]);
     assert_eq!(ask().header("X-Cache"), Some("HIT"));
+}
+
+#[test]
+fn the_cache_is_listed_for_this_machine_when_no_proxy_passed_the_request_on() {
+    let server = Server::start(&[]);
+    let empty = server.get("/cache");
+    assert_eq!((empty.status, empty.body.as_str()), (200, ""));
+    assert_eq!(
+        empty.header("Content-Type"),
+        Some("text/plain; charset=utf-8")
+    );
+    assert_eq!(empty.header("Cache-Control"), Some("no-store"));
+    assert_eq!(server.get("/?func=slog&base=wait&value=65536").status, 200);
+    assert_eq!(server.get("/?func=tet&base=refuse&height=1").status, 422);
+    let parts = "/?prec=7&func=ssrt&value_re=1.5&value_im=-2&height_re=pi%20%2B%201&height_im=0";
+    assert_eq!(server.get(parts).status, 200);
+    // The first one again, under its other name: it is now the one used last.
+    let again = server.get("/?func=ate&base=wait&value=65536");
+    assert_eq!(again.header("X-Cache"), Some("HIT"));
+    // A calculation runs on when its client has gone.
+    let mut stream = TcpStream::connect(&server.address).unwrap();
+    let slow = "/?func=tet&base=slow&height=0.5";
+    write!(stream, "GET {slow} HTTP/1.1\r\nHost: test\r\n\r\n").unwrap();
+    drop(stream);
+    let listed = server.until("/cache", |reply| reply.body.contains(" running="));
+    let lines: Vec<&str> = listed.body.lines().collect();
+    assert_eq!(
+        lines[..3],
+        [
+            "f=tet prec=20 base=refuse height=1 \
+             error='invalid number \"refuse\": unknown name refuse'",
+            "f=ssrt prec=7 base_re='--ssrt|7|1.5 -2 pi + 1 0' base_im=serial \
+             height_re='pi + 1' height_im=0 value_re=1.5 value_im=-2",
+            "f=ate prec=20 base=wait height=65536 value=65536",
+        ],
+        "{}",
+        listed.body
+    );
+    let running = lines[3]
+        .strip_prefix("f=tet prec=20 base=slow height=0.5 running=")
+        .and_then(|rest| rest.strip_suffix('s'))
+        .unwrap_or_else(|| panic!("{}", listed.body));
+    assert!(running.parse::<u64>().unwrap() < 30, "{running}");
+    assert_eq!(lines.len(), 4);
+    assert!(listed.body.ends_with("s\n"));
+    // A proxy names the client that it speaks for: what it passes on finds
+    // nothing at this address, as at any other that is not served.
+    let nothing = server.get("/nothing");
+    for header in [
+        "X-Forwarded-For: 203.0.113.7",
+        "x-forwarded-proto: https",
+        "X-Forwarded-Host: tet.example",
+        "Forwarded: for=203.0.113.7",
+        "Via: 1.1 Caddy",
+        "X-Real-IP: 203.0.113.7",
+    ] {
+        let passed = server.ask("GET", "/cache", &format!("{header}\r\n"));
+        assert_eq!(
+            (passed.status, passed.body.as_str()),
+            (404, nothing.body.as_str()),
+            "{header}"
+        );
+    }
+    assert_eq!(server.get("/cache/").status, 404);
+    // Listing is no use of the cache and starts nothing.
+    let status = server.get("/status").body;
+    assert!(
+        status.contains("\ncalculations: 1 running, at most ")
+            && status.contains("\ncache: kept 3 (")
+            && status.contains("), hits 1, misses 4, waits 0, dropped 0\n"),
+        "{status}"
+    );
+    assert_eq!(server.calls().len(), 4);
 }
 
 #[test]

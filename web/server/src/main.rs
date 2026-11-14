@@ -17,7 +17,7 @@ mod page;
 mod run;
 mod settings;
 
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use api::{Format, Job, Outcome, Pending};
-use cache::{Cache, Found, Source, Ticket};
+use cache::{Cache, Found, Listed, Source, Ticket};
 use http::{Request, Response, Unread};
 use page::{Form, Shown, Site};
 use run::{Runner, Slots};
@@ -52,7 +52,7 @@ Usage: tet-web
 
     TET_WEB_LISTEN      address to listen on                 127.0.0.1:8080
     TET_WEB_TET         the tet program                      tet
-    TET_WEB_CACHE_MB    memory for kept results, in MiB      64
+    TET_WEB_CACHE_MB    most memory for kept results, in MiB 1024
     TET_WEB_REVISION    text shown as the version            (none)
     TET_WEB_CONFIG      a file with the settings below       (none)
 
@@ -75,6 +75,9 @@ Usage: tet-web
   GET /help               the usage text of tet
   GET /stats              counters of the server, as JSON
   GET /status             the same for people
+  GET /cache              the kept results and the calculations that run,
+                          one a line; only for a request from this machine
+                          that no proxy passed on
   GET /healthz            ok
 
   A calculation that is not ready when its request has waited continues,
@@ -133,7 +136,7 @@ impl Server {
         if !help.status.success() || help.stdout.is_empty() {
             return Err(format!("{} --help failed ({})", runner.tet, help.status));
         }
-        let cache = setting("TET_WEB_CACHE_MB", 64u64)?
+        let cache = setting("TET_WEB_CACHE_MB", 1024u64)?
             .checked_mul(1 << 20)
             .and_then(|bytes| usize::try_from(bytes).ok())
             .ok_or("TET_WEB_CACHE_MB is too large")?;
@@ -373,7 +376,26 @@ impl Server {
         )
     }
 
-    fn respond(self: &Arc<Self>, request: &Request) -> (Response, Option<String>) {
+    /// Every entry of the cache as a line for people.
+    fn cached(&self) -> String {
+        let mut lines = String::new();
+        for (key, entry) in self.cache.listed() {
+            let Some(job) = Job::of_key(&key) else {
+                continue;
+            };
+            let found = match &entry {
+                Listed::Kept(outcome) => Ok(&**outcome),
+                Listed::Running(asked) => Err(asked.elapsed()),
+            };
+            lines.push_str(&api::listed(&job, found));
+            lines.push('\n');
+        }
+        lines
+    }
+
+    /// The reply to a request and what the log says about it. `direct`: the
+    /// request came from this machine, and no proxy passed it on.
+    fn respond(self: &Arc<Self>, request: &Request, direct: bool) -> (Response, Option<String>) {
         if request.method != "GET" && request.method != "HEAD" {
             let response = Response::text(405, "only GET and HEAD are served here\n")
                 .with("Allow", "GET, HEAD");
@@ -410,6 +432,10 @@ impl Server {
             "/healthz" => Response::text(200, "ok\n"),
             "/stats" => reply(200, Format::Json, self.stats()),
             "/status" => Response::text(200, self.status()),
+            // What everybody asked for is shown to this machine alone.
+            "/cache" if direct => {
+                Response::text(200, self.cached()).with("Cache-Control", "no-store")
+            }
             "/robots.txt" => Response::text(200, "User-agent: *\nDisallow: /api\nDisallow: /*?\n"),
             _ => Response::text(404, "there is nothing here; the page is at /\n"),
         };
@@ -432,7 +458,16 @@ impl Server {
             }
         };
         self.requests.fetch_add(1, Ordering::Relaxed);
-        let (response, note) = self.respond(&request);
+        // The proxy on this machine names the client that it speaks for,
+        // and so shows what it passes on.
+        let direct = peer
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.to_canonical().is_loopback())
+            && !request.headers.iter().any(|(name, _)| {
+                name.starts_with("x-forwarded-")
+                    || ["forwarded", "via", "x-real-ip"].contains(&name.as_str())
+            });
+        let (response, note) = self.respond(&request, direct);
         let _ = http::write_response(&mut stream, &response, request.method != "HEAD");
         let Some(note) = note else {
             return;

@@ -25,7 +25,8 @@
 #                             and niceness of one tet. The server reads it
 #                             again whenever it changes
 #                             (/usr/local/etc/tet-web.conf)
-# tet_web_cache_mb (number):  memory for kept results in MiB (64)
+# tet_web_cache_mb (number):  the most memory for kept results in MiB; it is
+#                             used as the results come, not set aside (1024)
 # tet_web_revision (text):    shown by the page and by /stats ()
 # tet_web_log (path):         the log (/var/log/tet-web.log)
 
@@ -43,7 +44,7 @@ load_rc_config $name
 : ${tet_web_tet:="/usr/local/bin/tet"}
 : ${tet_web_listen:="127.0.0.1:8080"}
 : ${tet_web_config:="/usr/local/etc/tet-web.conf"}
-: ${tet_web_cache_mb:="64"}
+: ${tet_web_cache_mb:="1024"}
 : ${tet_web_revision:=""}
 : ${tet_web_log:="/var/log/tet-web.log"}
 

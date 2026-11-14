@@ -95,6 +95,10 @@ zero imaginary part.
 * **Definition used:** `F_b(0) = 1`, `F_b(z+1) = b^{F_b(z)}`, with
   method-specific branch and normalization conventions
   (§ [Conventions](#12-conventions-and-normalization)).
+* **Status (14 November 2026):** each of the two numbers of a run can be
+  one complex argument, `tet 30 1.5+0.5i 1+0.7i`, next to the four real
+  ones of `tet 30 1.5 0.5 1 0.7`; of four arguments each must now be real
+  (§ 3.2).
 * **Status (13 November 2026):** a correctness fix and several extensions.
   Regular iteration chose the principal logarithm at every step of its
   height reduction, which is the wrong branch once `F(h + s)` has gone
@@ -403,15 +407,23 @@ $ tet 20 0 1 0.5 0      # base i
 tet [--quiet|--silent|-q] <precision_digits> <base_re> <base_im> <height_re> <height_im>
 tet [-q] --slog|--ate   <precision_digits> <base_re> <base_im> <value_re> <value_im>
 tet [-q] --sroot|--ssrt <precision_digits> <value_re> <value_im> <height_re> <height_im>
+tet [-q] <precision_digits> <base> <height>
+tet [-q] --slog|--ate   <precision_digits> <base> <value>
+tet [-q] --sroot|--ssrt <precision_digits> <value> <height>
 ```
 
 * `precision_digits` — requested decimal precision (positive integer).
   Internally mapped to MPC binary precision with guard bits.
-* the four remaining arguments are two complex numbers, each as its real
-  part followed by its imaginary part: without a flag the base
-  `b = base_re + i·base_im` and the height `h = height_re + i·height_im`.
-  Each of the four is a decimal number or a constant expression such as
-  `pi`, `e^(1/e)` or `2^^0.5`, computed to the precision of the run (§ 3.2).
+* the remaining arguments are two complex numbers. With four arguments each
+  number is its real part followed by its imaginary part: without a flag
+  the base `b = base_re + i·base_im` and the height
+  `h = height_re + i·height_im`. With two arguments each number is one
+  complex argument: `tet 30 1.5 0.5 1 0.7` and `tet 30 1.5+0.5i 1+0.7i` are
+  the same run, and so are `tet 50 2 0 3 0` and `tet 50 2 3`.
+* each argument is a decimal number or a constant expression such as `pi`,
+  `e^(1/e)` or `2^^0.5`, computed to the precision of the run (§ 3.2). Of
+  four arguments each must be real: a complex one is an error, and `re(z)`
+  is the real part of anything.
 * `--slog` (alias `--ate`) takes the base and a value and prints the height
   `h` with `F_b(h) = value`; `--sroot` (alias `--ssrt`) takes a value and
   the height and prints the base `b` with `F_b(h) = value`. § 3.1 explains
@@ -579,14 +591,15 @@ All three modes are about one equation, `b^^h = z` (that is, `F_b(h) = z`),
 between a base `b`, a height `h` and a value `z`. Each mode takes two of the
 three and prints the third. The first argument is always the number of
 digits. Then come two complex numbers, each as its real part followed by its
-imaginary part, and the answer is printed the same way: real part on the
-first line, imaginary part on the second.
+imaginary part, or each as one complex argument (§ 3.2). The answer is
+printed as two real numbers: real part on the first line, imaginary part on
+the second.
 
 | mode | command line | you give | it prints | the same thing for powers |
 |---|---|---|---|---|
-| tetration (no flag) | `tet D b_re b_im h_re h_im` | base `b`, height `h` | the value `z = b^^h` | `z = b^h` |
-| super-logarithm: `--slog` or `--ate` | `tet --slog D b_re b_im z_re z_im` | base `b`, value `z` | the height `h` with `b^^h = z` | `h = log_b z` |
-| super-root: `--sroot` or `--ssrt` | `tet --sroot D z_re z_im h_re h_im` | value `z`, height `h` | the base `b` with `b^^h = z` | `b = z^(1/h)` |
+| tetration (no flag) | `tet D b_re b_im h_re h_im` or `tet D b h` | base `b`, height `h` | the value `z = b^^h` | `z = b^h` |
+| super-logarithm: `--slog` or `--ate` | `tet --slog D b_re b_im z_re z_im` or `tet --slog D b z` | base `b`, value `z` | the height `h` with `b^^h = z` | `h = log_b z` |
+| super-root: `--sroot` or `--ssrt` | `tet --sroot D z_re z_im h_re h_im` or `tet --sroot D z h` | value `z`, height `h` | the base `b` with `b^^h = z` | `b = z^(1/h)` |
 
 `--ate` ("arc-tetration") is a second name for `--slog`, and `--ssrt` for
 `--sroot`; the flags take two dashes, may stand anywhere on the command line
@@ -612,6 +625,10 @@ $ tet -q --sroot 20 1.45878181603642170068397166104 0 0.5 0  # that value, heigh
 2.0000000000000000000
 0
 ```
+
+With one argument for each number the same three runs are `tet -q 30 2 0.5`,
+`tet -q --slog 20 2 1.45878181603642170068397166104` and
+`tet -q --sroot 20 1.45878181603642170068397166104 0.5`.
 
 **Reading `--slog` (`--ate`) results.**
 
@@ -697,9 +714,9 @@ digits internally and re-reads the inputs at that precision (§ 6.9).
 
 ### 3.2 Constants and expressions in the arguments
 
-Each of the four numbers after the precision is a decimal number, read as
-before, or a **constant expression**, computed to the precision of the run.
-Quote it for the shell:
+Each number after the precision is a decimal number, read as before, or a
+**constant expression**, computed to the precision of the run. Quote it for
+the shell:
 
 ```
 $ tet 50 pi 0 1 0                        # b^^1 = b: pi to 50 digits
@@ -717,6 +734,9 @@ $ tet 20 '2^^2' 0 'tet(2, 1)' 0          # tetration inside the arguments: 4^^2
 $ tet 15 'ssrt(16, 3)' 0 'ate(2, 16)' 0  # the base 2 and the height 3
 16.0000000000000
 0
+$ tet 20 '2+i' '1/2'                     # two numbers: the base 2+i, the height 1/2
+1.6554245031847440638
+4.6229528876468886228e-1
 ```
 
 An expression is built from
@@ -734,14 +754,33 @@ There are no variables: an argument stands for one number. A leading sign
 binds less than `^`, and `^` less than `^^`; both group from the right:
 `-2^2 = -4`, `2^-2 = 1/4`, `2^3^2 = 2^9`, `2^^3^2 = (2^^3)^2`.
 
-An argument may be complex itself. The number is always
-`first + i·second`, so `'2+i' 0`, `2 1` and `i -2i` are the same base.
+**Two numbers or four.** With two arguments after the precision each is a
+complex number: `tet 20 '2+i' '1/2'` has the base `2 + i`. With four
+arguments each is a real or an imaginary part, `tet 20 2 1 '1/2' 0` is the
+same run, and each of the four has to be real. A complex one is refused
+rather than added to its neighbour:
+
+```
+$ tet 20 '2+i' 0 '1/2' 0
+error: invalid number "2+i": it is not real (imaginary part 1.000000000); each of four numbers is a real or an imaginary part: take re(...) of it, or give two complex numbers instead of four
+```
+
+`re(z)` (or `real(z)`) and `im(z)` are the parts of any expression, so
+`tet 20 're(2+i)' 'im(2+i)' '1/2' 0` is that run again. A part is real when
+its imaginary part is zero by construction (**Zeros** below): `abs(3+4i)`,
+`sqrt(2)^3` and `(1+i)*(1-i)` are real, `exp(i*pi)` is refused in both forms
+because its imaginary part cannot be told from zero, and `re(exp(i*pi))` is
+`−1`. A real and an imaginary part in one argument are not a number:
+`tet 20 '2 1' '0.5 0'` is an error (`an operator is missing before 1`), not
+the base `21`.
 
 The grammar, the names and their meanings are those of the plotters
 [`tet-line`](https://github.com/lukaszgryglicki/tet-line) and
 [`rust-opengl-complex-drawer`](https://github.com/lukaszgryglicki/rust-opengl-complex-drawer),
 which read the same expressions with a variable for the function they draw
-and the same constant expressions for their ranges. On 13 November 2026,
+and the same constant expressions for their ranges: four real numbers, or
+two complex points for the ends of a line and the corners of a rectangle,
+as here. On 13 November 2026,
 140 expressions with the operators, every shared function and the 42
 constants had the same value here and in the drawer's `f64` parser to 12
 digits, and so had 31 more with `tet(b, h)` and with values on branch cuts
@@ -773,7 +812,10 @@ the run reads its inputs (the requested digits and the guard bits); where
 they do not, the lost bits are added to the working precision and both
 evaluations are repeated. `(pi + 1e-300) - pi` is `1e-300` to every
 requested digit. This is the evidence of two different evaluations, as
-elsewhere in this program, not an interval proof.
+elsewhere in this program, not an interval proof. A number written in an
+expression is read with all its digits, as a decimal argument is (§ 4): at
+ten requested digits `re(1.0…01)`, with fifty zeros before its last digit,
+is still not `1`, so a base next to `1` is not rounded to the base `1`.
 
 **Zeros.** A part that both evaluations share is exact, and a zero is kept
 as an exact zero where it is exact by construction: a sum of exact numbers
@@ -964,19 +1006,27 @@ fn main() -> Result<(), String> {
     let (height, _) = tetration::slog_str("30", "2", "0", "16", "0")?; // base, value -> 3
     let (base, _) = tetration::sroot_str("30", "16", "0", "3", "0")?; // value, height -> 2
     println!("slog_2(16) = {height}, the base with b^^3 = 16 is {base}");
+    // each number as one complex argument
+    let (re, im) = tetration::tetrate_complex_str("30", "2+i", "1/2")?;
+    println!("(2+i)^^(1/2) = {re} + {im} i");
     Ok(())
 }
 ```
 
 The string arguments are those of the command line: decimal numbers or
-constant expressions (§ 3.2); `expression::complex` and `expression::pair`
-evaluate one to a given number of bits.
+constant expressions (§ 3.2). `tetrate_str`, `slog_str` and `sroot_str` take
+four real ones, the real and the imaginary part of each number;
+`tetrate_complex_str`, `slog_complex_str` and `sroot_complex_str` take two
+complex ones. `expression::complex` evaluates an argument to a given number
+of bits, `expression::real` one that has to be real, and `expression::pair`
+a real and an imaginary part.
 
 The string API, CLI and grid runner include supplied significant decimal
 digits when choosing working precision, without changing requested output
 digits. This prevents a near-one base, fractional height or huge odd integer
 from rounding into a different exact special case before dispatch. Redundant
-padding and exponent text do not inflate that significand count.
+padding and exponent text do not inflate that significand count. A number
+written inside an expression is counted in the same way.
 
 Lower-level entry points (`dispatch::tetrate`, per-method `setup_*` /
 `eval_*` pairs that amortize per-base work across many heights) are
@@ -2331,7 +2381,7 @@ digits, and fails on any that is not permitted there by name.
 | `inverse::sroot_real` | bracketing at 24 digits plus the conditioning | the secant steps and the verification run at the full precision |
 | central differences (`slog_generic`, `Trials`) and secants (`Trials`) | derivatives to half the working digits or less | a Newton slope steers the iteration; its root does not depend on it |
 | comparisons | the constants `0.25`, `0.5`, `1.5` and small integer ratios | exact, compared at the working precision |
-| `expression.rs` | 16 bits beyond the precision of the run on which the two evaluations must agree; 20 digits between them; 64 guard bits of a named constant before its directed rounding; three total cancellations, and 64 times the digits, before an input is refused; the 64 bits below the unit place that a large value must keep; the 8 values remembered | margins and limits of the precision, never a value: they raise the precision or end in an error |
+| `expression.rs` | 16 bits beyond the precision of the run on which the two evaluations must agree; 20 digits between them; 64 guard bits of a named constant before its directed rounding; three total cancellations, and 64 times the digits, before an input is refused; the 64 bits below the unit place that a large value must keep; the 8 values remembered; the 10 digits of an imaginary part in the message that refuses it | margins and limits of the precision and one width of a message, never a value: they raise the precision or end in an error |
 | `constants.rs` | starting values `3/4`, `2/3`, `3/8` of the Newton iterations; guard bits 64 | exact small ratios at the working precision; each iteration ends on a residual test there |
 | `schroder::LongSeries`, `schroder::Anchor` | step and term counts (256, 4096) and cost weights that choose between the short series, the long series and Taylor jumps; the 65536 levels of the integer tower kept for the branch check | each choice is between methods that converge to the same value; the check can only reject |
 | `kouznetsov.rs` | `as_secs_f64` | timing output |
@@ -2569,6 +2619,17 @@ phase 13 in 14 s, 25 s, 47 s and 424 s; phase 14 in 7 s, 141 s, 337 s and
 847 s, the complex one in 294 s, 574 s and 1247 s. The cases of real bases
 are faster than in the table because they no longer carry the samples of
 the tracing.
+
+The run of 14 November was made on the tree with the two forms of the
+command line (§ 3.2). The default tier passed, one target at a time:
+library 72, phase 7 16, every other target with the counts above, and the
+19 Python tests. New tests: `t715` (two complex numbers are the four parts
+in the three modes; long numbers; numbers with a gap; other counts are
+usage errors) and two unit tests of `src/expression.rs`; `t713` now checks
+that a complex part among four numbers is refused, and `t701` takes three
+numbers for its wrong count. Of the slow suites the five tests that run
+the binary were repeated and pass (phase 13 in 23 s, phase 14 in 123 s and
+702 s, phase 15 in 33 s and 34 s).
 
 ## 11. References
 

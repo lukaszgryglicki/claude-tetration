@@ -1,3 +1,47 @@
+# Status Update — 2026-11-14 (two complex numbers or four real ones)
+
+**Two arguments instead of four.** The two numbers of a run can each be one
+complex argument: `tet 30 1.5+0.5i 1+0.7i` is `tet 30 1.5 0.5 1 0.7`,
+`tet --slog 30 2 16` is `tet --slog 30 2 0 16 0`, and
+`tet --sroot 30 16 3` is `tet --sroot 30 16 0 3 0`. The count of the
+arguments tells the forms apart; any other count is a usage error. The
+library has `tetrate_complex_str`, `slog_complex_str` and
+`sroot_complex_str` next to the three functions of four strings. The
+plotters `tet-line` and `rust-opengl-complex-drawer` take two complex
+points in the same way, for the ends of a line and the corners of a
+rectangle, and still call `tet` with four numbers.
+
+**Of four numbers each must be real.** Until now an argument could be
+complex itself and the number was `first + i·second`, so that
+`tet 20 2+i 0 0.5 0` ran with the base `2 + i` and `tet 20 i -2i 0.5 0` with
+the same one. Such an argument is now an error that names both remedies:
+`re(z)` for the real part of anything, or the form with two numbers. The
+example of the last entry reads
+`tet 30 '2^^2 + i*ate(2+i, 1.5-0.5i)' 'pi/e + i*ssrt(16, 3)/4'` and prints
+the digits it printed before. A part is real when its imaginary part is
+zero by construction; `exp(i*pi)` stays refused in both forms and
+`re(exp(i*pi))` is `−1`.
+
+**Numbers written in an expression keep their digits.** The precision of a
+run followed the digits of a decimal argument, and of an expression only
+those before its first `e` or `E`. Every number written in an expression is
+now counted: `tet 10 're(1.<110 zeros>1 + 2i)' 0 -1 0` prints `0`, the
+value of `b^^(−1)` for a base that is not one, where it printed
+`1.000000000` because the base had been rounded to exactly `1`. `-0` is
+read as `0` in both forms.
+
+**A number has no gap.** The decimal reader skips spaces and underscores:
+`tet 20 '2 1' '0.5 0'`, a real and an imaginary part in one argument, would
+have run as `21^^0.50`. A text with a gap is now left to the grammar, where
+two numbers in a row are an error (`tet 20 '1 2' 0 1 0` printed `12`
+before).
+
+**Tests.** `t715` (the two forms agree in the three modes, flags anywhere,
+long numbers, numbers with a gap, wrong counts), `t713` (real expressions;
+a complex part is refused in each place and mode), two unit tests of
+`src/expression.rs` (real parts; the digits of written numbers) and rows
+for the gap in a third.
+
 # Status Update — 2026-11-13, evening (two-sided solver next to the boundary; real bases without tracing; constants and expressions as arguments)
 
 **A real base needs no branch tracing (proved, then removed).** For a real

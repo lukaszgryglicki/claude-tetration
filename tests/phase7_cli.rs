@@ -34,7 +34,7 @@ fn t700_help_flag() {
 
 #[test]
 fn t701_wrong_arg_count_exit_code_2() {
-    let out = run(&["50", "2", "0"]);
+    let out = run(&["50", "2", "0", "3"]);
     assert_eq!(out.status.code(), Some(2));
     let s = String::from_utf8_lossy(&out.stderr);
     assert!(s.contains("Usage"), "stderr missing usage hint: {}", s);
@@ -264,19 +264,44 @@ fn t712_constants_and_expressions_have_the_requested_digits() {
     }
 }
 
-/// The number is `first + i second`, each of them may be complex, and a
-/// tetration inside an argument is computed by the same library.
+/// Of four numbers each is a real expression, and a tetration inside an
+/// argument is computed by the same library.
 #[test]
-fn t713_complex_expressions_and_tetration_inside_arguments() {
+fn t713_real_expressions_and_tetration_inside_arguments() {
     let value = |arguments: &[&str]| {
         let out = run(arguments);
         assert!(out.status.success(), "{arguments:?}: {out:?}");
         parse_two_lines(&out.stdout)
     };
     let direct = value(&["-q", "20", "2", "1", "1.5", "0.5"]);
-    for (first, second) in [("2+i", "0"), ("i", "-2i"), ("2", "sqrt(1)"), ("0", "1-2i")] {
+    for (first, second) in [
+        ("2", "sqrt(1)"),
+        ("re(2+i)", "im(2+i)"),
+        ("abs(-2)", "-i*i"),
+    ] {
         let same = value(&["-q", "20", first, second, "3/2", "1/2"]);
         assert_eq!(same, direct, "{first} {second}");
+    }
+    // A complex part is refused in each of the four places and in each mode.
+    for (mode, arguments) in [
+        (None, ["2+i", "0", "3/2", "1/2"]),
+        (None, ["2", "sqrt(-1)", "3/2", "1/2"]),
+        (None, ["2", "1", "ln(-1)", "1/2"]),
+        (Some("--slog"), ["2", "0", "16", "i"]),
+        (Some("--sroot"), ["16i", "0", "3", "0"]),
+    ] {
+        let mut command: Vec<&str> = mode.into_iter().chain(["20"]).collect();
+        command.extend(arguments);
+        let out = run(&command);
+        assert_eq!(out.status.code(), Some(1), "{command:?}");
+        assert!(out.stdout.is_empty(), "{command:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("it is not real (imaginary part "),
+            "{stderr}"
+        );
+        assert!(stderr.contains("take re(...) of it"), "{stderr}");
+        assert!(stderr.contains("two complex numbers instead of four"));
     }
     let tower = value(&["-q", "20", "2^^2", "0", "tet(2, 1)", "0"]);
     assert_eq!(tower.0, "256.00000000000000000");
@@ -312,6 +337,131 @@ fn t713_complex_expressions_and_tetration_inside_arguments() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("invalid number"), "{argument}: {stderr}");
         assert!(stderr.contains(reason), "{argument}: {stderr}");
+    }
+}
+
+/// Two numbers after the digits are the complex numbers that four give by
+/// their parts, in every mode.
+#[test]
+fn t715_two_complex_numbers_are_the_four_parts() {
+    let value = |arguments: &[&str]| {
+        let out = run(arguments);
+        assert!(out.status.success(), "{arguments:?}: {out:?}");
+        assert!(out.stderr.is_empty(), "{arguments:?}: {out:?}");
+        parse_two_lines(&out.stdout)
+    };
+    for (two, four) in [
+        (vec!["30", "2", "3"], vec!["30", "2", "0", "3", "0"]),
+        (vec!["20", "2", "0.5"], vec!["20", "2", "0", "0.5", "0"]),
+        (
+            vec!["20", "1.5+0.5i", "1+0.7i"],
+            vec!["20", "1.5", "0.5", "1", "0.7"],
+        ),
+        (
+            vec!["20", " i - 0.25 ", "-0.5i"],
+            vec!["20", "-0.25", "1", "0", "-0.5"],
+        ),
+        (
+            vec!["20", "sqrt(-4)/4 + eta", "pi/e + i/3"],
+            vec!["20", "eta", "1/2", "pi/e", "1/3"],
+        ),
+        (
+            vec!["--slog", "20", "2", "16"],
+            vec!["--slog", "20", "2", "0", "16", "0"],
+        ),
+        (
+            vec![
+                "15",
+                "--ate",
+                "2",
+                "1.3232385095217583751+0.86933975675873261759i",
+            ],
+            vec![
+                "--ate",
+                "15",
+                "2",
+                "0",
+                "1.3232385095217583751",
+                "0.86933975675873261759",
+            ],
+        ),
+        (
+            vec!["--sroot", "20", "16", "3"],
+            vec!["--sroot", "20", "16", "0", "3", "0"],
+        ),
+        (
+            vec!["--ssrt", "15", "1+i", "2"],
+            vec!["15", "1", "1", "2", "0", "--ssrt"],
+        ),
+    ] {
+        let mut quiet = vec!["-q"];
+        quiet.extend(&two);
+        let short = value(&quiet);
+        quiet.truncate(1);
+        quiet.extend(&four);
+        assert_eq!(short, value(&quiet), "{two:?}");
+    }
+    assert_eq!(
+        value(&["-q", "30", "2", "3"]).0,
+        "16.0000000000000000000000000000"
+    );
+    let height = value(&[
+        "-q",
+        "--slog",
+        "15",
+        "2",
+        "1.3232385095217583751+0.86933975675873261759i",
+    ]);
+    assert_eq!(
+        height,
+        ("5.00000000000000e-1".into(), "1.00000000000000".into())
+    );
+    // A long number keeps its digits where it is written: a base next to one,
+    // b^^(-1) = 0, and the parity of a height of the base 0.
+    let zeros = "0".repeat(110);
+    let near_one = format!("1.{zeros}1");
+    let zero = ("0".to_string(), "0".to_string());
+    for arguments in [
+        vec![near_one.clone(), "-1".into()],
+        vec![format!("{near_one} + 0i"), "-1".into()],
+        vec![
+            format!("re({near_one} + 2i)"),
+            "0".into(),
+            "-1".into(),
+            "0".into(),
+        ],
+        vec!["0".into(), format!("1e0 * 1{zeros}1")],
+    ] {
+        let mut command = vec!["-q", "10"];
+        command.extend(arguments.iter().map(String::as_str));
+        assert_eq!(value(&command), zero, "{command:?}");
+    }
+    // A real and an imaginary part in one argument are not read as one number.
+    for arguments in [
+        vec!["20", "2 1", "0.5 0"],
+        vec!["20", "2_1", "0.5"],
+        vec!["20", "2 1", "0", "0.5", "0"],
+    ] {
+        let out = run(&arguments);
+        assert_eq!(out.status.code(), Some(1), "{arguments:?}");
+        assert!(out.stdout.is_empty(), "{arguments:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("invalid number \"2"), "{stderr}");
+    }
+    // Any other count of numbers is a usage error.
+    let usage = String::from_utf8(run(&["--help"]).stdout).unwrap();
+    for arguments in [
+        vec!["20"],
+        vec!["20", "2"],
+        vec!["20", "2", "0", "3"],
+        vec!["20", "2", "0", "3", "0", "0"],
+        vec!["--slog", "20", "2"],
+        vec!["--slog", "--sroot", "20", "2", "3"],
+    ] {
+        let out = run(&arguments);
+        assert_eq!(out.status.code(), Some(2), "{arguments:?}");
+        assert!(out.stdout.is_empty(), "{arguments:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), usage, "{arguments:?}");
     }
 }
 

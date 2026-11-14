@@ -48,9 +48,36 @@ pub mod schroder;
 mod schroder_complex_jumps;
 mod schroder_jumps;
 
+/// One number of a run as it is written: a complex input, or its real and
+/// its imaginary part.
+#[derive(Clone, Copy)]
+enum Input<'a> {
+    Number(&'a str),
+    Parts(&'a str, &'a str),
+}
+
+impl<'a> Input<'a> {
+    fn texts(self) -> Vec<&'a str> {
+        match self {
+            Input::Number(text) => vec![text],
+            Input::Parts(re, im) => vec![re, im],
+        }
+    }
+
+    fn value(self, prec: u64) -> Result<rug::Complex, String> {
+        match self {
+            Input::Number(text) => expression::complex(text, prec),
+            Input::Parts(re, im) => cnum::parse_complex(re, im, prec),
+        }
+    }
+}
+
+type Solve = fn(&rug::Complex, &rug::Complex, u64, u64) -> Result<rug::Complex, String>;
+
 /// Top-level string-in / string-out API. Parses precision and complex inputs as
 /// decimal strings, dispatches to the appropriate algorithm, and formats the
-/// result back to decimal. Returns `(real_part, imaginary_part)`.
+/// result back to decimal. Returns `(real_part, imaginary_part)`. Each of the
+/// four numbers must be real.
 pub fn tetrate_str(
     prec_str: &str,
     base_re: &str,
@@ -58,37 +85,29 @@ pub fn tetrate_str(
     height_re: &str,
     height_im: &str,
 ) -> Result<(String, String), String> {
-    let digits: u64 = prec_str
-        .parse()
-        .map_err(|_| format!("invalid precision: {:?}", prec_str))?;
-    let inputs = [base_re, base_im, height_re, height_im];
-    let prec = cnum::checked_input_precision(digits, &inputs)?;
-    let mut prec = expression::input_precision(&inputs, prec)?;
-    let result = loop {
-        let b = cnum::parse_complex(base_re, base_im, prec)?;
-        let h = cnum::parse_complex(height_re, height_im, prec)?;
-        let value = dispatch::tetrate(&b, &h, prec, digits)?;
-        let next_prec = value.real().prec_64().max(value.imag().prec_64());
-        if next_prec > prec
-            && (cnum::parse_complex(base_re, base_im, next_prec)? != b
-                || cnum::parse_complex(height_re, height_im, next_prec)? != h)
-        {
-            if cnum::verbose() {
-                eprintln!(
-                    "tet: reparsing decimal inputs at {next_prec} bits after precision refinement"
-                );
-            }
-            prec = next_prec;
-            continue;
-        }
-        break value;
-    };
-    if !cnum::is_finite(&result) {
-        return Err("tetration returned a non-finite result".into());
-    }
-    let output_digits =
-        usize::try_from(digits).map_err(|_| "output precision exceeds addressable memory")?;
-    Ok(cnum::format_complex(&result, output_digits))
+    solve_str(
+        prec_str,
+        [
+            Input::Parts(base_re, base_im),
+            Input::Parts(height_re, height_im),
+        ],
+        dispatch::tetrate,
+        "tetration",
+    )
+}
+
+/// `tetrate_str` with the base and the height as one complex number each.
+pub fn tetrate_complex_str(
+    prec_str: &str,
+    base: &str,
+    height: &str,
+) -> Result<(String, String), String> {
+    solve_str(
+        prec_str,
+        [Input::Number(base), Input::Number(height)],
+        dispatch::tetrate,
+        "tetration",
+    )
 }
 
 /// String API for the super-logarithm: the height `h` with `F_b(h) = z`.
@@ -99,10 +118,28 @@ pub fn slog_str(
     value_re: &str,
     value_im: &str,
 ) -> Result<(String, String), String> {
-    inverse_str(
+    solve_str(
         prec_str,
-        [base_re, base_im, value_re, value_im],
+        [
+            Input::Parts(base_re, base_im),
+            Input::Parts(value_re, value_im),
+        ],
         inverse::slog,
+        "inverse tetration",
+    )
+}
+
+/// `slog_str` with the base and the value as one complex number each.
+pub fn slog_complex_str(
+    prec_str: &str,
+    base: &str,
+    value: &str,
+) -> Result<(String, String), String> {
+    solve_str(
+        prec_str,
+        [Input::Number(base), Input::Number(value)],
+        inverse::slog,
+        "inverse tetration",
     )
 }
 
@@ -114,31 +151,50 @@ pub fn sroot_str(
     height_re: &str,
     height_im: &str,
 ) -> Result<(String, String), String> {
-    inverse_str(
+    solve_str(
         prec_str,
-        [value_re, value_im, height_re, height_im],
+        [
+            Input::Parts(value_re, value_im),
+            Input::Parts(height_re, height_im),
+        ],
         inverse::sroot,
+        "inverse tetration",
     )
 }
 
-fn inverse_str(
+/// `sroot_str` with the value and the height as one complex number each.
+pub fn sroot_complex_str(
     prec_str: &str,
-    inputs: [&str; 4],
-    solve: fn(&rug::Complex, &rug::Complex, u64, u64) -> Result<rug::Complex, String>,
+    value: &str,
+    height: &str,
+) -> Result<(String, String), String> {
+    solve_str(
+        prec_str,
+        [Input::Number(value), Input::Number(height)],
+        inverse::sroot,
+        "inverse tetration",
+    )
+}
+
+fn solve_str(
+    prec_str: &str,
+    inputs: [Input; 2],
+    solve: Solve,
+    name: &str,
 ) -> Result<(String, String), String> {
     let digits: u64 = prec_str
         .parse()
         .map_err(|_| format!("invalid precision: {:?}", prec_str))?;
-    let prec = cnum::checked_input_precision(digits, &inputs)?;
-    let mut prec = expression::input_precision(&inputs, prec)?;
+    let texts = [inputs[0].texts(), inputs[1].texts()].concat();
+    let prec = cnum::checked_input_precision(digits, &texts)?;
+    let mut prec = expression::input_precision(&texts, prec)?;
     let result = loop {
-        let first = cnum::parse_complex(inputs[0], inputs[1], prec)?;
-        let second = cnum::parse_complex(inputs[2], inputs[3], prec)?;
+        let first = inputs[0].value(prec)?;
+        let second = inputs[1].value(prec)?;
         let value = solve(&first, &second, prec, digits)?;
         let next_prec = value.real().prec_64().max(value.imag().prec_64());
         if next_prec > prec
-            && (cnum::parse_complex(inputs[0], inputs[1], next_prec)? != first
-                || cnum::parse_complex(inputs[2], inputs[3], next_prec)? != second)
+            && (inputs[0].value(next_prec)? != first || inputs[1].value(next_prec)? != second)
         {
             if cnum::verbose() {
                 eprintln!(
@@ -151,7 +207,7 @@ fn inverse_str(
         break value;
     };
     if !cnum::is_finite(&result) {
-        return Err("inverse tetration returned a non-finite result".into());
+        return Err(format!("{name} returned a non-finite result"));
     }
     let output_digits =
         usize::try_from(digits).map_err(|_| "output precision exceeds addressable memory")?;

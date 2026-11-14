@@ -1262,12 +1262,20 @@ fn signed_name(text: &str) -> Option<(bool, &'static Named)> {
     constants::named(name).map(|named| (negative, named))
 }
 
+/// A decimal number written in one piece. The decimal reader skips spaces
+/// and underscores, so that `2 1` would be 21: such a text is left to the
+/// grammar, where two numbers in a row are an error.
+fn decimal(text: &str) -> bool {
+    let gap = |c: char| c.is_whitespace() || c == '_';
+    !text.trim().contains(gap) && Float::parse(text).is_ok()
+}
+
 /// The complex number that `text` stands for, to `prec` bits: a decimal
 /// number, a named constant or a constant expression.
 pub fn complex(text: &str, prec: u64) -> Result<Complex, String> {
-    if Float::parse(text).is_ok() {
+    if decimal(text) {
         let value = cnum::parse_float(text, prec)?;
-        return Ok(Complex::with_val_64(prec, (value, 0)));
+        return Ok(tidy(Complex::with_val_64(prec, (value, 0))));
     }
     if let Some((negative, named)) = signed_name(text) {
         let value = named.value(prec)?;
@@ -1278,15 +1286,24 @@ pub fn complex(text: &str, prec: u64) -> Result<Complex, String> {
 }
 
 /// The precision at which the inputs of a run are read: `prec`, or more for
-/// an expression so large that `prec` bits would make a whole number of a
-/// value that is another number. Whether a height is whole, and whether it
-/// is even, decides exact cases: `10^100 + 1` must stay odd.
+/// an expression with a number of more digits written in it, and for one so
+/// large that `prec` bits would make a whole number of a value that is
+/// another number. Whether a base is one, a height is whole, and whether it
+/// is even, decides exact cases: `re(1.0…01)` with fifty zeros is not the
+/// base one at ten digits, and `10^100 + 1` must stay odd.
 pub fn input_precision(inputs: &[&str], prec: u64) -> Result<u64, String> {
-    let mut needed = prec;
-    for text in inputs {
-        if Float::parse(text).is_ok() || signed_name(text).is_some() {
-            continue;
+    let written = |text: &&&str| !decimal(text) && signed_name(text).is_none();
+    let mut prec = prec;
+    for text in inputs.iter().filter(written) {
+        // A text that has no tokens is refused by the evaluation below.
+        for token in tokens(text).unwrap_or_default() {
+            if let Token::Number(number) = token {
+                prec = prec.max(cnum::checked_input_precision(1, &[&number])?);
+            }
         }
+    }
+    let mut needed = prec;
+    for text in inputs.iter().filter(written) {
         let value = evaluated(text, prec)?;
         for part in [value.real(), value.imag()] {
             let rounded = Float::with_val_64(prec, part);
@@ -1309,21 +1326,26 @@ pub fn input_precision(inputs: &[&str], prec: u64) -> Result<u64, String> {
     Ok(needed)
 }
 
-/// The number `first + i second` of two inputs: its real and imaginary
-/// parts when both are real.
-pub fn pair(first: &str, second: &str, prec: u64) -> Result<Complex, String> {
-    let (a, b) = (complex(first, prec)?, complex(second, prec)?);
-    // With an exact zero in each sum there is nothing to round.
-    if (a.real().is_zero() || b.imag().is_zero()) && (a.imag().is_zero() || b.real().is_zero()) {
-        let (re, im) = a.into_real_imag();
-        let (shift, turn) = b.into_real_imag();
-        return Ok(tidy(Complex::with_val_64(prec, (re - turn, im + shift))));
+/// The real number that `text` stands for, to `prec` bits. Where a number
+/// is given by its real and its imaginary part, each of the two is real: a
+/// complex value is refused, not added to the other part.
+pub fn real(text: &str, prec: u64) -> Result<Float, String> {
+    let (re, im) = complex(text, prec)?.into_real_imag();
+    if im.is_zero() {
+        return Ok(re);
     }
-    let turned = Node::Binary('*', Box::new(Node::Imaginary), Box::new(parse(second)?));
-    let value = Node::Binary('+', Box::new(parse(first)?), Box::new(turned))
-        .settled(prec)
-        .map_err(|reason| format!("invalid number {first:?} + i ({second:?}): {reason}"))?;
-    Ok(Complex::with_val_64(prec, value))
+    Err(format!(
+        "invalid number {text:?}: it is not real (imaginary part {}); each of four numbers is \
+         a real or an imaginary part: take re(...) of it, or give two complex numbers instead \
+         of four",
+        cnum::format_float(&im, 10)
+    ))
+}
+
+/// The number `first + i second` of two real inputs.
+pub fn pair(first: &str, second: &str, prec: u64) -> Result<Complex, String> {
+    let (re, im) = (real(first, prec)?, real(second, prec)?);
+    Ok(Complex::with_val_64(prec, (re, im)))
 }
 
 #[cfg(test)]
@@ -1642,11 +1664,9 @@ mod tests {
         assert!(near(&value("ate(2, 16)"), &value("3")));
         assert!(near(&value("ssrt(16, 3)"), &value("2")));
         assert!(near(&value("sroot(2^^0.5, 0.5)"), &value("2")));
-        // The two parts of a number may be any expressions.
-        let base = pair("2^^2", "sqrt(-1)", prec).unwrap();
-        assert_eq!(base, Complex::with_val_64(prec, (3, 0)));
-        let base = pair("1+i", "2-3i", prec).unwrap();
-        assert_eq!(base, Complex::with_val_64(prec, (4, 3)));
+        // The two parts of a number may be any real expressions.
+        let base = pair("2^^2", "abs(sqrt(-1))", prec).unwrap();
+        assert_eq!(base, Complex::with_val_64(prec, (4, 1)));
         let base = pair("pi", "-e", prec).unwrap();
         assert_eq!(*base.real(), *value("pi").real());
         assert_eq!(*base.imag(), *value("-e").real());
@@ -1661,11 +1681,24 @@ mod tests {
     fn decimals_names_and_signs() {
         let prec = cnum::digits_to_bits(30);
         // A decimal number is read exactly as before.
-        for text in ["0.1", "-12345.6789", "1e-5", "2.5E3", "+7"] {
+        for text in ["0.1", "-12345.6789", "1e-5", "2.5E3", "+7", " 12 ", "1@3"] {
             let value = complex(text, prec).unwrap();
             assert_eq!(*value.real(), cnum::parse_float(text, prec).unwrap());
             assert!(value.imag().is_zero());
         }
+        // Not with a gap in it: `2 1` is two numbers, not 21.
+        for (text, reason) in [
+            ("2 1", "an operator is missing before 1"),
+            ("0.5 0", "an operator is missing before 0"),
+            ("1_2", "unknown name _2"),
+            ("1 . 5", "unexpected character '.'"),
+            ("1e 2 3", "an operator is missing before 3"),
+        ] {
+            let error = complex(text, prec).unwrap_err();
+            assert!(error.contains(reason), "{text}: {error}");
+            assert!(input_precision(&[text], prec).is_err(), "{text}");
+        }
+        assert_eq!(complex("- 3", prec).unwrap(), complex("-3", prec).unwrap());
         // A name alone is the constant rounded to nearest, and so is the
         // value of an expression.
         let pi = constants::named("pi").unwrap().value(prec).unwrap();
@@ -1711,9 +1744,33 @@ mod tests {
             "ate(2, 16)",
             "-pi",
             "0.1",
+            "1.5e-300 * 2e+250 + 0.000123456789012345i",
         ] {
             assert_eq!(input_precision(&[text], prec).unwrap(), prec, "{text}");
         }
+    }
+
+    #[test]
+    fn a_number_written_in_an_expression_keeps_its_digits() {
+        let prec = cnum::digits_to_bits(15);
+        let near_one = format!("1.{}1", "0".repeat(40));
+        let digits = cnum::digits_to_bits(42);
+        // Next to the name `re`, after an exponent, as an imaginary part.
+        for text in [
+            format!("re({near_one})"),
+            format!("1e-3 + {near_one}i"),
+            format!("2 * {near_one}e-7 + pi"),
+            format!("{near_one}^^2"),
+        ] {
+            let raised = input_precision(&["pi", &text, "2"], prec).unwrap();
+            assert_eq!(raised, digits, "{text}");
+        }
+        let text = format!("re({near_one})");
+        let base = complex(&text, input_precision(&[&text], prec).unwrap()).unwrap();
+        assert!(*base.real() > 1 && base.imag().is_zero());
+        assert_eq!(base, complex(&near_one, digits).unwrap());
+        // A decimal input alone is sized by the caller, as before.
+        assert_eq!(input_precision(&[&near_one], prec).unwrap(), prec);
     }
 
     #[test]
@@ -1754,8 +1811,62 @@ mod tests {
             let error = complex(text, prec).unwrap_err();
             assert!(error.contains("cancels"), "{text}: {error}");
         }
-        let error = pair("pi*i", "-pi", prec).unwrap_err();
-        assert!(error.contains("cancels"), "{error}");
+    }
+
+    #[test]
+    fn a_real_or_an_imaginary_part_is_real() {
+        let prec = cnum::digits_to_bits(30);
+        for (text, same) in [
+            ("-12.5", "-12.5"),
+            ("-pi", "-pi"),
+            ("sqrt(2)^3", "2*sqrt(2)"),
+            ("abs(3+4i)", "5"),
+            ("re(2+i)", "2"),
+            ("real(pi*i + e)", "e"),
+            ("im(2+3i)", "3"),
+            ("(1+i)*(1-i)", "2"),
+            ("re(exp(i*pi))", "-1"),
+            ("ssrt(16, 3)", "2"),
+        ] {
+            let value = real(text, prec).unwrap_or_else(|error| panic!("{text}: {error}"));
+            assert_eq!(value, *complex(same, prec).unwrap().real(), "{text}");
+        }
+        for (text, part) in [
+            ("i", "1.000000000"),
+            ("2-3i", "-3.000000000"),
+            ("sqrt(-4)", "2.000000000"),
+            ("ln(-1)", "3.141592654"),
+            ("1+1e-30i", "1.000000000e-30"),
+        ] {
+            let error = real(text, prec).unwrap_err();
+            let start = format!("invalid number {text:?}: it is not real (imaginary part {part});");
+            assert!(error.starts_with(&start), "{error}");
+            assert!(error.contains("re(...)") && error.contains("two complex numbers"));
+            for (first, second) in [(text, "0"), ("0", text)] {
+                assert_eq!(pair(first, second, prec).unwrap_err(), error);
+            }
+        }
+        // A part that cannot be told from zero is neither real nor complex.
+        for text in ["exp(i*pi)", "pi*i - i*pi + 2"] {
+            assert!(real(text, prec).unwrap_err().contains("cancels"), "{text}");
+        }
+        // A number written out is the number of its two parts, and -0 is 0.
+        for (text, re, im) in [
+            ("0.1+0.2i", "0.1", "0.2"),
+            ("-0.1-0.2i", "-0.1", "-0.2"),
+            ("1e-5 - 2.5e3i", "1e-5", "-2.5e3"),
+            ("-0.3i", "0", "-0.3"),
+            ("i", "0", "1"),
+            ("7", "7", "0"),
+            ("-0", "0", "0"),
+            ("0", "-0", "-0"),
+        ] {
+            let (value, parts) = (complex(text, prec).unwrap(), pair(re, im, prec).unwrap());
+            assert_eq!(value, parts, "{text}");
+            for part in [value.real(), value.imag(), parts.real(), parts.imag()] {
+                assert!(part.is_sign_positive() || !part.is_zero(), "{text}");
+            }
+        }
     }
 
     #[test]

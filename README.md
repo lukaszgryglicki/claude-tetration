@@ -95,6 +95,19 @@ zero imaginary part.
 * **Definition used:** `F_b(0) = 1`, `F_b(z+1) = b^{F_b(z)}`, with
   method-specific branch and normalization conventions
   (§ [Conventions](#12-conventions-and-normalization)).
+* **Status (14 November 2026, night):** the base `e^{1/e}` itself is
+  computed, at every height and with `--slog` and `--sroot`:
+  `tet 40 eta 0.5` is `1.257153075054172622171646564771545603158`, in
+  milliseconds (§ 6.11). Its fixed point `e` is parabolic, and the
+  tetration is the inverse of the Fatou coordinate of that fixed point: the
+  common limit of regular iteration below `e^{1/e}` and of the Kneser
+  tetration above it. The other bases with a neutral fixed point, `e^{−e}`
+  among them, are refused at once instead of running without end: there
+  regular iteration degenerates to the fixed point, and the two-fixed-point
+  tetration, which passes them, is beyond the present solver (§ 8).
+  `--sroot` takes `e^{1/e}` for an end of its bracket: a real root below
+  it is found by regular iteration alone, without the bases just above
+  it, which no solver reaches (§ 6.9).
 * **Status (14 November 2026):** each of the two numbers of a run can be
   one complex argument, `tet 30 1.5+0.5i 1+0.7i`, next to the four real
   ones of `tet 30 1.5 0.5 1 0.7`; of four arguments each must now be real
@@ -189,6 +202,7 @@ zero imaginary part.
    8. [Kneser theta-mapping solver](#68-kneser-theta-mapping-solver-real-b--e1e)
    9. [Inverses: super-logarithm and super-root](#69-inverses-super-logarithm-and-super-root)
    10. [Two-sided theta mapping: complex, negative and cut bases](#610-two-sided-theta-mapping-complex-negative-and-cut-bases-srckneser_complexrs)
+   11. [The base `e^{1/e}` itself: a parabolic fixed point](#611-the-base-e1e-itself-the-fatou-coordinate-of-a-parabolic-fixed-point-srcparabolicrs)
 7. [Numerical honesty](#7-numerical-honesty)
    1. [Rules for every change](#71-rules-for-every-change)
 8. [Known limitations](#8-known-limitations)
@@ -248,8 +262,11 @@ Precise statements of what `tet` returns:
   them is checked against the integer tower; at every other height of the
   half-plane each of them is proved to be that one. Outside that half-plane,
   where the tetration is many-valued, height reduction uses principal logs.
-  The theta mappings trace their branches as described in § 6.10. A global
-  single-valued function on all heights is not claimed.
+  The theta mappings trace their branches as described in § 6.10. The
+  tetration of the base `e^{1/e}` itself is single-valued on the plane of
+  heights cut along `h ≤ −2`, and the principal logs are its continuation
+  there (§ 6.11). For the other bases a global single-valued function on
+  all heights is not claimed.
 * **Real bases above one:** regular attracting iteration is used where
   available below `e^{1/e}`; the Kneser-type Cauchy construction is used
   above it. Real-height reality checks apply on the relevant real domain,
@@ -292,7 +309,8 @@ period-doubling point). The geography drives everything:
 | where `b` lives | dynamics at `L` | natural method |
 |---|---|---|
 | Shell–Thron interior (`\|λ\| < 1`) | attracting | Schröder linearization |
-| Shell–Thron boundary (`\|λ\| = 1`) | root-of-unity or irrationally neutral | sectorial Fatou coordinates / small-divisor analysis; not generally implemented |
+| the base `η = e^{1/e}` (`λ = 1`) | parabolic | Fatou coordinate of the fixed point `e` (§ 6.11) |
+| the rest of the Shell–Thron boundary (`\|λ\| = 1`) | root-of-unity or irrationally neutral | sectorial Fatou coordinates / small-divisor analysis; not implemented (§ 8) |
 | outside, real `b > η` | repelling, conjugate FP pair | Kneser theta mapping (Kouznetsov Cauchy integral as fallback) |
 | outside, general complex `b` | both primary fixed points repel | two-sided theta mapping (Kouznetsov Cauchy integral as fallback) |
 | real cut `0 < b < e^{−e}` | repelling with `λ < −1` | two-sided theta mapping (ε-continuation walker as fallback) |
@@ -1130,6 +1148,7 @@ Every row is subject to branch, domain, convergence and resource limits:
 | `b = 0`, `b = 1` | integer / all | exact special case | exact |
 | nondegenerate `b` | integers `h ≥ −1` whose iteration chain fits MPFR; towers that repeat exactly or pass below MPFR's range at any height (§ 6.2) | direct iteration | finite-precision arithmetic; exact special cases |
 | strictly attracting regular cases (`\|λ\| < 1`) | tested complex heights | direct inverse-Poincare / Schröder, logarithm branches by continuity (§ 6.3) | independent 100-digit fringe, 1000-digit ordinary and 100,000-digit native-scale witnesses; real heights above `−1` checked against the integer tower; computed up to `\|λ\| = 0.99999`; not all-height coverage |
+| the base `η = e^{1/e}` itself | all complex heights; integers `≤ −2` are singular | Fatou coordinate of the parabolic fixed point `e` (§ 6.11) | equals an independent mpmath implementation in 40 digits at 13 heights; the limit of the bases on both sides, with one slope; `--slog` and `--sroot` |
 | real `b > η` | all complex heights that do not overflow; integers `≤ −2` are singular | Kneser theta mapping (§ 6.8); Kouznetsov only if that construction fails | `2^^0.5` matches the independent reference to 100 digits and `e^^0.5` to 100; several contours agree; tested from `1.44467` to `10^10000` |
 | inverses `--slog`, `--sroot` | see § 6.9 | closed form (regular bases), Newton continuation on the forward evaluators | every result is checked by forward evaluation |
 | complex and negative bases whose primary fixed points both repel | all complex heights that do not overflow; cuts along the real axis left of `−2` | two-sided theta mapping (§ 6.10); Kouznetsov only if that construction fails | equals the Kneser solver on the real axis and five Cauchy-solver values; three or more contours agree to 30 digits at `−2`, `3+4i`, `−1+2i`, `−0.8+0.4i`; 182 of 182 scanned bases outside the region solved |
@@ -1142,6 +1161,50 @@ Every row is subject to branch, domain, convergence and resource limits:
 
 Numerically cross-checked, **not interval-certified**:
 
+* **The base `e^{1/e}` itself (14 November 2026, § 6.11).**
+  *Independent references.* The same definition written separately in
+  mpmath, with its own exponentials and logarithms at 60 and 70 digits,
+  gives the 40 printed digits of `tet` at 13 heights: real ones on both
+  sides of `−1`, complex ones, `−2.5` on the cut
+  (`0.69290717552… + 8.5397342226…i`, the limit from above), `−2.5 + 0.3i`
+  and `−7.25` left of it, the towers of 1000 and 1025 levels; and the 30
+  digits of `--slog` at four values.
+  *The bases next to it.* Regular iteration at `η − 10⁻³ … η − 10⁻¹²` runs
+  into `F_η(0.5)` linearly in the distance (30 digits; the Richardson limit
+  `1.2571530750541726222` is the value to its 20 digits), and the Kneser
+  tetration at `η + 10⁻² … η + 10⁻⁴` runs into it from the other side with
+  the same slope `0.4386`: the value is differentiable in the base across
+  `η`. It is smooth there as far as can be measured: the polynomial of
+  degree 5 through `F_η(0.5)` and the values of regular iteration at
+  `η − k·10⁻³`, `k = 1 … 5`, gives the Kneser values at `η + 5·10⁻⁴`,
+  `η + 10⁻³` and `η + 2·10⁻³` to `3.4·10⁻¹⁷`, `1.5·10⁻¹⁶` and `1.0·10⁻¹⁵`,
+  which is its own remainder of the sixth order (the three differences are
+  one coefficient, `−0.206`, times the products of the distances from the
+  six nodes; the heights `−1.5` and `2.5` show the same, with the
+  coefficients `−44.0` and `4.08`). The Taylor coefficients in `b − η`
+  begin `0.4385818002`, `−0.18433695`, `0.129898` at the height `0.5`; the
+  first, the slope, grows with the height like `e²h/(3η) ≈ 1.705 h`
+  (measured `1704.8` at the height `1000` and `170492` at `10⁵`). At
+  `η − 10⁻¹⁰` the heights `0.5 + i`, `−1.5`, `3 + 20i`, `1000`, `−2.5`,
+  `−2.5 + 0.3i`, `−7.25` and `−1000 + 0.3i` differ from the values at `η`
+  by that distance times a slope of the size of the height, on the cut and
+  left of it too.
+  *The function.* `F(h + 1) = η^{F(h)}` to 28 digits at seven heights, among
+  them `−3.5 − 0.25i` and `10⁶ + 0.5`; the tower of 1024 levels, which is
+  iterated, and the height 1025, which is read from the coordinate, meet;
+  results of 12 and 100 digits are the beginning of that of 300, each from
+  its own series (29, 117 and 296 terms on circles of radius `0.087`,
+  `0.026` and `0.0094`); far to the right `e − F(h)` is `2e/h` at `10³⁰`
+  and at `3·10⁵⁰ i`; next to `−2` the value moves by `e ln 10⁻⁹` between
+  the distances `10⁻²⁰` and `10⁻²⁹`, to 16 digits.
+  *Inverses.* `--slog` returns the heights `0.5`, `−1.5`, `0.5 + i`,
+  `17.25`, `−0.9 + 0.01i` and `2 − 3i` from their values; `--sroot` returns
+  `1.4446678610097661337` from the values at `0.5`, `2.5`, `−1.5`, `−0.5`
+  and `0.5 + i` given to 20 digits, and that root is the base itself for
+  the next run.
+  *Cost.* `tet D eta 0.5`: 20 and 100 digits in 10 ms, 500 in 0.14 s, 1000
+  in 1.0 s, 2000 in 7 s, 5000 in 1.8 minutes, on one thread; nine tenths
+  are the coefficients of the series.
 * **Proved branches at complex heights (14 November 2026).** Regular
   iteration proves the branch of each logarithm of a height reduction at
   complex heights and at real heights between `−2` and `−1` (§ 6.3).
@@ -1555,8 +1618,10 @@ part does not guarantee a solvable or accurate near-cut case.
   old Richardson ladder and the stalled continuation are history
   ([failure atlas](FAILURE_CASES.md)). The cost now grows roughly like
   `(b − η)^{−1/2}` to `(b − η)^{−2/3}`; `1.444668`
-  (`b − η = 1.4·10^{−7}`) takes 13 minutes at 20 digits. **The parabolic
-  base `η` itself is not supported** (needs Fatou coordinates).
+  (`b − η = 1.4·10^{−7}`) takes 13 minutes at 20 digits. The parabolic
+  base `η` itself is computed by the Fatou coordinate of its fixed point
+  (§ 6.11): what is missing are the bases between `η` and about
+  `η + 10^{−7}`.
 * **Neutral and very slowly attracting multipliers:** the former blanket
   strict-attractor exclusion is removed. In particular, the old deep-band
   garbage witness `b=0.0653281554868594+0.025i, h=48.013` now matches an
@@ -1577,7 +1642,7 @@ part does not guarantee a solvable or accurate near-cut case.
   minute, `0.0658` and `0.0659` six to nine minutes (before: `0.063` 91 s,
   no result in 40 minutes from `0.065` on). `0.06595` and `0.06598` gave no
   result in 45 minutes; `e^{−e} = 0.0659880…` itself is the neutral case.
-  Neutral multipliers are not covered. The base
+  Neutral multipliers other than 1 are refused at once (§ 8). The base
   `−0.8+0.4i`, where the Cauchy solver returned a different artifact at
   every precision, is now solved (§ 5.1); its anatomy is kept in
   `FAILURE_CASES.md` § A.2.
@@ -1792,7 +1857,8 @@ pairs and shrink further when coefficient bounds require it. Outward cubic
 and higher-tail majorants, intermediate logarithm domains, and paired
 actual-map/derivative perturbation bounds guard the larger blocks.
 The returned count is the number of original iterations, not pairs.
-This does not construct a Fatou coordinate at the exactly neutral multiplier.
+This does not construct a Fatou coordinate at the exactly neutral multiplier;
+for the multiplier 1, the base `e^{1/e}`, § 6.11 does.
 
 After complex jumps, refinement scales the norm error budget to each nonzero
 output component, so a small imaginary part cannot borrow the real part's
@@ -2276,6 +2342,13 @@ five minutes. Complex, negative and cut bases are the subject of § 6.10.
   cannot be confirmed by computing `b^^h` again.
   `slog_{1/2}(−100) = 0.750119449840629 − 0.968029912394000i`, the limit of
   `slog_{1/2}(−30)` and its neighbours, and `slog_{1.3}(−10^30) = −2`.
+* *The base `η` itself*: `h = α(z) − α(1)` with the Fatou coordinate `α` of
+  § 6.11, on the orbit of `z` into the petal of the fixed point `e`;
+  `slog_η(2) = 4.1033825593275631709`. Next to the fixed point the height
+  is large, `2e/(e − z)`; the fixed point has none, real values above it
+  are not values of this tetration, and a value whose orbit comes back to
+  the fixed point off the principal branch is an error, as for the bases
+  below `η`.
 * *Real `b > η`*: a real target is reduced by `log_b` / `b^·` to `(0, 1]`
   and the reduced equation is solved (bracketed Newton) and verified there,
   so towers as large as `10^(10^15)` are no harder than small targets.
@@ -2306,6 +2379,24 @@ five minutes. Complex, negative and cut bases are the subject of § 6.10.
 
 **`--sroot` (`--ssrt`): the base `b` with `F_b(h) = z`.**
 
+* A target that is the value of the base `η = e^{1/e}` at the given height
+  returns `η` (`sroot(1.2571530750541726222, 0.5) = 1.4446678610097661337`,
+  0.3 s). A search cannot end there: the forward values of the bases next
+  to `η` take ever longer, and those just above it are out of reach. So
+  the value at `η` (§ 6.11) is compared with the target first, to within
+  the change that a few units in the last requested digit of the base
+  cause; the slope for that comes from the base `2⁻²⁴` below `η`, where
+  regular iteration is quick. A target further than a millionth from that
+  value goes to the search at once. The search for a real root uses that
+  value too: when `η` lies inside its bracket it becomes one end of it, and
+  a root below `η` is then found by regular iteration alone
+  (`sroot(1.2571, 0.5)`: 0.6 s, 14 s before; a root `10⁻¹⁰` below `η`:
+  15 s at 15 digits, where the theta mapping was asked for bases just above
+  `η` and had not come back after 15 minutes). A secant step that would
+  cross `η` from below is cut to the middle. A root above `η` still costs
+  the theta mapping of its neighbours (`sroot(1.2572, 0.5)`: 2 minutes),
+  and one less than about `10⁻⁷` above `η` is out of reach like those
+  bases (§ 5.3).
 * Real `z > 1`, `h > 0`: the unique real `b > 1`, by a bracket in `ln b`
   (a tower beyond MPFR's range counts as "too large"), Illinois regula falsi
   at 24 digits and secant steps at full precision. `h = 1` returns `z`;
@@ -2464,6 +2555,137 @@ to `e^{−e}` (§ 5.3). Very small bases need the continuation: `10^{−6}` 13 s
 (both junctions, the functional equation across the strip, normalization,
 discarded modes) are consistency checks, not an enclosure.
 
+### 6.11 The base `e^{1/e}` itself: the Fatou coordinate of a parabolic fixed point (`src/parabolic.rs`)
+
+At `b = η = e^{1/e}` the two real fixed points of `b^z` have met at `e`,
+and the multiplier there is 1: there is no Schröder function, and the
+orbit of 1 approaches the fixed point like `1/n`, not geometrically. With
+`z = e(1 + u)` the map `b^z` is
+
+```
+u  ↦  e^u − 1  =  u + u²/2 + u³/6 + …
+```
+
+whose attracting direction is `u < 0`. The **Fatou coordinate** `α` of
+that petal (the Abel function, `α(e^u − 1) = α(u) + 1`) takes the place of
+the logarithm of the Schröder function, and the tetration is its inverse:
+
+```
+F(h) = e (1 + ψ(h + α(u₀))),    ψ = α⁻¹,    u₀ = 1/e − 1  (the tower value 1).
+```
+
+`α` is unique up to a constant, so nothing is chosen: `F` is the limit of
+the regular iteration of the bases below `η`, and the Kneser tetration of
+the bases above `η` runs into it as well (§ 5.1).
+
+**The coordinate.** The Abel equation has the formal solution
+
+```
+A(u) = −2/u + ln(−u)/3 + c₁u + c₂u² + …,
+c₁ = −1/36,  c₂ = 1/540,  c₃ = 1/7776,  c₄ = −71/435456,  c₅ = 8759/163296000, …
+```
+
+a divergent series: the `c_k` grow like `(k − 1)!/(4π)^k` (the ratio stays
+below 0.78 for the first 600). It serves as the accelerator of a limit
+that converges by itself. For every `N` the truncated `A_N` gives
+
+```
+α(u) = lim (A_N(u_n) − n)        along the orbit  u_{n+1} = e^{u_n} − 1,
+```
+
+and what a finite `n` leaves is the sum of the **defects**
+`ρ_N(u) = A_N(e^u − 1) − A_N(u) − 1` over the rest of the orbit. `ρ_N` is
+an analytic function of `u` (its logarithms combine to
+`ln((e^u − 1)/u)`) that begins with `−(N+1)/2 · c_{N+1} u^{N+2}`. The series
+is used on a disk `|u| ≤ r`. The defect is measured at eight points of the
+circle `|u| = r`: the maximum principle bounds it inside, and next to its
+first term its modulus hardly varies on the circle (a factor 4 is added
+for the points between). Along an orbit that stays in the disk it falls
+like `|u|^{N+2}` while `−2/u` moves by about one a step, so the rest of an
+orbit adds up to at most `2/r + 2` of the measured defects, and twice that
+for an orbit that comes around from the repelling side. A state is
+accepted when that bound is below `2^{−p}` for the `p` working bits of the
+run; no bound of the coefficients is assumed. The radius is
+`r = 4π/((p + 32) ln 2 · (3/2 + p/4096))`: `e^{−4π/r}` is the smallest term
+of the series there, and a radius below the largest that reaches the
+precision trades terms, which cost their square, for steps of the orbit
+(20 digits: 38 terms on `r = 0.073`; 100: 117 on `0.026`; 1000: 812 on
+`0.0022`).
+
+**The coefficients.** With `A(u) = Σ c_k u^k` the equation is
+`A(e^u − 1) − A(u) = R(u)`, `R(u) = 1 + 2/(e^u − 1) − 2/u −
+ln((e^u − 1)/u)/3`, whose coefficient of `u^n` is `2β_{n+1} − β_n/(3n)` for
+the coefficients `β_j = B_j/j!` of `u/(e^u − 1)`. The coefficient
+`t(k, n)` of `u^n` in `(e^u − 1)^k` obeys
+`(n + 1) t(k, n + 1) = k (t(k − 1, n) + t(k, n))`, so one column is kept,
+and the coefficient of `u^n` of the equation gives `c_{n−1}`, because
+`t(n, n) = 1` and `t(n − 1, n) = (n − 1)/2`. The recursion is stable (two
+digits lost at 300 terms), and the coefficients carry 64 guard bits. The
+`β_j` come from the tangent numbers, integers whose recurrence multiplies
+by small numbers only (Brent and Harvey).
+
+**A value.** `ψ(y)` is evaluated where the series covers the point: `y` is
+moved right by the least whole `k` with `Re(y + k) ≥ 1` and
+`|y + k| ≥ 2/r + 2` (by none when `|Im y| ≥ 2/r + 4`: the orbit of such a
+point passes the fixed point at that distance), `A_N(u) = y + k` is solved
+by Newton's iteration from `u = −2/(y + k)`, and `k` logarithms
+`u ↦ ln(1 + u)` lead back. So a height far to the right costs nothing more
+(`F(10³⁰) = e − 5.4·10⁻³⁰`), and a tower of more than 1024 levels, which
+never repeats, is read from the coordinate as well. The conditioning of
+the chain of logarithms is counted as in § 6.3, and the run is repeated
+with more bits where it asks for them (next to `−2`).
+
+**The logarithms are the principal ones, at every height.** `ψ` is
+one-to-one on a right half-plane, being an inverse function. The
+tetration continues from there to `Re h > −2` and stays one-to-one: two
+heights with one value would have one value after any number of steps
+`b^z`, in the half-plane where that cannot be. Its image is then
+connected, symmetric about the real axis, and holds no two points a period
+`2πi/ln b` apart, so it lies in the strip `|Im z| < πe`, where the
+principal logarithm inverts `b^z`: the argument of § 6.3 for a real base,
+with the half-plane of the Fatou coordinate in place of the disk of the
+Schröder function. In `Re h > −2` the function is real only on the real
+axis (a real value below `e` is taken there already, and no orbit that
+converges to `e` starts at `e` or above it). So further left no value
+meets the cut of the logarithm except on the real axis: the principal
+logarithms continue the tetration of `η` to the whole plane cut along
+`h ≤ −2`, with the limit from above on the cut
+(`F(−2.5) = 0.69290717552… + 8.5397342226…i`) and the singular integers
+`≤ −2`. To the left a height costs one logarithm per unit: the chain
+approaches `e` again, along the repelling direction, and never becomes
+stationary.
+
+**The base is recognized by its value.** A real base is `η` itself when it
+is `e^{1/e}` correctly rounded to the precision that it has, or to the
+bits that it carries where it was given more room later, and these are at
+least 32 more than the requested digits. The constant `eta` and the
+expressions `e^(1/e)`, `exp(1/e)` are that. A decimal number is read with
+64 bits more than its digits and never is: `1.4446678610097661337` stays
+the decimal number, a base `3.4·10⁻²⁰` above `η` that no solver reaches.
+A base that passes is the number `e^{1/e}`, not its rounding. Up to
+heights of about `10⁹` the two have the same requested digits: the value
+is differentiable in the base at `η`, with the slope `0.44` at the height
+`0.5` and `1.7 h` at a large height `h` (§ 5.1), and the rounding is at
+most `2⁻³²` of the last digit. Further right only the number itself has a
+value that its rounding does not decide: the tower of a base above `η`,
+however close, leaves `e` in the end.
+
+**Inverses.** `--slog`: the height of `z` is `α(z) − α(1)`, on the orbit
+of `z` into the disk of the series. A value next to the fixed point on its
+repelling side is covered directly when `|Im(2/u)| ≥ 2/r + 2`, and given up
+when its orbit would need more than `2⁴⁰` steps to come around; an orbit
+whose imaginary part outgrows the working precision is given up as well
+(its sine would take the whole length of the number). The result is
+verified by the forward value like every super-logarithm (§ 6.9).
+`--sroot`: a target that is the value of `η` at the given height returns
+`η`; § 6.9 has the comparison.
+
+Cost: milliseconds up to 100 digits, 1.0 s at 1000, 7 s at 2000 and 1.8
+minutes at 5000 digits; nine tenths are the `N²/2` products of the
+coefficients. Not covered: the bases next to
+`η` on either side stay with the solvers of § 6.3 and § 6.8, whose cost
+grows towards it, and the other neutral bases (§ 8).
+
 ---
 
 ## 7. Numerical honesty
@@ -2598,6 +2820,7 @@ digits, and fails on any that is not permitted there by name.
 | `constants.rs` | starting values `3/4`, `2/3`, `3/8` of the Newton iterations; guard bits 64 | exact small ratios at the working precision; each iteration ends on a residual test there |
 | `schroder::LongSeries`, `schroder::Anchor` | step and term counts (256, 4096) and cost weights that choose between the short series, the long series and Taylor jumps; the 65536 levels of the integer tower kept for the branch check | each choice is between methods that converge to the same value; the check can only reject |
 | `schroder::Proof`, `schroder::Trail` | the sixteenth kept in reserve in every comparison of a branch proof and the `2¹⁶` roundings of a height that the halves of a divided pair of samples keep; where samples are added (the bound `3π/4`, 64 parts of a gap, ladders by powers of two); 65536 offsets collected before they are sorted; 262144 samples per unit of height at most | the first two can only refuse a pair, and a refused pair gets more samples or ends in an error; the others set how densely a curve is sampled and when a chain is given up, never a value |
+| `parabolic::Fatou`, `dispatch::PARABOLIC_TOWER`, `inverse::sroot_parabolic` | 64 guard bits of the coefficients; the factor `3/2 + bits/4096` by which the circle of the series is smaller than the largest that reaches the precision, and its reductions by 7/8; eight points of the circle with a factor 4 between them; the 1024 levels up to which the tower of `η` is iterated; the `2⁴⁰` steps after which an orbit on the repelling side is given up; the window `2⁻²⁰` and the base `2⁻²⁴` below `η` for the slope of a super-root | they set the cost, or refuse: a series is accepted by its measured defect, a tower above 1024 levels is the same value by another exact route, and the slope only sets the tolerance of a comparison |
 | `kouznetsov.rs` | `as_secs_f64` | timing output |
 | `examples/grid_runner.rs`, `examples/edge_runner.rs` | `f64` percentages of passing cells, `as_secs_f64` | statistics and timing output of the two test-grid tools; every value they print comes from the library |
 | `examples/test_w0.rs` | a working precision of 8 digits | a diagnostic that prints one Lambert W value at the precision it names; no result of the library passes through it |
@@ -2619,12 +2842,40 @@ The same contract opens `src/lib.rs`.
 
 ## 8. Known limitations
 
-* **Coverage:** neutral multipliers (the Shell–Thron boundary itself,
-  including the parabolic base `η`) are not covered. The cost grows without
-  bound towards them from inside the region, towards `η` and `e^{−e}` on the
-  real axis, and from outside next to low-order roots of unity of the
-  multiplier (§ 5.3). A failed construction is not
-  proof that no alternative mathematical construction exists.
+* **Coverage:** of the neutral multipliers (the Shell–Thron boundary) only
+  the base `η`, with the multiplier 1, is covered (§ 6.11). Every other
+  base whose multiplier the working precision cannot tell from one on the
+  unit circle is refused at once at non-integer heights (before
+  14 November such a run did not end): `e^{−e}` (`towermin`, multiplier
+  `−1`) and the complex bases `exp(λ e^{−λ})` with `|λ| = 1`. The two
+  families of this program part there.
+  *Regular iteration degenerates* where the multiplier is a root of unity
+  of an order `q ≥ 2`. The cycle of length `q` that is born at such a base
+  (for `e^{−e}` the 2-cycle that the tower of the bases below it settles
+  on) repels on the inner side and lies on the edge of the basin, at a
+  distance from the fixed point `L` that goes to 0 with the distance of
+  the base. The inverse Schröder function is one-to-one on its disk and
+  leaves those points out, so by Koebe's quarter theorem the disk is at
+  most four times that distance wide, and by the growth theorem the values
+  at the heights inside `|λ^{h+2}| < 1` tend to `L`. Measured, also at the
+  real non-integer heights on the edge of that half-plane: at `e^{−e} + δ`
+  the height `0.5` lies `1.5 √δ` from `1/e` for `δ = 10⁻² … 10⁻¹⁰`, and
+  `0.25`, `1.5`, `2.75` and `0.5 + 0.5i` approach it at the same rate; for
+  the multipliers `(1 − δ) e^{2πi/3}` and `(1 − δ) i` the height `0.5` lies
+  `0.40`, `0.18`, `0.080` and `0.73`, `0.44`, `0.25` from `L` at
+  `δ = 10⁻², 10⁻³, 10⁻⁴`: like `δ^{1/3}` and `δ^{1/4}`. The limit is `L` at
+  every non-integer height and the tower at the integers, nothing to
+  compute.
+  *The two-fixed-point tetration passes through.* At the cut bases `0.05`,
+  `0.06`, `0.063` and `0.0659` the height `0.5` is `0.1026 + 0.4470i`,
+  `0.1336 + 0.4446i`, `0.1420 + 0.4437i` and `0.1499 + 0.4427i`, on its way
+  to about `0.1502 + 0.4426i` at `e^{−e}`. That function at a neutral base
+  is out of reach of the two-sided solver (§ 8.1).
+  The cost grows without bound towards the neutral bases from inside the
+  region, towards `η` and `e^{−e}` on the real axis, and from outside next
+  to low-order roots of unity of the multiplier (§ 5.3). A failed
+  construction is not proof that no alternative mathematical construction
+  exists.
 * **Resources and convergence:** the former 32768/131072-node budgets and
   fixed iteration/order limits are removed. For real bases above `η` the
   theta-mapping solver (§ 6.8) replaces the Cauchy rectangle, whose base-2
@@ -2640,7 +2891,11 @@ The same contract opens `src/lib.rs`.
   MPFR's range (§ 6.2), so `Re h = 10^30` finishes only then or if the tower
   leaves MPFR's range first. To the left the cost is bounded for the theta
   mappings; regular iteration takes one logarithm per unit until its chain
-  is periodic or, for a real base, stationary (§ 6.3). For a complex base,
+  is periodic or, for a real base, stationary (§ 6.3). For the base `η`
+  itself a height far to the right costs nothing more (the Fatou
+  coordinate takes any size), and one to the left costs a logarithm per
+  unit without end, because its chain never becomes stationary (§ 6.11).
+  For a complex base,
   a height next to the boundary of the half-plane `|λ^{h+2}| < 1` needs the
   more samples the closer it lies, because each branch is proved there
   (§ 6.3). Next to the boundary itself they grow slowly (`|λ| = 0.992` at
@@ -2679,7 +2934,7 @@ The following remaining directions require separate mathematical work:
 | Complex bases outside Shell–Thron | Done by the two-sided theta mapping (§ 6.10) for every scanned base whose primary fixed points both repel | A proof that the iteration converges for every such base; the cost next to low-order roots of unity of the multiplier, where the disk of the inverse series shrinks (§ 5.3) |
 | The two-fixed-point function inside Shell–Thron | It exists there as well and differs from regular iteration (Paulsen 2019): at `\|λ\| = 0.998`, argument 1, height `0.5`, by `0.09 − 0.04i` | A convention for offering both families; the solver currently requires a repelling upper fixed point |
 | Regular iteration next to the boundary | With the long series (§ 6.3) it reaches `\|λ\| = 0.9999` in 45 s and `0.99999` in 9 minutes; each further factor of ten costs ten to thirty times more, mostly for the samples of the chains | Samples kept only on the levels that need them; the coefficient recursion in parallel; the branch of the many-valued region outside `\|λ^{h+2}\| < 1` (principal logarithms at present). The branches inside it are proved at complex heights and checked against the integer tower at real ones (§ 6.3) |
-| Parabolic/root-of-unity cases | Sectorial Fatou coordinates exist in classical local theory; at λ=−1 use the second iterate | Truncation bounds, sector matching, inversion and the intended global normalization |
+| Neutral multipliers other than 1 | The multiplier 1, the base `η`, is done (§ 6.11). At a root of unity of an order `q ≥ 2` regular iteration has only the degenerate limit of § 8; the function of interest there is the two-fixed-point tetration, which passes the boundary (`0.1502 + 0.4426i` at `e^{−e}`, height `0.5`, by the cut bases). Its solver sums an inverse series at each fixed point and gets into the disk of that series by whole steps, each of which multiplies the coordinate by `1/λ`: at `\|λ\| = 1` nothing shrinks, only the imaginary part of the height does, and the expansion at the fixed point is resonant (powers of `e^{2πih/q}` with polynomials in `h`) | A parametrization of the upper end that converges without contraction (the `q` repelling petals of the `q`-th iterate and their gluing by the map), with truncation bounds; then the theta mapping on it |
 | Near-parabolic real bases | With the long Poincaré series (§ 6.8) the theta mapping reaches `b − η ≈ 2·10⁻⁶`, at a cost like `(b − η)^{−1/2…−2/3}` | Taylor expansions of the Abel function away from the fixed point, or perturbed Fatou coordinates |
 | Other rotating near-neutral attractors | Paired steps now address strict attraction near `-1`; other near-resonances still use generic bounds | Further cancellation-aware iterates with local error/branch bounds, not relaxed precision goals |
 | Difficult complex bases | `−0.8+0.4i` is solved (§ 5.1); the former strictly attracting deep-band witness is independently checked | An external reference value for a complex base outside the region, from an unrelated implementation |
@@ -2737,6 +2992,8 @@ src/
   schroder_complex_jumps.rs  guarded complex coefficient/error-disk jumps
   kneser.rs          theta-mapping solver for real bases above e^(1/e) (§ 6.8)
   kneser_complex.rs  two-sided theta mapping: complex, negative, cut bases (§ 6.10)
+  parabolic.rs       the base e^(1/e) itself: Fatou coordinate of its
+                     parabolic fixed point (§ 6.11)
   inverse.rs         super-logarithm and super-root (§ 6.9)
   kouznetsov.rs      Cauchy-integral solver: grids, FFT matvec, LM Newton,
                      EM correction, normalization, continuation,
@@ -2746,7 +3003,7 @@ src/
   constants.rs       named constants at any precision (§ 3.2)
   expression.rs      constant expressions for the textual inputs (§ 3.2)
   integer_height.rs  finite-precision integer towers and exact special cases
-tests/               phase1…phase18 plus Python plotting/Makefile regressions
+tests/               phase1…phase19 plus Python plotting/Makefile regressions
                      batteries (CLI, regions, Schröder, Kouznetsov,
                      regression witnesses incl. the t860 case)
 web/                 web page and HTTP API in front of the tet binary (§ 3.3):
@@ -2769,6 +3026,7 @@ $ cargo test --release --test phase4_schroder   # regular iteration, branches, l
 $ cargo test --release --test phase16_kneser    # theta-mapping solver (about 30 s)
 $ cargo test --release --test phase17_inverse   # --slog / --sroot (about 3 minutes)
 $ cargo test --release --test phase18_complex_kneser   # two-sided solver (about a minute)
+$ cargo test --release --test phase19_parabolic   # the base e^(1/e) itself (about 25 s)
 $ cargo test --release --test phase8_verification   # regression witnesses (about 80 s)
 $ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_plotting.py'
 $ cargo test --release --doc
@@ -2880,6 +3138,25 @@ phase 15 in 35 s, 43 s and 42 s, the real base in 198 s, 391 s and 986 s,
 the complex one in 366 s, 637 s and 1383 s. Those are the times of the
 runs before, with the load of the default tier on top: at the complex
 height of the two complex bases every Taylor jump is proved and taken.
+
+The run of the night of 14 November was made on the tree with the base
+`e^{1/e}` itself (§ 6.11), the refusal of the other neutral bases (§ 8)
+and the bracket of the super-root at `e^{1/e}` (§ 6.9). The default tier
+passed, one target at a time: library 80 (four of them for the Fatou
+coordinate), the new phase 19 8, every other target with the counts
+above, and the 19 Python tests. New tests: `t1901`–`t1908` (the values of
+an independent implementation; the bases on both sides; the functional
+equation, the tower and three precisions; heights far to the right and
+next to `−2`; `--slog`; `--sroot` at the base and just below it; the
+other neutral bases are refused and their towers computed) and four unit
+tests of `src/parabolic.rs`. The slow suites 13–15 passed, all 17 tests,
+six at a time and next to the default tier (same host and flags): phase
+13 in 21 s, 30 s, 69 s and 514 s; phase 14 in 11 s, 186 s, 407 s and
+858 s; phase 15 in 38 s, 43 s and 52 s, the real base in 208 s, 389 s and
+1006 s, the complex one in 381 s, 653 s and 1436 s. They ran before the
+last two changes of that night (the faster coefficients of § 6.11, the
+bracket of the super-root), which they do not reach; the default tier
+was repeated after each.
 
 ## 11. References
 

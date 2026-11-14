@@ -20,7 +20,12 @@
 
 use rug::{Complex, Float};
 
-use crate::{cnum, integer_height, kneser, kneser_complex, kouznetsov, regions, schroder};
+use crate::{
+    cnum, integer_height, kneser, kneser_complex, kouznetsov, parabolic, regions, schroder,
+};
+
+/// The levels up to which the tower of the base `e^(1/e)` is iterated.
+const PARABOLIC_TOWER: u32 = 1024;
 
 fn debug_enabled() -> bool {
     cnum::verbose()
@@ -146,6 +151,12 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
 
     // ---- Integer heights: direct iteration regardless of region ----
     if h.imag().is_zero() && h.real().is_integer() {
+        // The tower of e^(1/e) approaches e like 1/n and never repeats: a
+        // high one is a point of the Fatou coordinate.
+        if *h.real() > PARABOLIC_TOWER && parabolic::is_eta(b, digits) {
+            dprint("base e^(1/e): a tower of this height by the Fatou coordinate");
+            return parabolic::tetrate(h, prec, digits);
+        }
         dprint(&format!(
             "integer height n={}",
             cnum::DisplayFloat(h.real())
@@ -170,9 +181,18 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
         return Ok(Complex::with_val_64(prec, result.conj_ref()));
     }
 
+    // ---- The base e^(1/e) itself: a parabolic fixed point ----
+    if parabolic::is_eta(b, digits) {
+        dprint("base e^(1/e): parabolic fixed point e, Fatou coordinate");
+        return parabolic::tetrate(h, prec, digits);
+    }
+
     // ---- Region classification (drives algorithm choice) ----
     let region = regions::classify(b, prec)?;
     dprint(&format!("region = {}", region.name()));
+    if let Some(refusal) = neutral_base(&region, prec) {
+        return Err(refusal);
+    }
     if debug_enabled() {
         if let Some(la) = lambda_abs_of(&region) {
             eprintln!("tet: |λ| ≈ {}", cnum::DisplayFloat(la));
@@ -402,6 +422,53 @@ fn tetrate_impl(b: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Comp
             }
         }
     }
+}
+
+/// The refusal of a base whose multiplier the working precision cannot tell
+/// from one on the unit circle: a base of the Shell-Thron boundary. (The
+/// base `e^(1/e)`, with the multiplier 1, has gone to `parabolic` before.)
+/// Regular iteration and the two-sided theta mapping would both run without
+/// end there: each sums a series at a fixed point whose multiplier is off
+/// the unit circle, and neither has a limit that it could reach.
+pub(crate) fn neutral_base(region: &regions::Region, prec: u64) -> Option<String> {
+    let regions::Region::ShellThronBoundary(data) = region else {
+        return None;
+    };
+    let shift = usize::try_from(prec.saturating_sub(32)).ok()?;
+    let resolution = Float::with_val_64(prec, 1) >> shift;
+    let off = Float::with_val_64(prec, &data.lambda_abs - 1u32).abs();
+    if off > resolution {
+        return None;
+    }
+    // The order of the multiplier as a root of unity, if it is a low one.
+    let mut power = cnum::one(prec);
+    let mut order = None;
+    for q in 1u32..=64 {
+        power *= &data.lambda;
+        let gap = cnum::abs(&Complex::with_val_64(prec, &power - 1u32), prec);
+        if gap <= Float::with_val_64(prec, &resolution * q) {
+            order = Some(q);
+            break;
+        }
+    }
+    let (re, im) = cnum::format_complex(&data.fixed_point, 10);
+    let why = match order {
+        Some(q) => format!(
+            "its multiplier is a root of unity of order {q}: regular iteration \
+             degenerates there (for the bases next to it inside the Shell-Thron region the \
+             values at non-integer heights tend to the fixed point {re} + {im} i itself), \
+             and the two-fixed-point tetration of the bases outside needs a solver for a \
+             neutral fixed point; integer heights are computed (README § 8)"
+        ),
+        None => "its multiplier is not a root of unity of an order up to 64: neither \
+                 regular iteration nor the two-fixed-point construction reaches a \
+                 neutral fixed point; integer heights are computed (README § 8)"
+            .to_string(),
+    };
+    Some(unsupported_msg(
+        "base on the Shell-Thron boundary (|λ| = 1 to the working precision)",
+        &why,
+    ))
 }
 
 /// A failed regular iteration at an attracting fixed point is final: the

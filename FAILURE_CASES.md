@@ -164,6 +164,8 @@ region; the test now compares closest approaches (README § 6.10).
 | 0.0659880358454 | 0 | 0.5 | 0 / 0.25 | paired Taylor jumps | independent components through 100 digits in phase15 |
 | 0.0659880358454 | 1e-14 | 0.5 | 0 / 0.25 | paired Taylor jumps | independent components through 100 digits in phase15 |
 | 0.0659880358453125370767901876 | 1e-40 | 0.5 | 0 | unverified production value | independent reference exists; preliminary 50-digit CLI exceeded 1800 seconds with no output |
+| `e^(-e)` (`towermin`) | 0 | 0.5 | 0 | refused at once (README § 8) | multiplier `−1`: regular iteration degenerates to the fixed point `1/e` (`\|F − 1/e\| = 1.5 √δ` at `e^(-e) + δ`), and the two-fixed-point function of the cut bases (about `0.1502 + 0.4426i` there) has no solver at a neutral fixed point; the run did not end before November 14 |
+| `e^(1/e)` (`eta`) | 0 | 0.5 | 0 | Fatou coordinate of the parabolic fixed point (README § 6.11) | `1.2571530750541726222` in milliseconds since November 14; no result before. The limit of the rows above and below |
 | 1.4448 | 0 | 0.5 | 0 | theta mapping, long Poincaré series | `1.2572110255920272276`, two contours; 17 s since November 13 (t870) |
 | 1.4447 | 0 | 0.5 | 0.5 | not finished | t872 (ignored) now requires a value satisfying the functional equation; expected to take hours |
 | 1.5 | 0 | 0.5 | 0 | theta mapping | `1.28087727794027`, about 1 second; equals the mpmath prototype |
@@ -827,5 +829,7 @@ contours/limits. Preserve independent references and explicit branch/domain
 contracts. README §8.1 separates promising directions from proven coverage.
 The October 5 strict-attractor inverse germ is implemented. Since November 12
 the theta mappings cover real bases above `e^{1/e}`, complex and negative
-bases outside the Shell–Thron region and the cut bases; neutral multipliers
-and global certification remain research.
+bases outside the Shell–Thron region and the cut bases; since November 14
+the base `e^{1/e}` itself, whose multiplier is 1, has its Fatou coordinate
+(README § 6.11). The other neutral multipliers and global certification
+remain research.

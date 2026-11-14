@@ -1,3 +1,88 @@
+# Status Update — 2026-11-14, night (the base e^(1/e) itself)
+
+**The base `e^{1/e}` is computed**, at real and complex heights, with the
+super-logarithm and the super-root (README § 6.11, `src/parabolic.rs`).
+`tet 40 eta 0.5` is `1.257153075054172622171646564771545603158`, in
+milliseconds; `e^(1/e)` and `exp(1/e)` name the same base. Until now the
+run did not end: the fixed point `e` of that base has the multiplier 1, so
+there is no Schröder function, and the solvers of the bases next to it
+take the longer the closer the base lies.
+
+**How.** With `z = e(1 + u)` the map `b^z` is `u ↦ e^u − 1`. The Fatou
+coordinate `α` of its attracting petal (`α(e^u − 1) = α(u) + 1`) takes the
+place of the logarithm of the Schröder function, and the tetration is
+`F(h) = e(1 + α⁻¹(h + α(1/e − 1)))`. The formal solution
+`−2/u + ln(−u)/3 − u/36 + u²/540 + …` of the Abel equation diverges, but
+`α(u) = lim (A_N(u_n) − n)` along the orbit of `u` converges for every
+truncation `A_N`, and what a finite `n` leaves is the sum of the defects
+`A_N(e^u − 1) − A_N(u) − 1` over the rest of the orbit. The defect is
+analytic and begins with `u^{N+2}`; it is measured on the circle on which
+the series is used, and a series is accepted only when the bound of that
+sum is below the working precision. At 20 digits that takes 38 terms on
+`|u| ≤ 0.073`, at 1000 digits 812 terms on `|u| ≤ 0.0022`.
+
+**The logarithms of the height reduction are the principal ones**, at
+every height: the proof for a real base (README § 6.3) carries over with
+the half-plane of the Fatou coordinate in place of the disk, and left of
+`−2` the values are real only on the real axis, so the principal
+logarithms continue the function to the whole plane cut along `h ≤ −2`.
+A height far to the right costs nothing more (`F(10³⁰) = e − 5.4·10⁻³⁰`);
+towers above 1024 levels, which never repeat, are read from the
+coordinate.
+
+**It is the limit of both families.** Regular iteration at
+`η − 10⁻³ … η − 10⁻¹²` and the Kneser tetration at `η + 10⁻² … η + 10⁻⁴`
+run into the value at `η` from both sides with one slope (`0.4386` at the
+height `0.5`): the tetration is differentiable in the base across `η`.
+It is smooth there as far as can be measured: the polynomial of degree 5
+through the value at `η` and five values of regular iteration below it
+gives the Kneser values at `η + 5·10⁻⁴`, `η + 10⁻³` and `η + 2·10⁻³` to
+`3.4·10⁻¹⁷`, `1.5·10⁻¹⁶` and `1.0·10⁻¹⁵`, its own remainder of the sixth
+order. The slope grows with the height like `e²h/(3η) ≈ 1.705 h`. A base
+that is `e^{1/e}` to the bits it carries is taken for the number itself;
+a decimal number never is.
+
+**The super-root next to it.** The search for a real root takes `η` for an
+end of its bracket when it lies inside: the value there is free, and a
+root below `η` is found by regular iteration alone. `sroot(1.2571, 0.5)`
+takes 0.6 s (14 s before); a root `10⁻¹⁰` below `η` takes 15 s at 15
+digits, where the search asked the theta mapping for bases just above `η`
+and had not come back after 15 minutes. A root above `η` still costs the
+theta mapping of its neighbours, and one less than about `10⁻⁷` above it
+is out of reach like those bases.
+
+**Checks.** An independent implementation of the same definition in
+mpmath (60 and 70 digits) gives the 40 printed digits at 13 heights, on
+the cut and left of it too, and the 30 digits of four super-logarithms.
+The functional equation holds to 28 digits; results of 12, 100 and 300
+digits agree, each from its own series; `--slog` returns heights and
+`--sroot` returns `1.4446678610097661337` from the values at five heights.
+`tests/phase19_parabolic.rs` has eight tests, the library four.
+
+**Cost.** Milliseconds up to 100 digits, 1.0 s at 1000, 7 s at 2000, 1.8
+minutes at 5000 (one thread; nine tenths are the coefficients).
+
+**The other neutral bases are refused at once.** `tet 20 towermin 0.5`
+(the base `e^{−e}`, multiplier `−1`) and the complex bases
+`exp(λ e^{−λ})` with `|λ| = 1` ran without end; now the answer is an error
+that names the multiplier (README § 8), and their towers are computed as
+before. The two families part there. Regular iteration degenerates at a
+root of unity: the cycle that is born at such a base lies on the edge of
+the basin ever closer to the fixed point, and the disk of the inverse
+Schröder function shrinks onto it (Koebe), so the values at non-integer
+heights tend to the fixed point. Measured at `e^{−e} + δ`: the height
+`0.5` lies `1.5 √δ` from `1/e` down to `δ = 10⁻¹⁰`; at the multipliers
+`(1 − δ) e^{2πi/3}` and `(1 − δ) i` the distance falls like `δ^{1/3}` and
+`δ^{1/4}`. The two-fixed-point tetration of the cut bases passes `e^{−e}`
+smoothly (`0.1026 + 0.4470i` at `0.05`, `0.1499 + 0.4427i` at `0.0659`,
+about `0.1502 + 0.4426i` at `e^{−e}`): that is the function to compute
+there, and it needs a solver without contraction at the neutral fixed
+point, which does not exist yet.
+
+**Still open.** The bases between `η` and about `η + 10⁻⁷`; the
+two-fixed-point tetration at and next to the other neutral bases, the last
+`10⁻⁴` below `e^{−e}` among them.
+
 # Status Update — 2026-11-14, evening (regular iteration: the branches at complex heights are proved)
 
 **At a complex height every logarithm of the height reduction is now proved

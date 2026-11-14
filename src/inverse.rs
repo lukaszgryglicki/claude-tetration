@@ -3,6 +3,7 @@
 //! * Super-logarithm `slog_b(z)`: the height `h` with `F_b(h) = z`.
 //!   - Strictly attracting bases: `h = Log(sigma(z)/sigma(1)) / Log(lambda)` with
 //!     the Schroder coordinate `sigma`; the principal `Log` makes `slog_b(1) = 0`.
+//!   - The base `e^(1/e)`: the Fatou coordinate of `z` less that of 1.
 //!   - Real bases above `e^(1/e)`: the real inverse on the real axis, continued
 //!     to complex `z` without crossing the rays `{x +- i Im(L) : x <= Re(L)}`.
 //!   - Other bases: Newton continuation of `F_b(0) = 1` along the segment `1 -> z`.
@@ -15,7 +16,8 @@
 use rug::{float::Constant, Complex, Float, Integer};
 
 use crate::{
-    cnum, dispatch, kneser, kneser_complex, regions, schroder, schroder_jumps::OrbitJumps,
+    cnum, dispatch, kneser, kneser_complex, parabolic, regions, schroder,
+    schroder_jumps::OrbitJumps,
 };
 use cnum::DisplayFloat;
 
@@ -444,6 +446,47 @@ fn slog_regular(b: &Complex, z: &Complex, prec: u64, digits: u64) -> Result<Comp
             &mut |h| schroder::eval_schroder_at_digits(&state, h, conditioned),
             &h,
             &Complex::with_val_64(work, z),
+            digits,
+            lost,
+            work,
+        )?;
+        return Ok(Complex::with_val_64(
+            output_precision(prec, digits, lost)?,
+            h,
+        ));
+    }
+}
+
+/// The base `e^(1/e)`: the height is the Fatou coordinate of `z` less that
+/// of 1, on the orbit of `z` into the petal of the fixed point `e`.
+fn slog_parabolic(z: &Complex, prec: u64, digits: u64) -> Result<Complex, String> {
+    let checked = digits
+        .checked_add(CHECK_DIGITS)
+        .ok_or("super-logarithm precision overflow")?;
+    let mut work = prec.max(cnum::checked_digits_to_bits(checked)?);
+    loop {
+        let target = Complex::with_val_64(work, z);
+        let (h, loss, collapsed) = parabolic::height(&target, work, prec)?;
+        if collapsed {
+            // Correctly rounded; the forward value at this singular height does not exist.
+            return Ok(Complex::with_val_64(prec, h));
+        }
+        let lost = decimal_loss(&loss)?;
+        let conditioned = checked
+            .checked_add(lost)
+            .ok_or("super-logarithm conditioning overflow")?;
+        let needed = cnum::checked_digits_to_bits(conditioned)?;
+        if needed > work {
+            if cnum::verbose() {
+                eprintln!("slog: cancellation; refining from {work} to {needed} working bits");
+            }
+            work = needed;
+            continue;
+        }
+        check_inverse(
+            &mut |h| parabolic::tetrate(h, work, conditioned),
+            &h,
+            &target,
             digits,
             lost,
             work,
@@ -942,8 +985,15 @@ pub fn slog(b: &Complex, z: &Complex, prec: u64, digits: u64) -> Result<Complex,
     if z == b {
         return Ok(cnum::one(prec));
     }
+    if parabolic::is_eta(b, digits) {
+        return slog_parabolic(z, prec, digits);
+    }
+    let region = regions::classify(b, prec)?;
+    if let Some(refusal) = dispatch::neutral_base(&region, prec) {
+        return Err(refusal);
+    }
     let attracting = matches!(
-        regions::classify(b, prec)?,
+        region,
         regions::Region::ShellThronInterior(d) | regions::Region::ShellThronBoundary(d)
             if d.lambda_abs < 1
     );
@@ -962,6 +1012,12 @@ fn real_complex(x: &Float, prec: u64) -> Complex {
     Complex::with_val_64(prec, (x, 0))
 }
 
+/// `ln b = 1/e` of the base `e^(1/e)`: the mark of that base among the rates
+/// of `sroot_real`.
+fn parabolic_rate(prec: u64) -> Float {
+    Float::with_val_64(prec, -1).exp()
+}
+
 /// `ln|F_b(h)| - ln|z|` for real `b = exp(rate) > 1`, negated for `h < 0` so
 /// that it increases with the base: `F_b(h)` grows from 1 for `h > 0`, falls
 /// from 1 to 0 for `-1 < h < 0` and rises from `-inf` to 0 for `-2 < h < -1`.
@@ -973,9 +1029,19 @@ fn real_defect(
     near: &mut Option<kneser::KneserState>,
 ) -> Result<Float, String> {
     let prec = cnum::checked_digits_to_bits(digits)?.max(rate.prec_64());
-    let base = Float::with_val_64(prec, rate.exp_ref());
+    // The rate of the base e^(1/e) stands for that base, not for an
+    // exponential that may be rounded to its neighbour.
+    let base = if *rate == parabolic_rate(rate.prec_64()) {
+        parabolic::eta(prec)?
+    } else {
+        Float::with_val_64(prec, rate.exp_ref())
+    };
     let forward = |near: &mut Option<kneser::KneserState>| -> Result<Complex, String> {
         let (b, height) = (real_complex(&base, prec), real_complex(h, prec));
+        // The base e^(1/e) itself is not one of the bases above it.
+        if parabolic::is_eta(&b, digits) {
+            return dispatch::tetrate(&b, &height, prec, digits);
+        }
         // Above e^(1/e) each solve starts from the solution of the last base.
         if let Some(last) = near.as_ref() {
             if base > cnum::eta_upper(prec) && !h.is_integer() {
@@ -1069,6 +1135,27 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
             high_defect = low_defect.clone();
         }
     }
+    // The base e^(1/e) inside the bracket: its value comes from the Fatou
+    // coordinate at once and tells on which side of it the root lies. A root
+    // below it is then found by regular iteration alone: the bases just
+    // above it, which no solver reaches, are not asked for it.
+    let parabolic = parabolic_rate(work);
+    let mut ceiling = None;
+    if low < parabolic && parabolic < high {
+        report("the base e^(1/e)", &parabolic);
+        let defect = real_defect(&parabolic, &h, &z, coarse, &mut near)?;
+        if defect.is_zero() {
+            return parabolic::eta(work);
+        }
+        if defect > 0 {
+            high = parabolic.clone();
+            high_defect = defect;
+            ceiling = Some(parabolic);
+        } else {
+            low = parabolic;
+            low_defect = defect;
+        }
+    }
     // Illinois regula falsi on the bracket, until two iterates agree to a few
     // digits: the secant steps below finish at full precision.
     let narrow = cnum::epsilon(coarse.saturating_sub(8).clamp(4, 8), work);
@@ -1139,9 +1226,13 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
         }
         let step = Float::with_val_64(work, &rate - &previous) * &defect
             / Float::with_val_64(work, &defect - &previous_defect);
-        let next = Float::with_val_64(work, &rate - &step);
+        let mut next = Float::with_val_64(work, &rate - &step);
         if !(next.is_finite() && next > 0) {
             return Err("super-root: secant iteration left the domain b > 1".into());
+        }
+        // A step across e^(1/e) from below would ask for a base just above it.
+        if let Some(ceiling) = ceiling.as_ref().filter(|ceiling| next >= **ceiling) {
+            next = Float::with_val_64(work, &rate + ceiling) / 2u32;
         }
         report("refining", &next);
         let small = step.clone().abs() <= Float::with_val_64(work, &next * &floor);
@@ -1363,6 +1454,77 @@ fn sroot_continued(
     Ok((root, fine.known(height)))
 }
 
+/// The base `e^(1/e)` when it is the super-root. A search cannot end there:
+/// the forward values of the bases next to it take ever longer, and those
+/// just above it are out of reach. The value of that base is compared with
+/// the target directly, to within the change that a few units in the last
+/// requested digit of the base cause. That change comes from a base `2^-24`
+/// below, where regular iteration is quick (the map `b -> F_b(h)` is
+/// differentiable across `e^(1/e)`), with the digits that it takes to
+/// resolve it: next to the height 0 every base has almost the same value.
+fn sroot_parabolic(
+    z: &Complex,
+    h: &Complex,
+    prec: u64,
+    digits: u64,
+) -> Result<Option<Complex>, String> {
+    let mut extra = 0u64;
+    loop {
+        let checked = digits
+            .checked_add(CHECK_DIGITS)
+            .and_then(|sum| sum.checked_add(extra))
+            .ok_or("super-root precision overflow")?;
+        let work = prec.max(cnum::checked_digits_to_bits(checked)?);
+        let base = real_complex(&parabolic::eta(work)?, work);
+        let target = Complex::with_val_64(work, z);
+        let height = Complex::with_val_64(work, h);
+        let Ok(value) = dispatch::tetrate(&base, &height, work, checked) else {
+            return Ok(None);
+        };
+        let value = Complex::with_val_64(work, value);
+        let gap = cnum::abs(&Complex::with_val_64(work, &value - &target), work);
+        let scale = cnum::abs(&target, work).max(&cnum::abs(&value, work));
+        // Further than a millionth from the value of that base: another base.
+        if !gap.is_finite() || scale.is_zero() || gap > Float::with_val_64(work, &scale >> 20u32) {
+            return Ok(None);
+        }
+        let step = Float::with_val_64(work, base.real() >> 24u32);
+        let below = real_complex(&Float::with_val_64(work, base.real() - &step), work);
+        let Ok(lower) = dispatch::tetrate(&below, &height, work, checked) else {
+            return Ok(None);
+        };
+        let rise = cnum::abs(&Complex::with_val_64(work, &value - lower), work);
+        // The digits that the forward values lose before the base shows.
+        let lost = if rise.is_zero() {
+            checked
+        } else {
+            decimal_loss(
+                &Float::with_val_64(work, &scale / &rise)
+                    .ln()
+                    .max(&Float::new_64(work)),
+            )?
+        };
+        if lost > extra {
+            // A base cannot be told from its neighbours at this height.
+            if lost > digits.saturating_mul(8).saturating_add(256) {
+                return Ok(None);
+            }
+            extra = lost;
+            continue;
+        }
+        // The change of the value for one unit in the last digit of the base.
+        let response = rise / step * base.real() * cnum::epsilon(digits, work);
+        let allowed = scale * cnum::epsilon(checked - 2, work) + response * 16u32;
+        if gap > allowed {
+            return Ok(None);
+        }
+        if cnum::verbose() {
+            eprintln!("sroot: the target is the value of the base e^(1/e)");
+        }
+        return Ok(Some(real_complex(&parabolic::eta(prec)?, prec)));
+    }
+}
+
 /// Super-root: the base `b` with `F_b(h) = z`.
 pub fn sroot(z: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex, String> {
     crate::mt::init_pool()?;
@@ -1382,6 +1544,9 @@ pub fn sroot(z: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex
     }
     if cnum::is_one(z) {
         return Ok(cnum::one(prec));
+    }
+    if let Some(root) = sroot_parabolic(z, h, prec, digits)? {
+        return Ok(root);
     }
     // Real targets with a real base above 1: see `real_defect`.
     let real_case = z.imag().is_zero()

@@ -43,6 +43,7 @@ pub mod kneser_complex;
 pub mod kouznetsov;
 pub mod lambertw;
 pub mod mt;
+mod parabolic;
 pub mod regions;
 pub mod schroder;
 mod schroder_complex_jumps;

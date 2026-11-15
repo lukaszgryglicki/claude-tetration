@@ -95,6 +95,10 @@ zero imaginary part.
 * **Definition used:** `F_b(0) = 1`, `F_b(z+1) = b^{F_b(z)}`, with
   method-specific branch and normalization conventions
   (§ [Conventions](#12-conventions-and-normalization)).
+* **Status (15 November 2026):** pictures of the present solvers:
+  what six tetrations do with the plane of heights, the spirals of nine
+  bases with their towers, a map of the bases, phase portraits and views
+  of `tet-line` (§ 5.5). Nothing in the program changed.
 * **Status (14 November 2026, night):** the base `e^{1/e}` itself is
   computed, at every height and with `--slog` and `--sroot`:
   `tet 40 eta 0.5` is `1.257153075054172622171646564771545603158`, in
@@ -191,6 +195,7 @@ zero imaginary part.
    2. [⏳ Pending / in progress](#52--pending--in-progress)
    3. [❌ Known-bad / missing](#53--known-bad--missing-by-design-or-documented-ceiling)
    4. [Gallery: the cut segment in 3D](#54-gallery-fx--bx-near-the-cut-in-3d)
+   5. [Gallery: webs, spirals and surfaces](#55-gallery-webs-spirals-and-surfaces)
 6. [The algorithms, in detail](#6-the-algorithms-in-detail)
    1. [Classification](#61-classification-fixed-points-and-)
    2. [Exact cases](#62-exact-cases)
@@ -1769,6 +1774,130 @@ the command exit nonzero**, including expected singularities.
 known nondegenerate tetration curves. Gaps are never joined across those
 singular heights. [`scripts/chartgallery.sh`](scripts/chartgallery.sh) enables
 these breaks and uses `rsvg-convert` plus ImageMagick for JPG output.
+
+### 5.5 Gallery: webs, spirals and surfaces
+
+**Pictures, not certificates.** Every tetration value below is a 13-digit
+result of the present solvers; a curve is a polygon through its samples, a
+colour is one sample a pixel, and a view proves nothing. The charts of
+§ 5.4 stay as they were.
+
+#### Where the plane of heights goes
+
+What does `F(h) = b^^h` do with the complex plane of heights? Each panel
+is the image of the Cartesian grid of `h`: the lines of constant `Re h`
+(blue to green), the lines of constant `Im h` (red to yellow) and the real
+heights (white).
+
+![the grid of heights under six tetrations](docs/gallery/webs.png)
+
+* **`√2`** (regular iteration, § 6.3): the fixed point 2 attracts, 4
+  repels. The period is `17.143 i`, so a line of constant `Re h` closes,
+  and the lines of constant `Im h` lead from 4 (`Re h → −∞`) to 2.
+* **`e^{1/e}`** (§ 6.11): the two fixed points have met in `e`, and both
+  families are circles through `e`, to first order the image of the grid
+  under `h ↦ e(1 − 2/h)`. Nothing spirals: the multiplier is 1.
+* **`1.5`** and **`e`** (§ 6.8): past `e^{1/e}` the fixed points are a
+  complex pair `L`, `L̄`. A line of constant `Im h` leaves `L` in a
+  spiral, 14.3 heights a turn for `1.5` and 4.7 for `e`; a line of
+  constant `Re h` joins `L̄` to `L` across the real axis.
+* **`i`** and **`0.2`** (§ 6.3): one attracting fixed point whose
+  multiplier is not positive, `0.892` at `129°` and `−0.756`. Here the
+  real heights themselves spiral in, 2.78 and 2 heights a turn.
+
+#### Spirals of the real heights
+
+Nine bases inside the Shell–Thron region, named by the multiplier `λ` of
+their fixed point (`L = e^λ`, `b = exp(λ e^{−λ})`, § 1.3; `cis θ` is
+`e^{iθ}`): every unit of height shrinks `F(h) − L` by about `|λ|` and
+turns it by `arg λ`. The curve is `F` at every real height from 0 on; the
+dots are the integer heights, the tower `1, b, b^b, …` itself, and the
+grey lines join one dot to the next.
+
+![spirals of nine bases](docs/gallery/spirals.png)
+
+A turn of `360°·p/q` puts the dots on `q` arms: 3, 4, 5 and 12 here, the
+five arms taken two at a time for `144°` and eight taken three at a time
+for `135°`. The golden angle `137.5°` never comes back to an arm and
+gives a sunflower. The first turns are far from circles. `0.2` is a real
+base with a negative multiplier: the tower jumps from one side of `L` to
+the other, and between two integers the value leaves the real axis.
+
+#### Where these bases lie
+
+![the plane of bases](docs/gallery/bases.jpg)
+
+The colour tells what the integer tower `1, b, b^b, …` does with the
+principal power. Inside the white curve, the Shell–Thron boundary
+`b = exp(e^{iθ} e^{−e^{iθ}})`, it converges, and the shade is `|λ|`: dark
+at `b = 1`, where `λ = 0`, light at the boundary, where `|λ| = 1`. Outside
+it settles on a cycle (orange 2, green 3, magenta 4, yellow 5, …),
+overflows (dark red to black) or does neither in 1500 steps (grey). The
+labels are the bases of this gallery. This picture is a map, not output
+of `tet`: its towers are iterated in double precision by the drawing
+script (`tet` computes them exactly, § 6.2).
+
+#### Two functions over the plane of heights
+
+Hue is `arg F`, a ring is drawn at every doubling of `|F|`, and twelve
+sectors of the phase are shaded.
+
+![phase portrait of e^^h](docs/gallery/heights_e.jpg)
+
+`e^^h` (§ 6.8). The upper half-plane tends to `L = 0.318 + 1.337i` and
+the lower one to `L̄`; the cut along `h ≤ −2` separates them, with the
+logarithmic singularity at its end and the zero at `−1`. To the right
+the function grows faster than any tower of exponentials: the rings
+crowd, then the phase turns many times inside one pixel (grey), and
+where the tower overflows there is no value (black).
+
+![phase portrait of 0.2^^h](docs/gallery/heights_0.2.jpg)
+
+`0.2^^h` (§ 6.3). The real axis runs just above a chain of singularities
+and zeros, `−2 + k·(1.984 − 0.177i)` and `−1 + k·(1.984 − 0.177i)`: the
+period of this function is almost 2. That is why the real heights turn
+half a circle a level. Above the chain `F` tends to the fixed point
+`0.470`; below it the height reduction leaves the half-plane of § 6.3,
+and the principal logarithms (the convention of § 1.2) give the two
+points of a cycle, `0.025 ± 0.960i`, in alternating strips, separated by
+their cuts.
+
+#### In `tet-line`
+
+[`tet-line`](https://github.com/lukaszgryglicki/tet-line) draws a
+function along a line of the complex plane as a curve in space: the
+line runs along the first axis, the other two are `Re F` and `Im F`,
+each fitted to its values. It runs `tet` for every sample; the command
+under a picture opens that view (`F1` hides the help, `P` saves the
+picture).
+
+| | |
+|---|---|
+| ![i^^x](docs/gallery/line_i.png) | ![i^^x along the height axis](docs/gallery/line_i_endon.png) |
+| `tet-line 'i^^x' -1 40 4096`: the real heights of `i` | the same curve seen along the height axis |
+| ![a base with five arms](docs/gallery/line_cis72.png) | ![the same along the height axis](docs/gallery/line_cis72_endon.png) |
+| `tet-line 'exp(0.985cis(tau/5)*exp(-0.985cis(tau/5)))^^x' 0 200 8000`: `λ = 0.985 cis 72°`, five heights a turn | the same curve seen along the height axis |
+| ![0.07^^x](docs/gallery/line_0.07.png) | ![1.5^^x](docs/gallery/line_1.5.png) |
+| `tet-line '0.07^^x' 0 400 10000`: a real base just above `e^{−e}`, `λ = −0.989`: 200 turns, each `2.2 %` narrower | `tet-line '1.5^^x' -130+i i 4096`: the height runs along `Im h = 1`; the curve leaves `L = 2.306 + 1.082i` in a spiral, 14.3 heights a turn, each `1.59` times wider |
+| ![sqrt2^^x on a vertical line](docs/gallery/line_sqrt2.png) | ![eta^^x](docs/gallery/line_eta.png) |
+| `tet-line 'sqrt2^^x' -1.5-40i -1.5+40i 4096`: along `Re h = −1.5` the function has the period `17.143 i`, a spring that never tightens | `tet-line 'eta^^x' -40+i 40+i 4096`: `e^{1/e}` along `Im h = 1`: out of `e` and back to it, no spiral |
+
+`tet-line` and the surface viewer pass a base as a 16-digit number, so
+their constant `eta` reaches `tet` as `1.444667861009766`, a base
+`1.3·10⁻¹⁶` below `e^{1/e}`, where regular iteration takes seconds to
+minutes a sample (§ 5.3). For the last picture that one number was handed
+to `tet` as the constant `eta` (§ 6.11), milliseconds a sample; the two
+curves agree far beyond the width of a line.
+
+#### How these pictures were made
+
+The webs, the spirals and the two phase portraits are drawn with
+matplotlib from values of the library, 13 digits each: `dispatch::tetrate`,
+the function behind `tet`, for every point, and for a real base above
+`e^{1/e}` one solution (`kneser::setup_kneser`) evaluated at every height.
+24 of these values were compared with `tet -q 13` and have the same
+digits. The pictures of `tet-line` are its own screenshots. The drawing
+scripts are not part of the repository.
 
 ---
 

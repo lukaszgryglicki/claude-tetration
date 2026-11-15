@@ -252,6 +252,18 @@ struct Hold {
     roomy: bool,
 }
 
+/// What a try to pass a fold of the real axis gives.
+enum Crossing {
+    /// The next point of the path and its root, the fence of the root,
+    /// whether the point is the end of the path, and a radius to try there.
+    Landing(Complex, Complex, Fence, bool, Float),
+    /// Nothing from here: the fold, when one was found, is too far for a
+    /// disk about it that reaches the path.
+    Far(Option<Float>),
+    /// The end of the path cannot be told from the fold with these bits.
+    Blind,
+}
+
 /// A point `(x, w)` of the continuation, `h(w) = x`, and how it got there.
 struct Path {
     levels: u32,
@@ -350,6 +362,9 @@ impl Path {
         // The real point before this one with its `h'`: two of them tell
         // where `h'` vanishes.
         let mut trail: Option<(Float, Float)> = None;
+        // The fold ahead, once it is known, and how far it was at the last
+        // try to pass it: the next try is at half of that.
+        let mut brink: Option<(Option<Float>, Float)> = None;
         let mut radius = self.first_radius();
         let mut arrived = false;
         loop {
@@ -367,17 +382,8 @@ impl Path {
                         || Float::with_val_64(bits, cnum::abs(to, bits) * &disks.ulp) <= hold.room
                 });
             let Some(hold) = held else {
-                if bits >= self.limit {
-                    return Err(BRANCH_POINT.into());
-                }
-                self.bits = bits.saturating_mul(2).min(self.limit);
                 if trace() { eprintln!("T FAIL at step {} bits {} x {:.12e} w {:.12e} {:.6e} r {:.3e}", self.steps, bits, x.real().to_f64(), w.real().to_f64(), w.imag().to_f64(), radius.to_f64()); } // TRACE
-                if cnum::verbose() {
-                    eprintln!(
-                        "sroot: next to a branch point at step {}; continuing with {} bits",
-                        self.steps, self.bits
-                    );
-                }
+                self.more_bits()?;
                 // Back to the last certified point, which stays certified.
                 radius = match anchor.take() {
                     Some((x, w, room)) => {
@@ -389,6 +395,7 @@ impl Path {
                 };
                 fence = None;
                 trail = None;
+                brink = None;
                 arrived = false;
                 continue;
             };
@@ -400,36 +407,58 @@ impl Path {
             let real = folds && w.imag().is_zero();
             if real {
                 let rate = hold.rate.real().clone();
-                // Where the secant of `h'` through the two points vanishes.
-                let guess = trail.as_ref().and_then(|(before, slope)| {
-                    (rate > 0 && rate < *slope).then(|| {
+                // The fold as it is known, or where the secant of `h'`
+                // through the two points vanishes while `h'` falls to zero.
+                let aim = match (&brink, &trail) {
+                    (Some((Some(centre), _)), _) => Some((centre.clone(), true)),
+                    (_, Some((before, slope))) if rate > 0 && rate < *slope => {
                         let run = Float::with_val_64(bits, w.real() - before);
                         let fall = Float::with_val_64(bits, &rate - slope);
-                        Float::with_val_64(
-                            bits,
-                            w.real() - Float::with_val_64(bits, &rate * &run) / fall,
-                        )
-                    })
-                });
-                if trace() { eprintln!("T   guess {:?} radius {:.3e}", guess.as_ref().map(|g| g.to_f64()), radius.to_f64()); } // TRACE
+                        let ahead = Float::with_val_64(bits, &rate * &run) / fall;
+                        Some((Float::with_val_64(bits, w.real() - ahead), false))
+                    }
+                    _ => None,
+                };
                 trail = Some((w.real().clone(), rate));
-                let landing = guess
-                    .filter(|guess| {
-                        Float::with_val_64(bits, w.real() - guess)
-                            <= Float::with_val_64(bits, &radius << 2u32)
-                    })
-                    .and_then(|guess| self.fold(&x, &w, &guess, to, &hold));
-                if trace() { eprintln!("T   landing {:?}", landing.as_ref().map(|l| (l.0.real().to_f64(), l.1.real().to_f64(), l.1.imag().to_f64(), l.3, l.4.to_f64()))); } // TRACE
-                if let Some((goal, root, across, end, room)) = landing {
-                    anchor = Some((x, w, radius.clone()));
-                    fence = Some(across);
-                    trail = None;
-                    self.x = goal;
-                    self.w = root;
-                    self.steps += 1;
-                    arrived = end;
-                    radius = room;
-                    continue;
+                if let Some((aim, known)) = aim {
+                    let gap = Float::with_val_64(bits, w.real() - &aim);
+                    let due = gap > 0
+                        && brink.as_ref().is_none_or(|(_, last)| {
+                            Float::with_val_64(bits, &gap << 1u32) <= *last
+                        });
+                    if due {
+                        match self.fold(&x, &w, &aim, known, to, &hold) {
+                            Crossing::Landing(goal, root, across, end, room) => {
+                                if trace() { eprintln!("T   landing goal {:.12e} root {:.12e} {:.6e} end {} room {:.3e}", goal.real().to_f64(), root.real().to_f64(), root.imag().to_f64(), end, room.to_f64()); } // TRACE
+                                anchor = Some((x, w, radius.clone()));
+                                fence = Some(across);
+                                trail = None;
+                                brink = None;
+                                self.x = goal;
+                                self.w = root;
+                                self.steps += 1;
+                                arrived = end;
+                                radius = room;
+                                continue;
+                            }
+                            Crossing::Blind => {
+                                if trace() { eprintln!("T   blind"); } // TRACE
+                                // The same point with more bits.
+                                self.more_bits()?;
+                                trail = None;
+                                brink = None;
+                                continue;
+                            }
+                            Crossing::Far(centre) => {
+                                if trace() { eprintln!("T   far {:?} gap {:.3e}", centre.as_ref().map(|c| c.to_f64()), gap.to_f64()); } // TRACE
+                                let gap = match &centre {
+                                    Some(centre) => Float::with_val_64(bits, w.real() - centre),
+                                    None => gap,
+                                };
+                                brink = Some((centre, gap));
+                            }
+                        }
+                    }
                 }
             }
             let gap = Complex::with_val_64(bits, to - &x);
@@ -441,6 +470,15 @@ impl Path {
             } else {
                 x.clone() + gap * Float::with_val_64(bits, &hold.room / &remaining)
             };
+            if !arrived && goal == x {
+                if trace() { eprintln!("T   stuck"); } // TRACE
+                // Next to a branch point the steps shrink with its
+                // distance; this one is below the rounding of `x`.
+                self.more_bits()?;
+                trail = None;
+                brink = None;
+                continue;
+            }
             let mut next = self.solve(&goal, &w, &radius, &hold.value, &hold.rate)?;
             if real {
                 // A real value has a real root in a disk about a real point
@@ -456,6 +494,21 @@ impl Path {
                 radius <<= 1u32;
             }
         }
+    }
+
+    /// Twice the bits for the continuation, while that is allowed.
+    fn more_bits(&mut self) -> Result<(), String> {
+        if self.bits >= self.limit {
+            return Err(BRANCH_POINT.into());
+        }
+        self.bits = self.bits.saturating_mul(2).min(self.limit);
+        if cnum::verbose() {
+            eprintln!(
+                "sroot: next to a branch point at step {}; continuing with {} bits",
+                self.steps, self.bits
+            );
+        }
+        Ok(())
     }
 
     fn first_radius(&self) -> Float {
@@ -537,79 +590,114 @@ impl Path {
     }
 
     /// From the real point `(x, w)` to the other side of the fold of `h`
-    /// next to `guess`, or to the end of the path when that lies before the
-    /// fold: the next point of the path with its fence, whether it is the
-    /// end, and a radius to try there. `None` when the fold cannot be
-    /// certified from here.
+    /// next to `aim` (the fold itself when it is `known`), or to the end of
+    /// the path when that lies before the fold.
     fn fold(
         &self,
         x: &Complex,
         w: &Complex,
-        guess: &Float,
+        aim: &Float,
+        known: bool,
         to: &Complex,
         hold: &Hold,
-    ) -> Option<(Complex, Complex, Fence, bool, Float)> {
-        let bits = self.bits;
-        let size = usize::try_from(bits).ok()?;
-        let disks = Disks::new(bits);
-        let point = Float::new_64(bits);
-        let real = |value: &Float| Complex::with_val_64(bits, (value, 0));
+    ) -> Crossing {
         // `h'` has the sign of `h'(w)` on the disk of `w`, which holds the
-        // root: positive there, the root lies right of the fold found below,
+        // root: positive there, the root lies right of the fold found here,
         // the only zero of `h'` on the real axis of its disk.
         if !(*hold.rate.real() > 0) {
-            return None;
+            return Crossing::Far(None);
         }
-        // The zero of `h'` by Newton's iteration on the real axis.
+        let centre = if known {
+            Some(aim.clone())
+        } else {
+            self.critical(aim)
+        };
+        let Some(centre) = centre.filter(|centre| centre < w.real()) else {
+            return Crossing::Far(None);
+        };
+        match self.cross(x, w, &centre, to, hold) {
+            Some(crossing) => crossing,
+            None => Crossing::Far(Some(centre)),
+        }
+    }
+
+    /// The zero of `h'` next to `start` on the real axis, where `h''` is
+    /// positive, by Newton's iteration.
+    fn critical(&self, start: &Float) -> Option<Float> {
+        let bits = self.bits;
+        let size = usize::try_from(bits).ok()?;
+        let point = Float::new_64(bits);
         let converged = Float::with_val_64(bits, 1) >> size.saturating_sub(12);
-        let mut centre = guess.clone();
+        let mut centre = start.clone();
         let mut before: Option<Float> = None;
-        let mut count = 0u32;
-        loop {
-            let (_, first, second) = enclosure(&real(&centre), &point, self.levels, bits, true)?;
+        for _ in 0..24 {
+            let at = Complex::with_val_64(bits, (&centre, 0));
+            let (_, first, second) = enclosure(&at, &point, self.levels, bits, true)?;
             let curve = second?.mid;
             if !(*curve.real() > 0) {
                 return None;
             }
             let step = Float::with_val_64(bits, first.mid.real() / curve.real());
             centre -= &step;
-            if !centre.is_finite() || centre >= *w.real() {
+            if !centre.is_finite() {
                 return None;
             }
             let moved = step.abs();
             if moved <= Float::with_val_64(bits, centre.clone().abs() * &converged)
                 || before.as_ref().is_some_and(|last| moved >= *last)
             {
-                break;
+                return Some(centre);
             }
             before = Some(moved);
-            count += 1;
-            if count > 64 {
-                return None;
-            }
         }
-        let gap = Float::with_val_64(bits, w.real() - &centre);
-        if trace() { eprintln!("T   fold centre {:.15e} gap {:.3e} count {}", centre.to_f64(), gap.to_f64(), count); } // TRACE
-        // The largest disk tried about it, from eight times the distance of
-        // `w` down to twice, on which `h''` stays within a quarter of its
+        None
+    }
+
+    /// The enclosures of `h` and `h'` over the disk of the radius `reach`
+    /// about the real `centre`, `h''` at the centre and a lower bound of the
+    /// real part of `h''` on the disk, when `h''` stays within a quarter of
+    /// its value at the centre there.
+    fn curvature(&self, centre: &Float, reach: &Float) -> Option<(Ball, Ball, Float, Float)> {
+        let bits = self.bits;
+        let disks = Disks::new(bits);
+        let at = Complex::with_val_64(bits, (centre, 0));
+        let (value, first, second) = enclosure(&at, reach, self.levels, bits, true)?;
+        let second = second?;
+        let floor = Float::with_val_64(bits, second.mid.real() / &disks.wide) - &second.noise;
+        let spread = Float::with_val_64(bits, &second.rad + &second.noise);
+        (Float::with_val_64(bits, &spread << 2u32) <= floor).then(|| {
+            let curve = second.mid.real().clone();
+            (value, first, curve, floor - spread)
+        })
+    }
+
+    /// The step across the fold next to `centre`, left of `w`; `None` when
+    /// it cannot be certified from here.
+    fn cross(
+        &self,
+        x: &Complex,
+        w: &Complex,
+        centre: &Float,
+        to: &Complex,
+        hold: &Hold,
+    ) -> Option<Crossing> {
+        let bits = self.bits;
+        let disks = Disks::new(bits);
+        let real = |value: &Float| Complex::with_val_64(bits, (value, 0));
+        let gap = Float::with_val_64(bits, w.real() - centre);
+        // The largest disk tried about it, of twice, four and eight times
+        // the distance of `w`, on which `h''` stays within a quarter of its
         // value at the centre: `bound <= Re h''` there.
-        let mut reach = Float::with_val_64(bits, &gap << 3u32);
-        let least = Float::with_val_64(bits, &gap << 1u32);
-        let (value, first, curve, bound) = loop {
-            let found = enclosure(&real(&centre), &reach, self.levels, bits, true);
-            if let Some((value, first, Some(second))) = found {
-                let floor =
-                    Float::with_val_64(bits, second.mid.real() / &disks.wide) - &second.noise;
-                let spread = Float::with_val_64(bits, &second.rad + &second.noise);
-                if Float::with_val_64(bits, &spread << 2u32) <= floor {
-                    break (value, first, second.mid.real().clone(), floor - spread);
-                }
+        let mut reach = Float::with_val_64(bits, &gap << 1u32);
+        let mut widest = None;
+        for _ in 0..3 {
+            match self.curvature(centre, &reach) {
+                Some(found) => widest = Some((found, reach.clone())),
+                None => break,
             }
-            reach >>= 1u32;
-            if reach < least {
-                return None;
-            }
-        };
+            reach <<= 1u32;
+        }
+        let ((value, first, curve, bound), reach) = widest?;
         // `h'` rises at least by `bound` a unit on the real axis of the
         // disk: its zero, the fold, lies within `place` of the centre, and
         // the value there within `band` of the value at the centre.
@@ -620,7 +708,7 @@ impl Path {
             return None;
         }
         let room = Float::with_val_64(bits, &reach - &place);
-        if trace() { eprintln!("T   fold reach {:.3e} place {:.3e} band {:.3e} slant {:.3e} bound {:.3e} off {:.3e}", reach.to_f64(), place.to_f64(), band.to_f64(), slant.to_f64(), bound.to_f64(), hold.offset.to_f64()); } // TRACE
+        if trace() { eprintln!("T   fold centre {:.15e} gap {:.3e} reach {:.3e} place {:.3e} band {:.3e} slant {:.3e} bound {:.3e} off {:.3e}", centre.to_f64(), gap.to_f64(), reach.to_f64(), place.to_f64(), band.to_f64(), slant.to_f64(), bound.to_f64(), hold.offset.to_f64()); } // TRACE
         // The root of the path lies in the disk about the fold.
         if Float::with_val_64(bits, &gap + &hold.offset) + &place >= room {
             return None;
@@ -637,7 +725,7 @@ impl Path {
         let end = Float::with_val_64(bits, to.real());
         let ahead = Float::with_val_64(bits, &end - &level);
         if trace() { eprintln!("T   fold span {:.3e} entry {:.3e} ahead {:.3e}", span.to_f64(), entry.to_f64(), ahead.to_f64()); } // TRACE
-        let fold = real(&centre);
+        let fold = real(centre);
         if ahead > band {
             // The end of the path lies before the fold: the real root right
             // of it, where `h` rises.
@@ -645,15 +733,15 @@ impl Path {
                 return None;
             }
             let lift = (Float::with_val_64(bits, &ahead << 1u32) / &curve).sqrt();
-            let start = real(&Float::with_val_64(bits, &centre + &lift));
+            let start = real(&Float::with_val_64(bits, centre + &lift));
             let mut root = self.newton(&real(&end), start)?;
-            let beyond = Float::with_val_64(bits, root.real() - &centre);
+            let beyond = Float::with_val_64(bits, root.real() - centre);
             if !root.imag().is_zero() || beyond <= place {
                 return None;
             }
             *root.mut_imag() = Float::new_64(bits);
             let across = Fence::Right(fold, room, place);
-            return Some((real(&end), root, across, true, beyond >> 1u32));
+            return Some(Crossing::Landing(real(&end), root, across, true, beyond >> 1u32));
         }
         if Float::with_val_64(bits, -&ahead) > band {
             // Past the fold: the end of the path when it is near enough,
@@ -670,7 +758,7 @@ impl Path {
             };
             let depth = Float::with_val_64(bits, &level - &goal);
             let lift = (Float::with_val_64(bits, &depth << 1u32) / &curve).sqrt();
-            let start = Complex::with_val_64(bits, (&centre, &lift));
+            let start = Complex::with_val_64(bits, (centre, &lift));
             let mut root = self.newton(&real(&goal), start)?;
             if root.imag().is_sign_negative() {
                 root = root.conj();
@@ -681,10 +769,9 @@ impl Path {
             let room_there = Float::with_val_64(bits, root.imag() >> 1u32);
             // Within `room` of the fold, which is within `place` of the centre.
             let across = Fence::Above(fold, room - place);
-            return Some((real(&goal), root, across, last, room_there));
+            return Some(Crossing::Landing(real(&goal), root, across, last, room_there));
         }
-        // The end of the path cannot be told from the fold with these bits.
-        None
+        Some(Crossing::Blind)
     }
 }
 

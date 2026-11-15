@@ -1692,6 +1692,17 @@ part does not guarantee a solvable or accurate near-cut case.
   `10⁻⁷` in modulus, or a value next to it, ends in an error
   (`tet --sroot 13 -1e-9 2`: "inverse verification failed"; `−10⁻⁶` is
   still found). Odd heights have their own start next to 0 (§ 6.9).
+* **The branch of a super-root at integer heights from 3 on:** the root
+  printed is the one that the path of § 6.9 reaches, and each is a solution
+  (checked), but they need not fit together. At the height 3 the tower
+  `b^(b^b)` has the critical values `0.7315 ± 0.2933i`; behind them, as seen
+  from the value 2 where the path starts, the roots belong to another
+  branch, the border between the two is not the straight ray everywhere
+  (at `Re z = −1.5` it lies at `Im z = ±0.91`, the ray at `±0.81`), and a
+  negative real value, which is led around 0 far above, gets a root of the
+  outer branch (`sroot(−1.5, 3) = 2.040 + 0.620i`, while
+  `sroot(−1.5 ± 0.03i, 3) = −0.189 ± 0.100i`). The height 2 has the one cut
+  of § 5.5.
 * **Negative integer heights `h ≤ −2`** for nondegenerate bases: no finite
   value consistent with the recurrence through `F(−1)=0`; honest error.
 * **Certified enclosures** — not implemented; every gate is a consistency
@@ -1803,10 +1814,10 @@ these breaks and uses `rsvg-convert` plus ImageMagick for JPG output.
 
 ### 5.5 Gallery: webs, spirals and surfaces
 
-**Pictures, not certificates.** Every tetration value below is a 13-digit
-result of the present solvers; a curve is a polygon through its samples, a
-colour is one sample a pixel, and a view proves nothing. The charts of
-§ 5.4 stay as they were.
+**Pictures, not certificates.** Every value below, of the tetration, the
+super-logarithm and the super-root, is a 13-digit result of the present
+solvers; a curve is a polygon through its samples, a colour is one sample a
+pixel, and a view proves nothing. The charts of § 5.4 stay as they were.
 
 #### Where the plane of heights goes
 
@@ -1830,6 +1841,10 @@ heights (white).
 * **`i`** and **`0.2`** (§ 6.3): one attracting fixed point whose
   multiplier is not positive, `0.892` at `129°` and `−0.756`. Here the
   real heights themselves spiral in, 2.78 and 2 heights a turn.
+
+Every line is a set of values with one `Re h` or one `Im h`: where a web
+does not lie over itself it is the chart of the super-logarithm `slog_b`,
+the lines of its constant real and imaginary part.
 
 #### Spirals of the real heights
 
@@ -1907,13 +1922,38 @@ picture).
 | `tet-line '0.07^^x' 0 400 10000`: a real base just above `e^{−e}`, `λ = −0.989`: 200 turns, each `2.2 %` narrower | `tet-line '1.5^^x' -130+i i 4096`: the height runs along `Im h = 1`; the curve leaves `L = 2.306 + 1.082i` in a spiral, 14.3 heights a turn, each `1.59` times wider |
 | ![sqrt2^^x on a vertical line](docs/gallery/line_sqrt2.png) | ![eta^^x](docs/gallery/line_eta.png) |
 | `tet-line 'sqrt2^^x' -1.5-40i -1.5+40i 4096`: along `Re h = −1.5` the function has the period `17.143 i`, a spring that never tightens | `tet-line 'eta^^x' -40+i 40+i 4096`: `e^{1/e}` along `Im h = 1`: out of `e` and back to it, no spiral |
+| ![ssrt(x,2)](docs/gallery/line_ssrt2.png) | ![slog(2,x)](docs/gallery/line_slog2.png) |
+| `tet-line 'ssrt(x,2)' 0.02 3 2048`: the super square root, the base `b` with `b^b = x`, for real `x`: real down to `e^{−1/e} = 0.692`, the least real value of `b^b`, where the curve turns at a right angle into the complex bases | `tet-line 'slog(2,x)' 1-4i 1+4i 2048`: the super-logarithm of base 2 along `Re x = 1`, between the fixed points `0.825 ± 1.567i`: the height `0` at `x = 1` and `2.83 ∓ 2.81i` at the ends, conjugate values with conjugate heights |
 
-`tet-line` and the surface viewer pass a base as a 16-digit number, so
-their constant `eta` reaches `tet` as `1.444667861009766`, a base
+`tet-line` and the surface viewer pass a base as a decimal number of 16
+or 17 digits, so their constant `eta` reaches `tet` as
+`1.444667861009766`, a base
 `1.3·10⁻¹⁶` below `e^{1/e}`, where regular iteration takes seconds to
-minutes a sample (§ 5.3). For the last picture that one number was handed
-to `tet` as the constant `eta` (§ 6.11), milliseconds a sample; the two
-curves agree far beyond the width of a line.
+minutes a sample (§ 5.3). For the picture of `eta^^x` that one number was
+handed to `tet` as the constant `eta` (§ 6.11), milliseconds a sample; the
+two curves agree far beyond the width of a line.
+
+#### In the surface viewer
+
+The [complex surface viewer](https://github.com/lukaszgryglicki/rust-opengl-complex-drawer)
+draws a function over a rectangle of the complex plane, 191 × 191 values
+of `tet`. In its `4d` mode the height of the surface is one part of the
+value and the colour the other: `Re F` coloured by `Im F` (`--show=re`),
+or `|F|` coloured by `arg F` (`--show=abs`). The black lines are lines of
+constant height (`I`). The command under a picture opens it; `R` stops
+the rotation, `F1` hides the help, `W` and `S` tilt the view and `P` saves
+the picture.
+
+| | |
+|---|---|
+| ![2^^x](docs/gallery/surface_2.png) | ![the modulus of 2^^x](docs/gallery/surface_2_abs.png) |
+| `complex_surface_viewer --color=4d --show=re '2^^x' -2.5 2.5 -2.5 2.5`: base 2 around the origin: the logarithmic singularity at `−2`, the cut to its left, where `Im F` jumps from one end of the colours to the other, and at the right the first wave of the growth | the same with `--show=abs`: the spike is the singularity `−2`, and all colours meet at the zero `−1` |
+| ![sqrt2^^x](docs/gallery/surface_sqrt2.png) | ![sqrt2^^x from the side](docs/gallery/surface_sqrt2_side.png) |
+| `complex_surface_viewer --color=4d --show=re 'sqrt2^^x' -6 6 -26 26`: regular iteration has the period `17.143 i` (§ 6.3): the funnel of the singularity `−2` and the ridge of its cut come back at `−2 ± 17.143 i`; at the right the surface settles at the fixed point 2, at the left it rises towards 4 | the same surface from the side, on the `arsinh` scale (`G`) |
+| ![the modulus of i^^x](docs/gallery/surface_i_abs.png) | ![ssrt(x,2)](docs/gallery/surface_ssrt2.png) |
+| `complex_surface_viewer --color=4d --show=abs 'i^^x' -1.5 7 -1 3`: the singularities of base `i`, `−2 + k (2.774 − 0.141i)`, stand as fins, each with a zero one unit of height to its right; the plain in front is `\|L\| = 0.568`, and the walls behind the fins are the cuts of this function (§ 6.3) | `complex_surface_viewer --color=4d --show=re 'ssrt(x,2)' -3 3 -3 3`: the super square root, the base `b` with `b^b = x`: a whirlpool around the value 0, which no base has (`−13.9 + 11.7i` at `10⁻³⁰`), and a seam along the real axis left of `e^{−1/e} = 0.692`, where the two sides have conjugate bases |
+| ![slog(2,x)](docs/gallery/surface_slog2.png) | ![slog(sqrt2,x)](docs/gallery/surface_slog_sqrt2.png) |
+| `complex_surface_viewer --color=4d --show=re 'slog(2,x)' -3 5 -4 4`: the super-logarithm of base 2, `Re h` coloured by `Im h`: two cliffs along the cuts `{x ± 1.567i : x ≤ 0.825}` (§ 6.9), which end at the fixed points `0.825 ± 1.567i`; crossing one changes the height by `2πi/ln λ = 5.584 + 1.054i` | `complex_surface_viewer --color=4d --show=re 'slog(sqrt2,x)' -2 6 -4 4` on the `arsinh` scale (`G`): the super-logarithm of `√2`: the peak is the fixed point 2, where the height grows like `ln\|x − 2\| / ln ln 2` (the 17-digit `√2` of the viewer has the height `95.03` there), the pit is the fixed point 4, and across the seam between them `Im h` jumps by the period `17.143`; the hole at the right are values whose orbit leaves the basin of 2: no height (§ 3.1) |
 
 #### How these pictures were made
 
@@ -1922,8 +1962,8 @@ matplotlib from values of the library, 13 digits each: `dispatch::tetrate`,
 the function behind `tet`, for every point, and for a real base above
 `e^{1/e}` one solution (`kneser::setup_kneser`) evaluated at every height.
 24 of these values were compared with `tet -q 13` and have the same
-digits. The pictures of `tet-line` are its own screenshots. The drawing
-scripts are not part of the repository.
+digits. The pictures of `tet-line` and of the surface viewer are their own
+screenshots. The drawing scripts are not part of the repository.
 
 ---
 

@@ -16,7 +16,7 @@
 use rug::{float::Constant, Complex, Float, Integer};
 
 use crate::{
-    cnum, dispatch, kneser, kneser_complex, parabolic, regions, schroder,
+    cnum, dispatch, integer_root, kneser, kneser_complex, parabolic, regions, schroder,
     schroder_jumps::OrbitJumps,
 };
 use cnum::DisplayFloat;
@@ -1657,6 +1657,10 @@ pub fn sroot(z: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex
         let (root, known) = if real_case {
             let rate = sroot_real(target.real(), height.real(), work, checked, coarse)?;
             (real_complex(&rate, work), Vec::new())
+        } else if let Some(levels) = integer_root::levels(&height) {
+            // An integer height: the principal branch, by a certified path.
+            let root = integer_root::principal(&target, levels, work, checked)?;
+            (root, Vec::new())
         } else {
             let level = checked.min(extra.saturating_add(WALK_DIGITS));
             match sroot_continued(&target, &height, work, checked, level, coarse) {

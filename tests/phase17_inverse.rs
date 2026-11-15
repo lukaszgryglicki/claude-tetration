@@ -540,7 +540,10 @@ fn t1714_values_that_no_base_or_height_has() {
     // to the value 0 runs to infinity; this never returned).
     for height in ["2", "4", "0.5", "2.5", "-0.5", "1+i", "0.3-2i"] {
         let error = tetration::sroot_complex_str("13", "0", height).unwrap_err();
-        assert!(error.contains("for the value 0"), "height {height}: {error}");
+        assert!(
+            error.contains("for the value 0"),
+            "height {height}: {error}"
+        );
     }
     // Small values at an odd height lie beside their roots, on the branch of
     // the larger ones (below 2e-7 another root was returned: 2.80 + 1.34i for
@@ -586,8 +589,7 @@ fn t1714_values_that_no_base_or_height_has() {
             "{digits} digits: {error}"
         );
     }
-    let error =
-        tetration::slog_complex_str("13", "3^(1/3)", "e^(-W(-ln(3)/3))").unwrap_err();
+    let error = tetration::slog_complex_str("13", "3^(1/3)", "e^(-W(-ln(3)/3))").unwrap_err();
     assert!(error.contains("singular at the fixed point"), "{error}");
     // A base written with 17 digits is another base: 2 is not its fixed point.
     assert_eq!(

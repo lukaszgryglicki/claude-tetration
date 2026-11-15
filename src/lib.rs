@@ -37,6 +37,7 @@ pub mod dispatch;
 pub mod expression;
 pub mod fft;
 pub mod integer_height;
+pub mod integer_root;
 pub mod inverse;
 pub mod kneser;
 pub mod kneser_complex;

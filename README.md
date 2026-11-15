@@ -95,6 +95,12 @@ zero imaginary part.
 * **Definition used:** `F_b(0) = 1`, `F_b(z+1) = b^{F_b(z)}`, with
   method-specific branch and normalization conventions
   (§ [Conventions](#12-conventions-and-normalization)).
+* **Status (15 November 2026, afternoon):** every test of the crate, 346
+  in all, passes on this tree: the default tier, the slow suites 13–15,
+  the two ignored tests and the Cauchy-solver test of phase 11 that the
+  runs since October had left out (§ 10). The work pauses here. What is
+  left, and what each part would take, is in § 8.1 and at the top of
+  `updates.md`.
 * **Status (15 November 2026, morning):** the super-root at an integer
   height from 2 to 100 is now one function, the principal super-root
   (§ 6.9): with `w = Log b` the tower `b^^n` is an entire function of `w`,
@@ -3546,6 +3552,28 @@ folds, the small parts, the errors where it has no base, round trips),
 values, the two sides of a cut `10⁻³⁰` apart), `t1717` (eight real roots
 that the bracket had lost) and seven unit tests of `src/integer_root.rs`.
 The slow suites 13–15 were not repeated: they do not reach the super-root.
+
+The run of the afternoon of 15 November was made on that tree as it was
+committed, on a snapshot of it, and left no test out: all 346 tests of the
+crate passed. The default tier, one target at a time: library 87, phase 1
+19, phase 2 13, phase 3 13, phase 4 16, phase 5 15, phase 7 17, phase 8
+18, phase 9 17, phase 10 28, phase 11 17, phase 12 7, phase 16 10,
+phase 17 18, phase 18 12, phase 19 8, grid runner 7, edge runner 4, and
+the 19 Python tests. The slow suites 13–15, all 17 tests, six at a time
+and next to it, in 26 minutes: phase 13 in 20 s, 34 s, 67 s and 605 s;
+phase 14 in 9 s, 200 s, 462 s and 882 s; phase 15 in 44 s, 54 s and 56 s,
+the real base in 225 s, 431 s and 1096 s, the complex one in 401 s, 717 s
+and 1530 s (about a tenth more than in the run before, with four more
+threads at work on the machine). The two ignored tests:
+`debug_wk_for_negative_two`, and `t962`, the direct Cauchy solver at
+complex heights (33 s). And
+`kouznetsov_large_height_retains_requested_significant_digits` of phase
+11, which the runs above had left out as a matter of hours: on this host
+it takes 24 minutes with `TET_MT=4` (the Cauchy solver for base 2 at 40
+digits on 16384 nodes in 5 minutes, then at 59 digits on 32768 nodes in
+19, which the height `5.375` asks for), and its 40 digits at both heights
+are those of the fixture. `cargo clippy` and `cargo fmt --check` are
+clean, and the web server of § 3.3 passed its 56 tests.
 
 ## 11. References
 

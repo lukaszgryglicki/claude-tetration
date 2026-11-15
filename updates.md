@@ -1,3 +1,41 @@
+# Status Update — 2026-11-15, afternoon (all 346 tests pass; the work pauses here)
+
+**The full suite.** Every test of the crate was run on the committed tree
+of this morning (on a snapshot of it, so that nothing could change under
+the run), and all 346 pass: the default tier (326 tests in 18 targets and
+the 19 Python tests), the slow suites 13–15 (17 tests, 26 minutes with six
+of them at a time), the two ignored tests, and the phase 11 test
+`kouznetsov_large_height_retains_requested_significant_digits`, which
+every run since October had left out as a matter of hours. On this host it
+takes 24 minutes (`TET_MT=4`): the Cauchy solver for base 2 at 40 digits,
+then once more at 59 digits for the height `5.375`, and both values have
+the 40 digits of the fixture. `cargo clippy` and `cargo fmt --check` are
+clean, the web server passes its 56 tests and the two plotters their own
+101. Counts and times: README § 10.
+
+**What is left, and what it would take.** The limits are listed in README
+§ 5.3, § 8 and § 8.1. None of them is cheap to remove:
+
+* *About a day, by a known method:* Taylor jumps in the two-sided solver
+  (`src/kneser_complex.rs`), for the last `10⁻⁴` below `e^{−e}` (`0.0659`
+  takes 6 to 9 minutes at 15 digits, `0.06595` gave no result in 45) and
+  for complex bases next to a low-order resonance from outside.
+* *Hours, but against a rule:* the bases between `η` and about
+  `η + 10⁻⁷`. The value is smooth in the base across `η` (measured to the
+  sixth order), so a Taylor step in the base would give 20 to 30 digits
+  there, with a remainder that is measured and not proved. That is an
+  approximation (§ 7.1, rule 1) and was not built.
+* *Research, without an estimate:* the two-fixed-point tetration at the
+  neutral bases other than `η` (`e^{−e}` and the other roots of unity: it
+  needs a parametrization of the upper end that converges without
+  contraction); heights far to the left at `η` (the repelling Fatou
+  coordinate); the principal super-root above the height 100 (a cheaper
+  certificate for tall towers) and a defined branch of it at non-integer
+  heights (the tetration is not entire in `Log b` there, and it is two
+  functions on the two sides of the Shell–Thron boundary); the
+  super-logarithm of a value whose orbit leaves the basin; certified
+  enclosures of the forward solvers (§ 8).
+
 # Status Update — 2026-11-15, morning (the principal super-root at integer heights)
 
 README § 5.3 listed two limits of the super-root at integer heights: a small

@@ -98,7 +98,17 @@ zero imaginary part.
 * **Status (15 November 2026):** pictures of the present solvers:
   what six tetrations do with the plane of heights, the spirals of nine
   bases with their towers, a map of the bases, phase portraits and views
-  of `tet-line` (§ 5.5). Nothing in the program changed.
+  of `tet-line` and of the surface viewer, for the tetration, the
+  super-logarithm and the super-root (§ 5.5). Drawing them found three
+  faults of the inverses, now corrected (§ 6.9): the super-root of the
+  value `0` never returned (it is the base `0` at odd heights and an
+  error at once elsewhere); the super-logarithm of a value at the fixed
+  point of its base printed digits that changed with the precision
+  (`tet --slog 13 sqrt2 2` gave `460.05…`; it is an error, and
+  `2 + 10⁻¹⁰⁰ i` gives `626.9896273969 + 4.285787044839i`); the super-root
+  of a value below `2·10⁻⁷` at an odd height was a root of another branch
+  (`tet --sroot 13 1e-7 3` gave `2.80 + 1.34i`; it is
+  `9.999740216488e-8`). No other result or running time changed.
 * **Status (14 November 2026, night):** the base `e^{1/e}` itself is
   computed, at every height and with `--slog` and `--sroot`:
   `tet 40 eta 0.5` is `1.257153075054172622171646564771545603158`, in
@@ -689,6 +699,11 @@ With one argument for each number the same three runs are `tet -q 30 2 0.5`,
   points `2` and `4` has a complex one
   (`slog_√2(3) = −3.3834692659172140179 − 8.5715740896774235518i`), and a
   value beyond `4`, which that tetration never takes, has none: error.
+  The fixed point itself is the value of no height either:
+  `tet --slog 20 sqrt2 2` is an error, and next to it the height grows like
+  a logarithm (`tet --slog 13 sqrt2 2+1e-100*i` gives `626.9896273969 +
+  4.285787044839i`). A value that agrees with the fixed point to more than
+  twice the digits asked for and 256 more is taken for the fixed point.
 * Tetration can take the same value at several complex heights. `--slog`
   prints one of them — the principal one, on the branch with
   `slog_b(1) = 0` (§ 6.9) — and whatever it prints has been confirmed by
@@ -702,6 +717,11 @@ With one argument for each number the same three runs are `tet -q 30 2 0.5`,
   solution of `b^b = z`: `tet --sroot 30 2 0 2 0` gives
   `1.55961046946236934997038876877`. With the height `1` it returns the
   value itself.
+* The value `0` has the base `0` at the odd heights `1`, `3`, `5`, …
+  (`0^^3 = 0^(0^0) = 0^1 = 0`, the tower of the base 0) and no base that the
+  program finds at any other height: error. A small value at an odd height
+  has its root next to itself: `tet --sroot 13 1e-7 3` gives
+  `9.999740216488e-8`.
 * The height need not be an integer: `tet --sroot 20 10 0 2.5 0` gives
   `2.1179975403097240013`, the base whose tetration to the height `2.5` is
   `10` (9 s). Integer heights `0`, `−1`, … are refused, because `b^^0 = 1`
@@ -1666,6 +1686,12 @@ part does not guarantee a solvable or accurate near-cut case.
   too long and Taylor jumps take over (`0.0659881`: one minute).
 * **`b = 0` at non-integer heights** — no principal-branch value
   exists: honest ERR.
+* **Super-roots of small negative values at even heights:** the path of
+  § 6.9 reaches a positive or imaginary value however small
+  (`sroot(10⁻³⁰⁰, 2)`, `sroot(10⁻⁹ i, 2)`), but a negative one below about
+  `10⁻⁷` in modulus, or a value next to it, ends in an error
+  (`tet --sroot 13 -1e-9 2`: "inverse verification failed"; `−10⁻⁶` is
+  still found). Odd heights have their own start next to 0 (§ 6.9).
 * **Negative integer heights `h ≤ −2`** for nondegenerate bases: no finite
   value consistent with the recurrence through `F(−1)=0`; honest error.
 * **Certified enclosures** — not implemented; every gate is a consistency
@@ -2471,6 +2497,17 @@ five minutes. Complex, negative and cut bases are the subject of § 6.10.
   cannot be confirmed by computing `b^^h` again.
   `slog_{1/2}(−100) = 0.750119449840629 − 0.968029912394000i`, the limit of
   `slog_{1/2}(−30)` and its neighbours, and `slog_{1.3}(−10^30) = −2`.
+  Next to the fixed point `L` the height is `Log(z − L)/Log λ` plus a
+  constant, and all of it rests on the difference `z − L`: the digits that
+  this subtraction cancels are taken from the displacement itself and added
+  to the working precision, and the inputs are read again with them. For
+  `z = L` that would never end, each reading of `√2` giving another
+  difference from 2 and so another height; so agreement with `L` to more
+  than `2·digits + 256` digits is the singularity, an error, and a value
+  that the bits of the inputs cannot tell from `L` has them read again with
+  twice the bits at once. `slog_√2(2 + 10⁻¹⁰⁰ i) = 626.9896273969 +
+  4.285787044839i`, 60 `ln 10 / |ln ln 2|` above the height of
+  `2 + 10⁻⁴⁰ i`, and its imaginary part is `π / (2 |ln ln 2|)`.
 * *The base `η` itself*: `h = α(z) − α(1)` with the Fatou coordinate `α` of
   § 6.11, on the orbit of `z` into the petal of the fixed point `e`;
   `slog_η(2) = 4.1033825593275631709`. Next to the fixed point the height
@@ -2541,6 +2578,12 @@ five minutes. Complex, negative and cut bases are the subject of § 6.10.
   is analytic in the base and this is a genuine continuation. A straight
   path that meets a singular value (for `h = 2` and real `z < e^{−1/e}`, the
   fold of `b^b` at `b = 1/e`) is retried along a path above the real axis.
+  At an odd integer height `b^^h = b (1 + O(b ln² b))` next to the base 0,
+  so a value below `2⁻²⁰` in modulus has its root beside it, and Newton
+  steps start from the value itself: a path from the real solution cannot
+  end that close to 0, where its steps have a size of their own
+  (`sroot(10⁻⁷, 3) = 9.999740216488·10⁻⁸`, `sroot(−10⁻⁹, 3) =
+  −1.000000419584·10⁻⁹ + 1.302082772987·10⁻¹⁶ i`, the side above the cut).
   A forward value costs a full solve for its base, so the path is followed
   with values of 14 digits (plus the digits the conditioning asks for) and
   only its end is polished and verified at the full precision; should that
@@ -2563,6 +2606,13 @@ five minutes. Complex, negative and cut bases are the subject of § 6.10.
   continuation of the real solution; a search that finds no such base fails
   with an error.
 * Integer heights below 1 do not determine a base: error.
+* The value `0`: a power of a base other than 0 is never 0, and the tower
+  of the base 0 (with `0^0 = 1`) is 0 at the odd heights, so
+  `sroot(0, n) = 0` for odd `n`, the limit of the roots of small values. At
+  every other height the
+  answer is an error at once: `b^^h` is 0 only at `h = −1` and, for a base
+  with a period, at `−1` plus a multiple of it, and a root that is followed
+  to the value 0 runs to infinity.
 
 Every inverse is verified before it is printed: the forward image must
 reproduce the target to within the change caused by a few units in the last

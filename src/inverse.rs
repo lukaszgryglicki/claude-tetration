@@ -374,6 +374,13 @@ fn regular_slog(
         if response.is_finite() && !response.is_zero() {
             loss = loss.max(&response.ln());
         }
+        // A nudge shows the cancellation in `z - L` only down to its own
+        // size; the displacement itself shows all of it.
+        let displacement = cnum::abs(&Complex::with_val_64(prec, z - &state.l), prec);
+        let direct = cnum::abs(z, prec) / displacement / &size;
+        if direct.is_finite() && !direct.is_zero() {
+            loss = loss.max(&direct.ln());
+        }
     }
     Ok((w / &state.ln_lambda, loss.max(&Float::new_64(prec)), false))
 }
@@ -424,8 +431,10 @@ fn slog_regular(b: &Complex, z: &Complex, prec: u64, digits: u64) -> Result<Comp
             regions::Region::ShellThronInterior(d) | regions::Region::ShellThronBoundary(d) => d,
             _ => return Err("super-logarithm: base is not strictly attracting".into()),
         };
+        let target = Complex::with_val_64(work, z);
+        let blurred = beside_fixed_point(&fp, &target, prec, digits, work)?;
         let state = schroder::setup_schroder(&base, &fp, work)?;
-        let (h, loss, collapsed) = regular_slog(&state, &Complex::with_val_64(work, z))?;
+        let (h, loss, collapsed) = regular_slog(&state, &target)?;
         if collapsed {
             // Correctly rounded; the forward value at this singular height does not exist.
             return Ok(Complex::with_val_64(prec, h));
@@ -445,16 +454,50 @@ fn slog_regular(b: &Complex, z: &Complex, prec: u64, digits: u64) -> Result<Comp
         check_inverse(
             &mut |h| schroder::eval_schroder_at_digits(&state, h, conditioned),
             &h,
-            &Complex::with_val_64(work, z),
+            &target,
             digits,
             lost,
             work,
         )?;
-        return Ok(Complex::with_val_64(
-            output_precision(prec, digits, lost)?,
-            h,
-        ));
+        let mut output = output_precision(prec, digits, lost)?;
+        if blurred {
+            // Inputs that were rounded are read again with twice the bits.
+            let doubled = prec.checked_mul(2).ok_or("precision count overflow")?;
+            cnum::check_precision(doubled)?;
+            output = output.max(doubled);
+        }
+        return Ok(Complex::with_val_64(output, h));
     }
+}
+
+/// A value next to the attracting fixed point `L` of its base, where the
+/// height grows without bound. Agreement with `L` to more digits than a
+/// multiple of those asked for is the singularity itself: every rounding of
+/// such inputs gives another height, and reading them more accurately would
+/// never end. The flag marks a value that the `given` bits of the inputs
+/// cannot tell from `L`: the fixed point moves by `L^2/(1 - lambda)` times the
+/// relative change of the base.
+fn beside_fixed_point(
+    fp: &regions::FixedPointData,
+    z: &Complex,
+    given: u64,
+    digits: u64,
+    work: u64,
+) -> Result<bool, String> {
+    let singular = "super-logarithm is singular at the fixed point of the base";
+    let displacement = cnum::abs(&Complex::with_val_64(work, z - &fp.fixed_point), work);
+    if displacement.is_zero() {
+        return Err(singular.into());
+    }
+    let size = cnum::abs(&fp.fixed_point, work);
+    let agreement = Float::with_val_64(work, &size / &displacement).ln();
+    if agreement > 0 && decimal_loss(&agreement)? > digits.saturating_mul(2).saturating_add(256) {
+        return Err(singular.into());
+    }
+    let stiffness = cnum::abs(&Complex::with_val_64(work, 1u32 - &fp.lambda), work);
+    let shift = usize::try_from(given.saturating_sub(8)).map_err(|_| "precision overflow")?;
+    let blur = (cnum::abs(z, work) + size.square() / stiffness) >> shift;
+    Ok(displacement <= blur)
 }
 
 /// The base `e^(1/e)`: the height is the Fatou coordinate of `z` less that
@@ -1386,6 +1429,27 @@ fn sroot_continued(
     coarse: u64,
 ) -> Result<(Complex, Vec<(Complex, Complex)>), String> {
     let size = cnum::abs(target, work);
+    let trust = |b: &Complex, step: &Complex| cnum::abs(step, work) * 4u32 <= cnum::abs(b, work);
+    // An odd integer height: `b^^h = b (1 + O(b ln^2 b))` next to the base 0,
+    // so the root of a small value lies beside that value. The path from
+    // the anchor cannot end there: its steps have a size of their own.
+    let odd = height.imag().is_zero()
+        && height.real().is_integer()
+        && *height.real() >= 3
+        && !(height.real().clone() >> 1u32).is_integer();
+    if odd && size < Float::with_val_64(work, 1) >> 20u32 {
+        let mut fine = Trials::new(checked, checked, work)?;
+        let (root, _) = newton(
+            &mut |b, _, sure| fine.at(b, height.clone(), sure),
+            target,
+            &Float::new_64(work),
+            target,
+            true,
+            &trust,
+            work,
+        )?;
+        return Ok((root, fine.known(height)));
+    }
     let anchor_z = if size > cnum::decimal("1.0001", work) {
         size
     } else {
@@ -1403,7 +1467,6 @@ fn sroot_continued(
     };
     let from = real_complex(&anchor_z, work);
     let rung = real_complex(&anchor_h, work);
-    let trust = |b: &Complex, step: &Complex| cnum::abs(step, work) * 4u32 <= cnum::abs(b, work);
     let mut trials = Trials::new(level, checked, work)?;
     let mut walk = |targets: &[Complex], heights: &[Complex]| {
         follow(
@@ -1544,6 +1607,22 @@ pub fn sroot(z: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex
     }
     if cnum::is_one(z) {
         return Ok(cnum::one(prec));
+    }
+    // The value 0: a power of a base other than 0 is never 0, and the base 0
+    // has it at the odd heights (`0^0 = 1`), where the root of a small value
+    // is close to that value. A root that is followed to this value at
+    // another height runs to infinity without end.
+    if cnum::is_zero(z) {
+        let whole = h.imag().is_zero() && h.real().is_integer();
+        if whole && !(h.real().clone() >> 1u32).is_integer() {
+            return Ok(cnum::zero(prec));
+        }
+        return Err(
+            "super-root: no base is found for the value 0 at this height (b^^h is 0 at h = -1 \
+             for every base, at -1 plus a period of the base, and for the base 0 at odd \
+             integer heights)"
+                .into(),
+        );
     }
     if let Some(root) = sroot_parabolic(z, h, prec, digits)? {
         return Ok(root);

@@ -521,6 +521,131 @@ fn t1713_sroot_next_to_the_shell_thron_boundary_from_outside() {
 }
 
 #[test]
+fn t1714_values_that_no_base_or_height_has() {
+    let both = |re: &str, im: &str| (re.to_string(), im.to_string());
+    // The value 0: the base 0 at the odd integer heights, as the tower has it.
+    for height in ["1", "3", "5", "7"] {
+        assert_eq!(
+            tetration::sroot_str("13", "0", "0", height, "0").unwrap(),
+            both("0", "0"),
+            "height {height}"
+        );
+        assert_eq!(
+            tetration::tetrate_str("13", "0", "0", height, "0").unwrap(),
+            both("0", "0"),
+            "height {height}"
+        );
+    }
+    // No base at another height: an error at once (a root that is followed
+    // to the value 0 runs to infinity; this never returned).
+    for height in ["2", "4", "0.5", "2.5", "-0.5", "1+i", "0.3-2i"] {
+        let error = tetration::sroot_complex_str("13", "0", height).unwrap_err();
+        assert!(error.contains("for the value 0"), "height {height}: {error}");
+    }
+    // Small values at an odd height lie beside their roots, on the branch of
+    // the larger ones (below 2e-7 another root was returned: 2.80 + 1.34i for
+    // 1e-7 at the height 3).
+    for (value, expected) in [
+        ("0.001", "9.550162777902e-4"),
+        ("1e-6", "9.998091823431e-7"),
+        ("9e-7", "8.998430676778e-7"),
+        ("1e-7", "9.999740216488e-8"),
+        ("1e-300", "1.000000000000e-300"),
+    ] {
+        assert_eq!(
+            tetration::sroot_complex_str("13", value, "3").unwrap(),
+            both(expected, "0"),
+            "value {value}"
+        );
+    }
+    let wide = cnum::digits_to_bits(45);
+    for (re, im, height) in [
+        ("1e-9", "1e-9", "3"),
+        ("-1e-9", "0", "3"),
+        ("0", "-2e-12", "5"),
+        ("1e-40", "0", "7"),
+    ] {
+        let root = tetration::sroot_str("30", re, im, height, "0").unwrap();
+        let back = tetration::tetrate_str("45", &root.0, &root.1, height, "0").unwrap();
+        let value = parse(re, im, wide);
+        assert!(
+            agreement(&parse(&back.0, &back.1, wide), &value, wide) >= 28,
+            "{re} {im} at {height}: {root:?} gives {back:?}"
+        );
+        // The root is the value to within its square times `ln^2`.
+        assert!(agreement(&parse(&root.0, &root.1, wide), &value, wide) >= 6);
+    }
+
+    // The fixed point 2 of sqrt(2) is the value of no height. The digits of
+    // sqrt(2) that are read decide what `2 - L` is, so every precision used
+    // to print another height (460.05... at 13 digits) instead of an error.
+    for digits in ["5", "13", "20", "30", "50", "100", "300"] {
+        let error = tetration::slog_complex_str(digits, "sqrt2", "2").unwrap_err();
+        assert!(
+            error.contains("singular at the fixed point"),
+            "{digits} digits: {error}"
+        );
+    }
+    let error =
+        tetration::slog_complex_str("13", "3^(1/3)", "e^(-W(-ln(3)/3))").unwrap_err();
+    assert!(error.contains("singular at the fixed point"), "{error}");
+    // A base written with 17 digits is another base: 2 is not its fixed point.
+    assert_eq!(
+        tetration::slog_complex_str("13", "1.4142135623730951", "2").unwrap(),
+        both("95.03350509322", "0")
+    );
+
+    // Next to the fixed point the height is `Log(z - 2) / ln(ln 2)` plus a
+    // constant: a factor 10^-60 in the displacement adds `60 ln 10 / |ln ln 2|`,
+    // and a displacement along `i` has the imaginary part `pi / (2 |ln ln 2|)`.
+    let prec = cnum::digits_to_bits(40);
+    let height = |value: &str| {
+        let (re, im) = tetration::slog_complex_str("30", "sqrt2", value).unwrap();
+        parse(&re, &im, prec)
+    };
+    let near = height("2+1e-40*i");
+    let nearer = height("2+1e-100*i");
+    let rate = Float::with_val_64(prec, 2).ln().ln().abs();
+    let step = Float::with_val_64(prec, 10).ln() * 60u32 / &rate;
+    let rise = Float::with_val_64(prec, nearer.real() - near.real());
+    assert!(
+        Float::with_val_64(prec, &rise - &step).abs() < cnum::epsilon(25, prec),
+        "{rise} {step}"
+    );
+    let quarter = Float::with_val_64(prec, rug::float::Constant::Pi) / 2u32 / rate;
+    for found in [&near, &nearer] {
+        assert!(
+            Float::with_val_64(prec, found.imag() - &quarter).abs() < cnum::epsilon(27, prec),
+            "{found}"
+        );
+    }
+    assert_eq!(
+        tetration::slog_complex_str("13", "sqrt2", "2+1e-100*i").unwrap(),
+        both("626.9896273969", "4.285787044839")
+    );
+    assert_eq!(
+        tetration::slog_complex_str("13", "sqrt2", "2-1e-100").unwrap(),
+        both("626.9896273969", "0")
+    );
+    // The forward value of such a height is the value again.
+    let (re, im) = tetration::slog_complex_str("40", "sqrt2", "2+1e-60*i").unwrap();
+    let (back_re, back_im) =
+        tetration::tetrate_complex_str("110", "sqrt2", &format!("{re}+{im}*i")).unwrap();
+    let wide = cnum::digits_to_bits(110);
+    let back = parse(&back_re, &back_im, wide);
+    let value = parse("2", "1e-60", wide);
+    let off = cnum::abs(&Complex::with_val_64(wide, &back - &value), wide);
+    assert!(off < cnum::epsilon(90, wide), "{off}");
+    // Agreement beyond twice the digits asked for and 256 more is the singularity.
+    let error = tetration::slog_complex_str("13", "sqrt2", "2+1e-300*i").unwrap_err();
+    assert!(error.contains("singular at the fixed point"), "{error}");
+    assert_eq!(
+        tetration::slog_complex_str("13", "sqrt2", "2+1e-250*i").unwrap(),
+        both("1569.351395710", "4.285787044839")
+    );
+}
+
+#[test]
 fn t1705_cli_flags() {
     let run = |arguments: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_tet"))

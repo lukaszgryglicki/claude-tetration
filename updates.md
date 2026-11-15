@@ -1,3 +1,68 @@
+# Status Update — 2026-11-15 (three faults of the inverses, found while drawing the gallery)
+
+The gallery of README § 5.5 has pictures of all three functions now, and
+drawing the super-root and the super-logarithm over a grid ran into three
+faults of `src/inverse.rs`. All three are corrected; no other result
+changed, and 21 ordinary inverse runs take the same time as before.
+
+**The super-root of the value 0 never returned.** `tet --sroot 13 0 2`
+followed the root of `b^b = z` from `z = 2` to `z = 0`, where it runs to
+infinity: the last Newton iteration reduced the residual by a factor `e` a
+step, for ever, because a goal of exactly 0 has no relative floor. A power
+of a base other than 0 is never 0, and the tower of the base 0 is 0 at the
+odd heights (`0^0 = 1`), so `sroot(0, n) = 0` for odd `n`, the limit of the
+roots of small values, and every other height is an error at once
+(integer heights below 1 keep their older error). The surface viewer has
+no time limit for `tet`: `ssrt(x,2)` on a grid through 0 never appeared.
+
+**The super-logarithm at the fixed point of its base printed digits of
+nothing.** `tet --slog 13 sqrt2 2` gave `460.0502892697`, at 20 digits
+`549.91…`, at 30 digits `673.60…`, at 100 and 300 digits as many garbage
+digits, and only at 50 and 1000 digits the error that is the answer: 2 is
+the fixed point of `√2`, the value of no height. The height next to the
+fixed point `L` is `Log(z − L)/Log λ` plus a constant, and `2 − L` was
+nothing but the rounding of `√2`. The digits lost in such a subtraction
+were measured by the response of the height to a nudge of `z` by
+`2^{−prec/2}`, which shows at most half of the working bits of them, so
+the refinement stopped where that estimate could not grow any more. The
+same happened next to the fixed point: `2 + 10⁻¹⁰⁰ i` gave the same
+`460.05…`. Now the cancellation is taken from the displacement itself;
+agreement with `L` to more than `2·digits + 256` digits is the
+singularity (an error), and a value that the bits of the inputs cannot
+tell from `L` has them read again with twice the bits at once. So
+`tet --slog P sqrt2 2` is the error at every `P`, in milliseconds
+(one second at 300 digits), `2 + 10⁻¹⁰⁰ i` gives
+`626.9896273969 + 4.285787044839i` (60 `ln 10 / |ln ln 2|` above the
+height of `2 + 10⁻⁴⁰ i`, imaginary part `π/(2 |ln ln 2|)`, both checked),
+and what was right stays as it was (`2 + 10⁻⁴⁰ i`:
+`250.0449200715 + 4.285787044839i`; a base written as
+`1.4142135623730951` is another base and has `95.03350509322` at 2).
+
+**The super-root of a small value at an odd height was a root of another
+branch.** `tet --sroot 13 1e-6 3` gave the real root `9.998091823431e-7`,
+`1e-7` gave `2.80 + 1.34i`: the path from the real solution cannot end
+closer to 0 than its steps are long (the intermediate tolerance is `2⁻²⁴`
+whatever the size of the value), it failed, and the detour above the real
+axis, which is meant for the fold of `b^b`, found another solution;
+`−10⁻⁹` ended in "inverse verification failed". At an odd integer height
+`b^^h = b (1 + O(b ln² b))` next to the base 0, so for a value below
+`2⁻²⁰` the Newton steps now start from the value itself:
+`sroot(10⁻⁷, 3) = 9.999740216488·10⁻⁸`, `sroot(10⁻³⁰⁰, 3) = 10⁻³⁰⁰`,
+`sroot(−10⁻⁹, 3) = −1.000000419584·10⁻⁹ + 1.302082772987·10⁻¹⁶ i`; the
+values just above `2⁻²⁰` come from the path as before, and between the
+two limits both ways agree.
+
+**Left as it is.** At an even height a negative value below about `10⁻⁷`
+in modulus still ends in an error (`tet --sroot 13 -1e-9 2`); positive
+and imaginary ones are found however small (README § 5.3).
+
+**Checks.** `tests/phase17_inverse.rs` has the new
+`t1714_values_that_no_base_or_height_has` (the value 0 at eleven heights,
+small values at odd heights with their forward values, the fixed point of
+`√2` at seven precisions and that of `3^(1/3)` written with the Lambert
+function, the step of the height between two displacements, a forward
+round trip of `2 + 10⁻⁶⁰ i`, the limit of `2·digits + 256` digits).
+
 # Status Update — 2026-11-14, night (the base e^(1/e) itself)
 
 **The base `e^{1/e}` is computed**, at real and complex heights, with the

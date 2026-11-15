@@ -1202,94 +1202,111 @@ fn sroot_real(z: &Float, h: &Float, work: u64, checked: u64, coarse: u64) -> Res
     // Illinois regula falsi on the bracket, until two iterates agree to a few
     // digits: the secant steps below finish at full precision.
     let narrow = cnum::epsilon(coarse.saturating_sub(8).clamp(4, 8), work);
-    let mut side = 0i8;
-    let mut rate = high.clone();
-    let mut earlier: Option<Float> = None;
-    while Float::with_val_64(work, &high - &low) > Float::with_val_64(work, &high * &narrow) {
-        let width = Float::with_val_64(work, &high - &low);
-        let last = rate.clone();
-        rate = if high_defect.is_finite() {
-            Float::with_val_64(work, &low * &high_defect - &high * &low_defect)
-                / Float::with_val_64(work, &high_defect - &low_defect)
-        } else {
-            Float::with_val_64(work, &low + &high) / 2u32
-        };
-        if !(rate > low && rate < high) {
-            rate = Float::with_val_64(work, &low + &high) / 2u32;
-        }
-        if earlier.is_some()
-            && Float::with_val_64(work, &rate - &last).abs()
-                <= Float::with_val_64(work, &rate * &narrow)
-        {
+    let settle = |steady: bool,
+                  near: &mut Option<kneser::KneserState>|
+     -> Result<(Float, Float), String> {
+        let (mut low, mut high) = (low.clone(), high.clone());
+        let (mut low_defect, mut high_defect) = (low_defect.clone(), high_defect.clone());
+        let mut side = 0i8;
+        let mut rate = high.clone();
+        let mut earlier: Option<Float> = None;
+        while Float::with_val_64(work, &high - &low) > Float::with_val_64(work, &high * &narrow) {
+            let width = Float::with_val_64(work, &high - &low);
+            let last = rate.clone();
+            // With `steady`, a forward value more than `e^64` times the target
+            // is no better a guide than an infinite one: the tower grows too
+            // fast there for a secant, whose step would not leave the lower end.
+            rate = if high_defect.is_finite() && !(steady && high_defect > 64) {
+                Float::with_val_64(work, &low * &high_defect - &high * &low_defect)
+                    / Float::with_val_64(work, &high_defect - &low_defect)
+            } else {
+                Float::with_val_64(work, &low + &high) / 2u32
+            };
+            if !(rate > low && rate < high) {
+                rate = Float::with_val_64(work, &low + &high) / 2u32;
+            }
+            if earlier.is_some()
+                && Float::with_val_64(work, &rate - &last).abs()
+                    <= Float::with_val_64(work, &rate * &narrow)
+            {
+                earlier = Some(last);
+                break;
+            }
             earlier = Some(last);
-            break;
-        }
-        earlier = Some(last);
-        report("bracketed", &rate);
-        let defect = real_defect(&rate, &h, &z, coarse, &mut near)?;
-        if defect.is_zero() {
-            low = rate.clone();
-            high = rate.clone();
-            break;
-        }
-        if defect > 0 {
-            high = rate.clone();
-            high_defect = defect;
-            if side == 1 {
-                low_defect /= 2u32;
+            report("bracketed", &rate);
+            let defect = real_defect(&rate, &h, &z, coarse, near)?;
+            if defect.is_zero() {
+                low = rate.clone();
+                high = rate.clone();
+                break;
             }
-            side = 1;
-        } else {
-            low = rate.clone();
-            low_defect = defect;
-            if side == -1 {
-                high_defect /= 2u32;
+            if defect > 0 {
+                high = rate.clone();
+                high_defect = defect;
+                if side == 1 {
+                    low_defect /= 2u32;
+                }
+                side = 1;
+            } else {
+                low = rate.clone();
+                low_defect = defect;
+                if side == -1 {
+                    high_defect /= 2u32;
+                }
+                side = -1;
             }
-            side = -1;
+            if Float::with_val_64(work, &high - &low) >= width {
+                break;
+            }
         }
-        if Float::with_val_64(work, &high - &low) >= width {
-            break;
+        if !high_defect.is_finite() {
+            return Err("super-root: no finite forward value above the root".into());
         }
-    }
-    if !high_defect.is_finite() {
-        return Err("super-root: no finite forward value above the root".into());
-    }
-    // Secant refinement at full precision.
-    let mut previous = match earlier {
-        Some(last) if last != rate => last,
-        _ if rate == low => high,
-        _ => low,
+        // Secant refinement at full precision.
+        let mut previous = match earlier {
+            Some(last) if last != rate => last,
+            _ if rate == low => high,
+            _ => low,
+        };
+        let mut previous_defect = real_defect(&previous, &h, &z, checked, near)?;
+        let mut defect = real_defect(&rate, &h, &z, checked, near)?;
+        let floor = cnum::epsilon(checked, work);
+        loop {
+            if defect.is_zero() || previous_defect == defect {
+                break;
+            }
+            let step = Float::with_val_64(work, &rate - &previous) * &defect
+                / Float::with_val_64(work, &defect - &previous_defect);
+            let mut next = Float::with_val_64(work, &rate - &step);
+            if !(next.is_finite() && next > 0) {
+                return Err("super-root: secant iteration left the domain b > 1".into());
+            }
+            // A step across e^(1/e) from below would ask for a base just above it.
+            if let Some(ceiling) = ceiling.as_ref().filter(|ceiling| next >= **ceiling) {
+                next = Float::with_val_64(work, &rate + ceiling) / 2u32;
+            }
+            report("refining", &next);
+            let small = step.clone().abs() <= Float::with_val_64(work, &next * &floor);
+            let next_defect = real_defect(&next, &h, &z, checked, near)?;
+            if next_defect.clone().abs() >= defect.clone().abs() {
+                break;
+            }
+            previous = std::mem::replace(&mut rate, next);
+            previous_defect = std::mem::replace(&mut defect, next_defect);
+            if small {
+                break;
+            }
+        }
+        Ok((rate, defect))
     };
-    let mut previous_defect = real_defect(&previous, &h, &z, checked, &mut near)?;
-    let mut defect = real_defect(&rate, &h, &z, checked, &mut near)?;
-    let floor = cnum::epsilon(checked, work);
-    loop {
-        if defect.is_zero() || previous_defect == defect {
-            break;
-        }
-        let step = Float::with_val_64(work, &rate - &previous) * &defect
-            / Float::with_val_64(work, &defect - &previous_defect);
-        let mut next = Float::with_val_64(work, &rate - &step);
-        if !(next.is_finite() && next > 0) {
-            return Err("super-root: secant iteration left the domain b > 1".into());
-        }
-        // A step across e^(1/e) from below would ask for a base just above it.
-        if let Some(ceiling) = ceiling.as_ref().filter(|ceiling| next >= **ceiling) {
-            next = Float::with_val_64(work, &rate + ceiling) / 2u32;
-        }
-        report("refining", &next);
-        let small = step.clone().abs() <= Float::with_val_64(work, &next * &floor);
-        let next_defect = real_defect(&next, &h, &z, checked, &mut near)?;
-        if next_defect.clone().abs() >= defect.clone().abs() {
-            break;
-        }
-        previous = std::mem::replace(&mut rate, next);
-        previous_defect = std::mem::replace(&mut defect, next_defect);
-        if small {
-            break;
-        }
+    // Two iterates of the regula falsi also agree where a huge forward value
+    // at the upper end holds them at the lower one. The secant steps from
+    // there reach a root that lies next to that end and no other: then the
+    // bracket is narrowed steadily instead.
+    match settle(false, &mut near) {
+        Ok((rate, defect)) if defect.clone().abs() <= narrow => Ok(rate.exp()),
+        _ => Ok(settle(true, &mut near)?.0.exp()),
     }
-    Ok(rate.exp())
 }
 
 /// Decimal digits of the forward values while the path of a super-root is
@@ -1641,6 +1658,8 @@ pub fn sroot(z: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex
             extra = decimal_loss(&(-nearness.ln()))?;
         }
     }
+    // The path of an integer height is followed once for all the passes.
+    let mut course = integer_root::Course::default();
     loop {
         let checked = digits
             .checked_add(CHECK_DIGITS)
@@ -1659,7 +1678,7 @@ pub fn sroot(z: &Complex, h: &Complex, prec: u64, digits: u64) -> Result<Complex
             (real_complex(&rate, work), Vec::new())
         } else if let Some(levels) = integer_root::levels(&height) {
             // An integer height: the principal branch, by a certified path.
-            let root = integer_root::principal(&target, levels, work, checked)?;
+            let root = integer_root::principal(&target, levels, work, checked, &mut course)?;
             (root, Vec::new())
         } else {
             let level = checked.min(extra.saturating_add(WALK_DIGITS));

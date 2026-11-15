@@ -648,6 +648,262 @@ fn t1714_values_that_no_base_or_height_has() {
 }
 
 #[test]
+fn t1715_principal_super_root_at_integer_heights() {
+    let both = |re: &str, im: &str| (re.to_string(), im.to_string());
+    // The height 2 is `exp(W_0(Log z))` for every value: the small negative
+    // ones, which the path following lost (`-1e-9`: "inverse verification
+    // failed"), and those on the cut of `W_0`, with its limit from above.
+    let digits = 30u64;
+    let prec = cnum::digits_to_bits(digits);
+    let two = parse("2", "0", prec);
+    for (re, im) in [
+        ("-1e-9", "0"),
+        ("-1e-7", "0"),
+        ("-1e-300", "0"),
+        ("0.5", "0"),
+        ("1e-30", "0"),
+        ("-3", "0.5"),
+        ("1e-9", "-1e-9"),
+    ] {
+        let z = parse(re, im, prec);
+        let w = lambertw::w0(&cnum::ln_complex(&z, prec), prec).unwrap();
+        let expected = cnum::checked_exp(&w, prec).unwrap();
+        let found = inverse::sroot(&z, &two, prec, digits).unwrap();
+        assert!(
+            agreement(&found, &expected, prec) >= digits - 1,
+            "z = {re} + {im}i: {found}"
+        );
+    }
+    // The values of the branch, as they are printed.
+    for (value, height, re, im) in [
+        ("-1e-9", "2", "-3.983236308027", "5.961941104094"),
+        ("-1e-7", "2", "-2.948168065554", "5.198362389547"),
+        ("-1e-300", "2", "-109.8685681856", "60.61720827280"),
+        // A negative value and its neighbours: one branch at the height 3
+        // (the neighbours had -0.189 +- 0.100i, a root of another one).
+        ("-1.5", "3", "2.039520425012", "6.197726333890e-1"),
+        ("-1.5+0.03i", "3", "2.036696504371", "6.192961342339e-1"),
+        ("-1.5-0.03i", "3", "2.036696504371", "-6.192961342339e-1"),
+        // The tower of the height 4 has its least value 0.59323... on (0, 1):
+        // the real root above it, the limit from above below it.
+        ("0.6", "4", "3.400357449748e-1", "0"),
+        ("0.5933", "4", "2.805781465303e-1", "0"),
+        ("0.5932", "4", "2.746646133398e-1", "4.509483610065e-3"),
+        ("0.5", "4", "2.113189300384e-1", "2.175661447319e-1"),
+        ("0.1", "4", "-1.106161558186e-1", "3.858157539313e-1"),
+        ("-1e-9", "4", "-4.313050721719e-1", "1.923475494834e-1"),
+        // The small part of a root next to the negative real axis has its
+        // digits (`-1e-36` at the height 3 had 5.208324776316e-70).
+        ("-1e-36", "3", "-1.000000000000e-36", "5.208324776939e-70"),
+        (
+            "-1e-300",
+            "3",
+            "-1.000000000000e-300",
+            "4.340270647449e-597",
+        ),
+        // Inside `|Log z| < 1` the root tends to `z^(1/z)` as the height grows.
+        ("1.5+0.5i", "100", "1.396662347757", "1.421389488292e-1"),
+        ("0.5", "100", "2.500000000000e-1", "0"),
+    ] {
+        assert_eq!(
+            tetration::sroot_complex_str("13", value, height).unwrap(),
+            both(re, im),
+            "{value} at the height {height}"
+        );
+    }
+    assert_eq!(
+        tetration::tetrate_complex_str("13", "(1.5+0.5i)^(1/(1.5+0.5i))", "1").unwrap(),
+        both("1.396662347757", "1.421389488292e-1")
+    );
+    // Each is a base of the value.
+    let digits = 20u64;
+    let prec = cnum::digits_to_bits(digits);
+    for (re, im, height) in [
+        ("-1e-9", "0", "2"),
+        ("-1.5", "0", "3"),
+        ("-1.5", "0.03", "3"),
+        ("0.5", "0", "4"),
+        ("0.1", "0", "4"),
+        ("-1e-9", "0", "4"),
+        ("0.3", "-0.4", "7"),
+        ("-20", "3", "12"),
+    ] {
+        let z = parse(re, im, prec);
+        let h = parse(height, "0", prec);
+        let found = inverse::sroot(&z, &h, prec, digits).unwrap();
+        let image = dispatch::tetrate(&found, &h, prec, digits).unwrap();
+        assert!(
+            agreement(&image, &z, prec) >= digits - 2,
+            "z = {re} + {im}i at the height {height}: {found}"
+        );
+    }
+    // Where the root has wound around the origin of the plane of bases its
+    // logarithm is not the principal one: no base.
+    for value in ["1e-300", "-1e-120"] {
+        let error = tetration::sroot_complex_str("13", value, "4").unwrap_err();
+        assert!(error.contains("has no base"), "{value}: {error}");
+    }
+    assert_eq!(
+        tetration::sroot_complex_str("13", "1e-110", "4").unwrap(),
+        both("-4.786734101899e-1", "1.513383446465e-3")
+    );
+    // The fold itself, and values that no working precision tells from it.
+    assert_eq!(
+        tetration::sroot_complex_str("13", "e^(-1/e)", "2").unwrap(),
+        both("3.678794411714e-1", "0")
+    );
+    let fold = "0.593237297769728464552060197947081700423883882362165777457671";
+    assert_eq!(
+        tetration::sroot_complex_str("13", &format!("{fold}+1e-40"), "4").unwrap(),
+        both("2.746893852971e-1", "0")
+    );
+    assert_eq!(
+        tetration::sroot_complex_str("13", &format!("{fold}-1e-40"), "4").unwrap(),
+        both("2.746893852971e-1", "7.383987594865e-21")
+    );
+    // Above the heights of the principal branch a root is still found.
+    let (re, im) = tetration::sroot_complex_str("13", "2+i", "101").unwrap();
+    assert_eq!(
+        tetration::tetrate_complex_str("11", &format!("{re}+{im}*i"), "101").unwrap(),
+        both("2.0000000000", "1.0000000000")
+    );
+}
+
+#[test]
+fn t1716_principal_super_root_is_one_branch() {
+    let digits = 13u64;
+    let prec = cnum::digits_to_bits(digits);
+    let apart = |a: &Complex, b: &Complex| cnum::abs(&Complex::with_val_64(prec, a - b), prec);
+    let pi = Float::with_val_64(prec, rug::float::Constant::Pi);
+    // Circles that no cut of the branch crosses but the negative real axis:
+    // from a value to the next, 5 degrees on, the root moves a little (the
+    // path following changed the sheet on the way, at the height 3 at
+    // `Re z = -1.5` between `Im z = +-0.9`), conjugate values have conjugate
+    // roots, and the two ends lie on the two sides of the cut.
+    for (height, radius) in [("2", 2u32), ("3", 2), ("3", 5), ("4", 2), ("5", 5)] {
+        let h = parse(height, "0", prec);
+        let roots: Vec<Complex> = (-35..=35)
+            .map(|k: i32| {
+                let angle = Float::with_val_64(prec, &pi * k) / 36u32;
+                let (sin, cos) = angle.sin_cos(Float::new_64(prec));
+                let z = Complex::with_val_64(prec, (cos * radius, sin * radius));
+                inverse::sroot(&z, &h, prec, digits).unwrap()
+            })
+            .collect();
+        for (k, pair) in roots.windows(2).enumerate() {
+            let step = apart(&pair[0], &pair[1]);
+            assert!(
+                step < 0.125,
+                "height {height}, radius {radius}, {k}: {step}"
+            );
+        }
+        for (root, mirror) in roots.iter().zip(roots.iter().rev()) {
+            let mirror = Complex::with_val_64(prec, mirror.conj_ref());
+            assert!(
+                agreement(root, &mirror, prec) >= 11,
+                "height {height}: {root}"
+            );
+        }
+        let jump = apart(&roots[0], &roots[70]);
+        assert!(jump > 0.125, "height {height}, radius {radius}: {jump}");
+    }
+    // The branch is the root that is 1 at the value 1, followed along `z^t`:
+    // on that path it has no jump, also where a real path passes above the
+    // least value of the tower (0.59323... at the height 4).
+    for (re, im, height) in [("-1.5", "0", "3"), ("0.1", "0", "4"), ("-3", "0.5", "5")] {
+        let z = parse(re, im, prec);
+        let h = parse(height, "0", prec);
+        let log = cnum::ln_complex(&z, prec);
+        let mut before = cnum::one(prec);
+        for k in 1..=40u32 {
+            let part = Complex::with_val_64(prec, &log * k) / 40u32;
+            let mut value = cnum::checked_exp(&part, prec).unwrap();
+            if z.imag().is_zero() && *z.real() > 0 {
+                *value.mut_imag() = Float::new_64(prec);
+            }
+            let value = if k == 40 { z.clone() } else { value };
+            let root = inverse::sroot(&value, &h, prec, digits).unwrap();
+            let step = apart(&root, &before);
+            assert!(step < 0.25, "{re} + {im}i, height {height}, {k}: {step}");
+            before = root;
+        }
+    }
+    // The two sides of a cut. The tower of the height 3 has the branch value
+    // `z_c = 0.7315... + 0.2933...i`, and the cut from it is `z_c^t`, `t > 1`;
+    // these two values lie at `t = 1.5`, turned by `+-1e-30` in `Log z`.
+    // (A path of rounded points passed the branch value on one side for both.)
+    assert_eq!(
+        tetration::sroot_complex_str(
+            "13",
+            "0.58831959747314354802838311135092125875612102813574\
+             +0.37874762664457658747313026458009543827909378923656i",
+            "3"
+        )
+        .unwrap(),
+        (
+            "2.523651325666e-1".to_string(),
+            "4.260248726101e-1".to_string()
+        )
+    );
+    assert_eq!(
+        tetration::sroot_complex_str(
+            "13",
+            "0.58831959747314354802838311135132377145208769521622\
+             +0.37874762664457658747313026458094891201719956113863i",
+            "3"
+        )
+        .unwrap(),
+        (
+            "1.181865675026".to_string(),
+            "8.839545676912e-1".to_string()
+        )
+    );
+}
+
+#[test]
+fn t1717_real_roots_below_a_tower_that_blows_up() {
+    // The bracket of a real root is halved in `ln b` from above. Where its
+    // upper end has a finite but huge forward value (2.09^^5 for the value
+    // 5 at the height 5), the regula falsi stayed at the lower end, two of
+    // its iterates agreed, and that was taken for the root: "inverse
+    // verification failed" for 28 of 616 values and heights tried.
+    for (value, height, expected) in [
+        ("5", "5", "1.59340881509610213638399168263"),
+        ("1000", "5", "1.75226744075130623334446003872"),
+        ("1e50", "4", "2.24413172806968426338178726989"),
+        ("3.5", "6", "1.52575901146280733405905386057"),
+        ("1e10", "10", "1.53539353951006105507723383741"),
+        ("15", "17", "1.47176326194431339352951885752"),
+        ("1e6", "30", "1.45536572625204265639260606955"),
+        ("4", "100", "1.44557713600096941182453033036"),
+    ] {
+        let (root, zero) = tetration::sroot_str("30", value, "0", height, "0").unwrap();
+        assert_eq!(
+            (root.as_str(), zero.as_str()),
+            (expected, "0"),
+            "{value} at {height}"
+        );
+        let prec = cnum::digits_to_bits(60);
+        let image = dispatch::tetrate(
+            &parse(&root, "0", prec),
+            &parse(height, "0", prec),
+            prec,
+            40,
+        )
+        .unwrap();
+        assert!(
+            agreement(&image, &parse(value, "0", prec), prec) >= 20,
+            "{value} at {height}: {image}"
+        );
+    }
+    // A root next to the lower end of its bracket is found as before.
+    assert_eq!(
+        tetration::sroot_str("13", "10", "0", "5", "0").unwrap().0,
+        "1.644079074276"
+    );
+}
+
+#[test]
 fn t1705_cli_flags() {
     let run = |arguments: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_tet"))

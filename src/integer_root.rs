@@ -16,17 +16,23 @@
 //! the path stays on the real axis and passes above the branch point.
 //!
 //! The continuation is certified. At a point `(x, w)` of the path a disk
-//! `|v - w| <= r` is found on which `|h'(v) - h'(w)| <= d < |h'(w)|`, from
-//! enclosures of the recursion in disk arithmetic. On such a disk `h` is
-//! one-to-one (the real part of `h'(v)/h'(w)` is positive on a convex set)
-//! and `|h(u) - h(v)| >= (|h'(w)| - d) |u - v|`. For every `x'` within
+//! `|v - w| <= r` is found on which `|h'(v) - h'(w)| <= d < |h'(w)|`: the
+//! recursion gives an enclosure of `h''` over the disk in disk arithmetic,
+//! and `d = r max |h''|`. On such a disk `h` is one-to-one (the real part
+//! of `h'(v)/h'(w)` is positive on a convex set) and
+//! `|h(u) - h(v)| >= (|h'(w)| - d) |u - v|`. For every `x'` within
 //! `r (|h'(w)| - d)` of `h(w)` the chord iteration
 //! `v -> v - (h(v) - x')/h'(w)` maps the disk into itself and contracts it,
 //! so `h(v) = x'` has a root in the disk, the only one there, and it is the
 //! continuation of `w` along the segment from `x` to `x'`: no step can
-//! change the branch. Next to a branch point the disks shrink in proportion
-//! to its distance and the working bits of the continuation grow with them;
-//! a path that runs into a branch point itself ends in an error.
+//! change the branch. The points of the path are `t Log z` rounded to its
+//! bits, and every disk keeps a reserve for that rounding, so that the
+//! segment itself lies in the images of the disks: a branch point whose
+//! value the segment passes more closely than the rounding makes a step
+//! fail, it is not passed on the wrong side. Next to a branch point the
+//! disks shrink in proportion to its distance and the bits of the
+//! continuation grow with them; a path that runs into a branch point itself
+//! ends in an error.
 //!
 //! The one branch point that a path does run into is a fold of the real
 //! axis: a real `c` with `h'(c) = 0 < h''(c)`, where the real root ends. On a
@@ -45,6 +51,8 @@
 //! root has wound around the origin of the plane of bases), the principal
 //! branch has no base and the answer is an error.
 
+use std::cmp::Ordering;
+
 use rug::{float::Constant, Complex, Float};
 
 use crate::cnum;
@@ -54,17 +62,21 @@ use cnum::DisplayFloat;
 /// of it is certified at the precision it runs at, with the rounding
 /// counted, and the root it ends at is then computed at the working
 /// precision: no digit of a result depends on this number.
-const TRACK_DIGITS: u64 = 30;
+const TRACK_DIGITS: u64 = 10;
 
-/// The largest height whose super-root is the principal branch: a step of
-/// the continuation costs as many exponentials as the tower has levels.
-pub(crate) const LARGEST_HEIGHT: u32 = 512;
+/// The largest height whose super-root is the principal branch. A step of
+/// the continuation costs as many exponentials as the tower has levels, and
+/// the branch points that a path passes grow in number with the height: the
+/// time grows about as the square of the height (seconds at 100).
+pub(crate) const LARGEST_HEIGHT: u32 = 100;
 
 /// A disk of complex numbers with the bound that rounding alone accounts
 /// for: the centre of a result may be off the value at the centres of the
 /// arguments by `noise`, and no member is further than `rad` from it.
 struct Ball {
     mid: Complex,
+    /// The modulus of the centre.
+    size: Float,
     rad: Float,
     noise: Float,
 }
@@ -77,6 +89,8 @@ struct Disks {
     ulp: Float,
     /// A factor above the rounding of the few real operations of a radius.
     wide: Float,
+    /// Below it `e^x - 1` is taken as its bound `x (1 + x)`.
+    small: Float,
 }
 
 impl Disks {
@@ -87,42 +101,69 @@ impl Disks {
             bits,
             ulp: one.clone() >> size.saturating_sub(4),
             wide: Float::with_val_64(bits, &one + (one.clone() >> (size / 2))),
+            small: one >> 10u32,
         }
     }
 
     fn exact(&self, mid: Complex) -> Ball {
         Ball {
+            size: cnum::abs(&mid, self.bits),
             mid,
             rad: Float::new_64(self.bits),
             noise: Float::new_64(self.bits),
         }
     }
 
-    fn close(&self, mid: Complex, rad: Float, noise: Float) -> Option<Ball> {
-        let rounding = cnum::abs(&mid, self.bits) * &self.ulp;
-        let rad = (rad + &rounding) * &self.wide;
-        let noise = (noise + rounding) * &self.wide;
-        (cnum::is_finite(&mid) && rad.is_finite()).then_some(Ball { mid, rad, noise })
+    /// The disk of the radius `rad` about `w`.
+    fn about(&self, w: &Complex, rad: &Float) -> Ball {
+        let mid = Complex::with_val_64(self.bits, w);
+        Ball {
+            size: cnum::abs(&mid, self.bits),
+            mid,
+            rad: Float::with_val_64(self.bits, rad),
+            noise: Float::new_64(self.bits),
+        }
+    }
+
+    /// The result with the centre `mid`, of the modulus `size`: the bounds
+    /// of the operation with the rounding of the centre.
+    fn close(&self, mid: Complex, size: Float, mut rad: Float, mut noise: Float) -> Option<Ball> {
+        let rounding = Float::with_val_64(self.bits, &size * &self.ulp);
+        rad += &rounding;
+        rad *= &self.wide;
+        noise += rounding;
+        noise *= &self.wide;
+        (cnum::is_finite(&mid) && rad.is_finite()).then_some(Ball {
+            mid,
+            size,
+            rad,
+            noise,
+        })
     }
 
     fn add(&self, a: &Ball, b: &Ball) -> Option<Ball> {
+        let mid = Complex::with_val_64(self.bits, &a.mid + &b.mid);
+        let size = cnum::abs(&mid, self.bits);
         self.close(
-            Complex::with_val_64(self.bits, &a.mid + &b.mid),
+            mid,
+            size,
             Float::with_val_64(self.bits, &a.rad + &b.rad),
             Float::with_val_64(self.bits, &a.noise + &b.noise),
         )
     }
 
     fn mul(&self, a: &Ball, b: &Ball) -> Option<Ball> {
-        let size_a = cnum::abs(&a.mid, self.bits);
-        let size_b = cnum::abs(&b.mid, self.bits);
         let spread = |of_a: &Float, of_b: &Float| {
-            Float::with_val_64(self.bits, &size_a * of_b)
-                + Float::with_val_64(self.bits, &size_b * of_a)
-                + Float::with_val_64(self.bits, of_a * of_b)
+            let mut sum = Float::with_val_64(self.bits, &a.size * of_b);
+            sum += &b.size * of_a;
+            sum += of_a * of_b;
+            sum
         };
+        let mid = Complex::with_val_64(self.bits, &a.mid * &b.mid);
+        let size = cnum::abs(&mid, self.bits);
         self.close(
-            Complex::with_val_64(self.bits, &a.mid * &b.mid),
+            mid,
+            size,
             spread(&a.rad, &b.rad),
             spread(&a.noise, &b.noise),
         )
@@ -131,62 +172,51 @@ impl Disks {
     fn exp(&self, a: &Ball) -> Option<Ball> {
         let mid = cnum::checked_exp(&a.mid, self.bits).ok()?;
         let size = cnum::abs(&mid, self.bits);
-        let rad = Float::with_val_64(self.bits, &size * a.rad.clone().exp_m1());
-        let noise = size * a.noise.clone().exp_m1();
-        self.close(mid, rad, noise)
+        // `e^x - 1 <= x (1 + x)` for `0 <= x <= 1`.
+        let grown = |x: &Float| {
+            if *x <= self.small {
+                Float::with_val_64(self.bits, x * x) + x
+            } else {
+                x.clone().exp_m1()
+            }
+        };
+        let rad = grown(&a.rad) * &size;
+        let noise = grown(&a.noise) * &size;
+        self.close(mid, size, rad, noise)
     }
 
     /// Twice a disk: exact.
     fn twice(&self, a: &Ball) -> Ball {
         Ball {
             mid: Complex::with_val_64(self.bits, &a.mid << 1u32),
+            size: Float::with_val_64(self.bits, &a.size << 1u32),
             rad: Float::with_val_64(self.bits, &a.rad << 1u32),
             noise: Float::with_val_64(self.bits, &a.noise << 1u32),
         }
     }
 }
 
-/// Enclosures of `h` and `h'` over the disk of the given radius about `w`,
-/// and of `h''` when it is asked for. With `A = w E_{k-1}`:
-/// `E_k' = E_k A'` and `E_k'' = E_k (A'^2 + A'')`.
-fn enclosure(
-    w: &Complex,
-    radius: &Float,
-    levels: u32,
-    bits: u64,
-    curved: bool,
-) -> Option<(Ball, Ball, Option<Ball>)> {
+/// Enclosures of `h`, `h'` and `h''` over the disk of the given radius
+/// about `w`. With `A = w E_{k-1}`: `E_k' = E_k A'` and
+/// `E_k'' = E_k (A'^2 + A'')`.
+fn enclosure(w: &Complex, radius: &Float, levels: u32, bits: u64) -> Option<(Ball, Ball, Ball)> {
     let disks = Disks::new(bits);
-    let centre = Ball {
-        mid: Complex::with_val_64(bits, w),
-        rad: Float::with_val_64(bits, radius),
-        noise: Float::new_64(bits),
-    };
+    let centre = disks.about(w, radius);
     let mut tower = disks.exact(cnum::one(bits));
     let mut slope = disks.exact(cnum::zero(bits));
-    let mut bend = curved.then(|| disks.exact(cnum::zero(bits)));
+    let mut bend = disks.exact(cnum::zero(bits));
     for _ in 1..levels {
         let exponent = disks.mul(&centre, &tower)?;
         let rate = disks.add(&tower, &disks.mul(&centre, &slope)?)?;
-        let turn = match &bend {
-            Some(bend) => Some(disks.add(&disks.twice(&slope), &disks.mul(&centre, bend)?)?),
-            None => None,
-        };
+        let turn = disks.add(&disks.twice(&slope), &disks.mul(&centre, &bend)?)?;
         tower = disks.exp(&exponent)?;
-        if let Some(turn) = turn {
-            let square = disks.mul(&rate, &rate)?;
-            bend = Some(disks.mul(&tower, &disks.add(&square, &turn)?)?);
-        }
+        bend = disks.mul(&tower, &disks.add(&disks.mul(&rate, &rate)?, &turn)?)?;
         slope = disks.mul(&tower, &rate)?;
     }
-    let second = match &bend {
-        Some(bend) => Some(disks.add(&disks.twice(&slope), &disks.mul(&centre, bend)?)?),
-        None => None,
-    };
     Some((
         disks.mul(&centre, &tower)?,
         disks.add(&tower, &disks.mul(&centre, &slope)?)?,
-        second,
+        disks.add(&disks.twice(&slope), &disks.mul(&centre, &bend)?)?,
     ))
 }
 
@@ -220,7 +250,11 @@ fn logarithm(z: &Complex, bits: u64) -> Complex {
     Complex::with_val_64(bits, (size, turn))
 }
 
-fn trace() -> bool { std::env::var("TET_TRACE").is_ok() } // TRACE
+/// Above zero; a number that is none is not.
+fn positive(x: &Float) -> bool {
+    x.cmp0() == Some(Ordering::Greater)
+}
+
 const BRANCH_POINT: &str =
     "super-root: the path of the principal branch to this value runs into a \
                             branch point: the value lies on a branch cut, or closer to one than \
@@ -241,22 +275,36 @@ enum Fence {
 
 /// A certified disk about a point `(x, w)` of the path.
 struct Hold {
-    /// `h(w)` and `h'(w)` as computed.
+    /// `h(w)`, `h'(w)` and `h''(w)` as computed.
     value: Complex,
     rate: Complex,
+    bend: Complex,
     /// The root for `x` lies within this of `w`.
     offset: Float,
     /// How far a step may take `x`.
     room: Float,
-    /// A disk of twice the radius is likely to serve as well.
-    roomy: bool,
+    /// Every value within this of the step lies in the image of the disk.
+    strip: Float,
+    /// The radius that the next disk is likely to have.
+    wish: Float,
+}
+
+/// The other side of a fold of the real axis.
+struct Landing {
+    /// The next point of the path and its root.
+    goal: Complex,
+    root: Complex,
+    /// The fence of the root.
+    across: Fence,
+    /// The point is the end of the path.
+    end: bool,
+    /// A radius to try there.
+    room: Float,
 }
 
 /// What a try to pass a fold of the real axis gives.
 enum Crossing {
-    /// The next point of the path and its root, the fence of the root,
-    /// whether the point is the end of the path, and a radius to try there.
-    Landing(Complex, Complex, Fence, bool, Float),
+    Landing(Box<Landing>),
     /// Nothing from here: the fold, when one was found, is too far for a
     /// disk about it that reaches the path.
     Far(Option<Float>),
@@ -265,69 +313,133 @@ enum Crossing {
 }
 
 /// A point `(x, w)` of the continuation, `h(w) = x`, and how it got there.
+/// The points are `x = t to` on the segment from 0 to the target `to`,
+/// rounded to the working bits: each lies within one rounding of the
+/// segment itself, wherever the steps before it went.
 struct Path {
     levels: u32,
     /// Working bits; raised next to a branch point, up to `limit`.
     bits: u64,
     limit: u64,
+    /// The target, as the caller knows it, and the part of the way done.
+    to: Complex,
+    t: Float,
+    /// The target is real: the path lies on the real axis, the root is real
+    /// up to a fold, and the path passes above the fold.
+    folds: bool,
     x: Complex,
     w: Complex,
     /// Radius of a disk about `w` on which `h` is one-to-one and which holds
     /// the root for `x`; zero before the first step.
     radius: Float,
+    /// The least half-width of the certified strip about the steps: no
+    /// branch point of this sheet has its value nearer to the path.
+    clear: Option<Float>,
     steps: u64,
 }
 
 impl Path {
-    fn new(levels: u32, bits: u64, limit: u64) -> Path {
+    fn new(levels: u32, bits: u64, limit: u64, to: &Complex, folds: bool) -> Path {
         Path {
             levels,
             bits,
             limit,
+            to: to.clone(),
+            t: Float::new_64(bits),
+            folds,
             x: cnum::zero(bits),
             w: cnum::zero(bits),
             radius: Float::new_64(bits),
+            clear: None,
             steps: 0,
         }
     }
 
-    /// The largest disk tried about `w` (the radius is halved until one
-    /// serves) on which `h'` stays within half of `h'(w)`, and what it tells
-    /// about the root for `x`. `None` when the point cannot be certified
-    /// with these bits: no such disk, a root that may lie outside of the
-    /// fence, or no room for a step.
+    /// What is kept of every disk for the rounding of the points: a point
+    /// of the path and the point of the segment that it stands for are
+    /// closer than half of it.
+    fn reserve(&self, to: &Complex) -> Float {
+        let disks = Disks::new(self.bits);
+        Float::with_val_64(self.bits, cnum::abs(to, self.bits) * &disks.ulp) << 1u32
+    }
+
+    /// The largest disk tried about `w` (from `radius` down, as the bound
+    /// of each try tells) on which `h'` is shown to stay within half of
+    /// `h'(w)`, and what it tells about the root for `x`. `None` when the
+    /// point cannot be certified with these bits: no such disk, a root that
+    /// may lie outside of the fence, or no room for a step beside the
+    /// `reserve`.
     fn hold(
         &self,
         x: &Complex,
         w: &Complex,
         radius: &mut Float,
         fence: Option<&Fence>,
+        reserve: &Float,
     ) -> Option<Hold> {
         let bits = self.bits;
         let size = usize::try_from(bits).ok()?;
         let disks = Disks::new(bits);
         let scale = cnum::abs(w, bits).max(&Float::with_val_64(bits, 1));
         let smallest = Float::with_val_64(bits, &scale >> size);
-        let (value, rate, grip, roomy) = loop {
-            if let Some((value, rate, _)) = enclosure(w, radius, self.levels, bits, false) {
-                let floor = cnum::abs(&rate.mid, bits) / &disks.wide - &rate.noise;
-                let spread = Float::with_val_64(bits, &rate.rad + &rate.noise);
+        let (value, rate, bend, grip, wish) = loop {
+            let mut fitting = None;
+            if let Some((value, rate, bend)) = enclosure(w, radius, self.levels, bits) {
+                let floor = Float::with_val_64(bits, &rate.size / &disks.wide) - &rate.noise;
+                // `h'` on the disk is off `h'(w)` by the radius times the
+                // largest `h''` there at most, and by what its own enclosure
+                // tells: the smaller of the two, which is the first unless
+                // the disk is large.
+                let steep = Float::with_val_64(bits, &bend.size + &bend.rad) * &disks.wide;
+                let mean = Float::with_val_64(bits, &*radius * &steep) * &disks.wide + &rate.noise;
+                let spread = mean.min(&rate.rad) + &rate.noise;
+                // The radius at which the first bound is half of `|h'(w)|`
+                // when the enclosure of `h''` grows in proportion to it:
+                // `rho (a + q rho) = g` with `a = |h''(w)|`.
+                let goal = Float::with_val_64(bits, &floor >> 1u32)
+                    - Float::with_val_64(bits, &rate.noise << 1u32);
+                if goal > 0 && !radius.is_zero() {
+                    let slope = Float::with_val_64(bits, &bend.rad / &*radius);
+                    let root = (Float::with_val_64(bits, &bend.size * &bend.size)
+                        + Float::with_val_64(bits, &slope * &goal) * 4u32)
+                        .sqrt();
+                    let below = Float::with_val_64(bits, &bend.size + root);
+                    if below > 0 {
+                        fitting = Some(Float::with_val_64(bits, &goal << 1u32) / below);
+                    }
+                }
                 if Float::with_val_64(bits, &spread << 1u32) <= floor {
-                    let roomy = Float::with_val_64(bits, &spread << 4u32)
-                        <= Float::with_val_64(bits, &floor * 3u32);
-                    break (value, rate.mid, floor - spread, roomy);
+                    // A little less than that, between a half and four
+                    // times this one.
+                    let least = Float::with_val_64(bits, &*radius >> 1u32);
+                    let most = Float::with_val_64(bits, &*radius << 2u32);
+                    let wish = match fitting {
+                        Some(fitting) => (fitting.clone() - (fitting >> 4u32)).clamp(&least, &most),
+                        None => most,
+                    };
+                    break (value, rate.mid, bend.mid, floor - spread, wish);
                 }
             }
-            *radius >>= 1u32;
-            if *radius < smallest {
+            // A smaller disk: a little less than the fitting one when that
+            // is known, between 1/16 and 15/16 of this one (an enclosure
+            // that is far too wide tells little about a fitting one).
+            let least = Float::with_val_64(bits, &*radius >> 4u32);
+            let most = Float::with_val_64(bits, &*radius - &least);
+            *radius = match fitting {
+                Some(fitting) => (fitting.clone() - (fitting >> 4u32)).clamp(&least, &most),
+                None => Float::with_val_64(bits, &*radius >> 1u32),
+            };
+            if !radius.is_finite() || *radius < smallest {
                 return None;
             }
         };
-        // `grip |u - v| <= |h(u) - h(v)|` on the disk: the root for `x` is
-        // within `defect / grip` of `w`.
+        // `grip |u - v| <= |h(u) - h(v)|` on the disk: the root for `x`, and
+        // for the point of the segment that `x` stands for, is within
+        // `defect / grip` of `w`.
         let reach = Float::with_val_64(bits, &*radius * &grip) / &disks.wide;
         let defect = cnum::abs(&Complex::with_val_64(bits, &value.mid - x), bits) * &disks.wide
-            + &value.noise;
+            + &value.noise
+            + reserve;
         let offset = Float::with_val_64(bits, &defect / &grip) * &disks.wide;
         let far = |centre: &Complex| {
             cnum::abs(&Complex::with_val_64(bits, w - centre), bits) * &disks.wide + &offset
@@ -342,22 +454,25 @@ impl Path {
                     && Float::with_val_64(bits, w.real() - centre.real()) - &offset > *place
             }
         };
-        let room = Float::with_val_64(bits, &reach - (reach.clone() >> 3u32)) - defect;
+        let strip = Float::with_val_64(bits, &reach >> 3u32);
+        let room = Float::with_val_64(bits, &reach - &strip) - defect;
         (inside && room > 0).then_some(Hold {
             value: value.mid,
             rate,
+            bend,
             offset,
             room,
-            roomy,
+            strip,
+            wish,
         })
     }
 
-    /// Continue the root along the straight segment from `x` to `to`. With
-    /// `folds` the segment lies on the real axis: the root is real up to a
-    /// fold, and the path passes above the fold.
-    fn advance(&mut self, to: &Complex, folds: bool) -> Result<(), String> {
+    /// Continue the root from 0 along the straight segment to the target.
+    fn advance(&mut self) -> Result<(), String> {
+        let to = self.to.clone();
+        let folds = self.folds;
         // The last certified point with the radius of its disk.
-        let mut anchor: Option<(Complex, Complex, Float)> = None;
+        let mut anchor: Option<(Float, Complex, Complex, Float)> = None;
         let mut fence: Option<Fence> = None;
         // The real point before this one with its `h'`: two of them tell
         // where `h'` vanishes.
@@ -370,23 +485,17 @@ impl Path {
         loop {
             let bits = self.bits;
             let disks = Disks::new(bits);
+            let t = Float::with_val_64(bits, &self.t);
             let x = Complex::with_val_64(bits, &self.x);
             let w = Complex::with_val_64(bits, &self.w);
             radius.set_prec_64(bits);
-            // At the end `x` is the target rounded to these bits: the target
-            // itself must have its root in the disk too.
-            let held = self
-                .hold(&x, &w, &mut radius, fence.as_ref())
-                .filter(|hold| {
-                    !arrived
-                        || Float::with_val_64(bits, cnum::abs(to, bits) * &disks.ulp) <= hold.room
-                });
-            let Some(hold) = held else {
-                if trace() { eprintln!("T FAIL at step {} bits {} x {:.12e} w {:.12e} {:.6e} r {:.3e}", self.steps, bits, x.real().to_f64(), w.real().to_f64(), w.imag().to_f64(), radius.to_f64()); } // TRACE
+            let reserve = self.reserve(&to);
+            let Some(hold) = self.hold(&x, &w, &mut radius, fence.as_ref(), &reserve) else {
                 self.more_bits()?;
                 // Back to the last certified point, which stays certified.
                 radius = match anchor.take() {
-                    Some((x, w, room)) => {
+                    Some((t, x, w, room)) => {
+                        self.t = t;
                         self.x = x;
                         self.w = w;
                         room
@@ -400,7 +509,6 @@ impl Path {
                 continue;
             };
             self.radius = radius.clone();
-            if trace() { eprintln!("T step {} bits {} x {:.12e} w {:.12e} {:.6e} r {:.3e} room {:.3e} off {:.3e} roomy {} arrived {}", self.steps, bits, x.real().to_f64(), w.real().to_f64(), w.imag().to_f64(), radius.to_f64(), hold.room.to_f64(), hold.offset.to_f64(), hold.roomy, arrived); } // TRACE
             if arrived {
                 return Ok(());
             }
@@ -427,22 +535,25 @@ impl Path {
                             Float::with_val_64(bits, &gap << 1u32) <= *last
                         });
                     if due {
-                        match self.fold(&x, &w, &aim, known, to, &hold) {
-                            Crossing::Landing(goal, root, across, end, room) => {
-                                if trace() { eprintln!("T   landing goal {:.12e} root {:.12e} {:.6e} end {} room {:.3e}", goal.real().to_f64(), root.real().to_f64(), root.imag().to_f64(), end, room.to_f64()); } // TRACE
-                                anchor = Some((x, w, radius.clone()));
-                                fence = Some(across);
+                        match self.fold(&x, &w, &aim, known, &to, &hold) {
+                            Crossing::Landing(landing) => {
+                                self.t = if landing.end {
+                                    Float::with_val_64(bits, 1)
+                                } else {
+                                    Float::with_val_64(bits, landing.goal.real() / to.real())
+                                };
+                                anchor = Some((t, x, w, radius.clone()));
+                                fence = Some(landing.across);
                                 trail = None;
                                 brink = None;
-                                self.x = goal;
-                                self.w = root;
+                                self.x = landing.goal;
+                                self.w = landing.root;
                                 self.steps += 1;
-                                arrived = end;
-                                radius = room;
+                                arrived = landing.end;
+                                radius = landing.room;
                                 continue;
                             }
                             Crossing::Blind => {
-                                if trace() { eprintln!("T   blind"); } // TRACE
                                 // The same point with more bits.
                                 self.more_bits()?;
                                 trail = None;
@@ -450,7 +561,6 @@ impl Path {
                                 continue;
                             }
                             Crossing::Far(centre) => {
-                                if trace() { eprintln!("T   far {:?} gap {:.3e}", centre.as_ref().map(|c| c.to_f64()), gap.to_f64()); } // TRACE
                                 let gap = match &centre {
                                     Some(centre) => Float::with_val_64(bits, w.real() - centre),
                                     None => gap,
@@ -461,39 +571,92 @@ impl Path {
                     }
                 }
             }
-            let gap = Complex::with_val_64(bits, to - &x);
-            // The end of the path is `to` rounded to these bits.
-            let remaining = cnum::abs(&gap, bits) + cnum::abs(to, bits) * &disks.ulp;
-            arrived = remaining <= hold.room;
-            let goal = if arrived {
-                Complex::with_val_64(bits, to)
+            let span = cnum::abs(&to, bits);
+            let left = Float::with_val_64(bits, 1u32 - &t);
+            arrived = Float::with_val_64(bits, &left * &span) * &disks.wide <= hold.room;
+            let (onward, goal) = if arrived {
+                (Float::with_val_64(bits, 1), Complex::with_val_64(bits, &to))
             } else {
-                x.clone() + gap * Float::with_val_64(bits, &hold.room / &remaining)
+                let stride = Float::with_val_64(bits, &hold.room / &span) / &disks.wide;
+                let onward = Float::with_val_64(bits, &t + stride);
+                let goal = Complex::with_val_64(bits, &to * &onward);
+                (onward, goal)
             };
-            if !arrived && goal == x {
-                if trace() { eprintln!("T   stuck"); } // TRACE
+            if !arrived && (onward == t || goal == x) {
                 // Next to a branch point the steps shrink with its
-                // distance; this one is below the rounding of `x`.
+                // distance; this one is below the rounding of the path.
                 self.more_bits()?;
                 trail = None;
                 brink = None;
                 continue;
             }
-            let mut next = self.solve(&goal, &w, &radius, &hold.value, &hold.rate)?;
+            let mut next = self.solve(&goal, &w, &radius, &hold)?;
             if real {
                 // A real value has a real root in a disk about a real point
                 // that holds one root only.
                 *next.mut_imag() = Float::new_64(bits);
             }
+            self.clear = Some(match self.clear.take() {
+                Some(clear) => clear.min(&hold.strip),
+                None => hold.strip.clone(),
+            });
             fence = Some(Fence::Disk(w.clone(), radius.clone()));
-            anchor = Some((x, w, radius.clone()));
+            anchor = Some((t, x, w, radius.clone()));
+            self.t = onward;
             self.x = goal;
             self.w = next;
             self.steps += 1;
-            if hold.roomy {
-                radius <<= 1u32;
-            }
+            radius = hold.wish;
         }
+    }
+
+    /// Move the end of a path that was followed to its target to `to`, the
+    /// same value as it is known now, when that is the same continuation:
+    /// the segment from 0 to `to` lies in the certified strip about the
+    /// path, and `to` in the disk of its end. `false` when it cannot be told.
+    fn settle(&mut self, to: &Complex) -> bool {
+        let bits = self.bits;
+        if self.t != 1u32 {
+            return false;
+        }
+        let disks = Disks::new(bits);
+        // Real targets have the same segment, the real axis.
+        let apart = cnum::abs(&Complex::with_val_64(bits, to - &self.to), bits) * &disks.wide;
+        if !self.folds && self.clear.as_ref().is_some_and(|clear| apart > *clear) {
+            return false;
+        }
+        let x = Complex::with_val_64(bits, &self.x);
+        let w = Complex::with_val_64(bits, &self.w);
+        let mut radius = self.first_radius();
+        let reserve = self.reserve(to);
+        let Some(hold) = self.hold(&x, &w, &mut radius, None, &reserve) else {
+            return false;
+        };
+        let goal = Complex::with_val_64(bits, to);
+        let moved = cnum::abs(&Complex::with_val_64(bits, &goal - &x), bits) * &disks.wide;
+        if moved > hold.room {
+            return false;
+        }
+        let Ok(mut next) = self.solve(&goal, &w, &radius, &hold) else {
+            return false;
+        };
+        if self.folds && w.imag().is_zero() {
+            *next.mut_imag() = Float::new_64(bits);
+        }
+        let mut around = radius.clone();
+        let fence = Fence::Disk(w, radius);
+        if self
+            .hold(&goal, &next, &mut around, Some(&fence), &reserve)
+            .is_none()
+        {
+            return false;
+        }
+        self.to = to.clone();
+        self.x = goal;
+        self.w = next;
+        self.radius = around;
+        self.steps += 1;
+        true
     }
 
     /// Twice the bits for the continuation, while that is allowed.
@@ -520,21 +683,30 @@ impl Path {
     }
 
     /// The root of `h(v) = goal` in the disk about `w`, for a goal that the
-    /// chord iteration with the slope `rate = h'(w)` reaches: Newton steps,
-    /// and a chord step wherever a Newton step would leave the disk. The
-    /// root is as accurate as the next disk needs it: its steps are
-    /// followed to `2^-30` of the radius, and the next one is their square.
+    /// chord iteration with the slope `h'(w)` reaches: from the inverse of
+    /// `h` at `w` to the second order, Newton steps, and a chord step
+    /// wherever a Newton step would leave the disk. The root is as accurate
+    /// as the next disk needs it: after a step below a sixteenth of the
+    /// radius the error is about the square of that, and the next disk
+    /// starts from the value that `h` has there, not from the goal.
     fn solve(
         &self,
         goal: &Complex,
         w: &Complex,
         radius: &Float,
-        value: &Complex,
-        rate: &Complex,
+        hold: &Hold,
     ) -> Result<Complex, String> {
         let bits = self.bits;
-        let converged = Float::with_val_64(bits, radius >> 30u32);
-        let mut v = w.clone() + Complex::with_val_64(bits, goal - value) / rate;
+        let inside = |v: &Complex| {
+            cnum::is_finite(v) && cnum::abs(&Complex::with_val_64(bits, v - w), bits) < *radius
+        };
+        let converged = Float::with_val_64(bits, radius >> 4u32);
+        let chord = Complex::with_val_64(bits, goal - &hold.value) / &hold.rate;
+        let bow = Complex::with_val_64(bits, &hold.bend / &hold.rate) * chord.clone().square();
+        let mut v = w.clone() + &chord - (bow >> 1u32);
+        if !inside(&v) {
+            v = w.clone() + chord;
+        }
         let mut before: Option<Float> = None;
         let mut count = 0u64;
         loop {
@@ -545,10 +717,8 @@ impl Path {
                 return Ok(v);
             }
             let mut next = v.clone() - Complex::with_val_64(bits, &defect / &slope);
-            let within = cnum::is_finite(&next)
-                && cnum::abs(&Complex::with_val_64(bits, &next - w), bits) < *radius;
-            if !within {
-                next = v.clone() - Complex::with_val_64(bits, &defect / rate);
+            if !inside(&next) {
+                next = v.clone() - Complex::with_val_64(bits, &defect / &hold.rate);
             }
             let step = cnum::abs(&Complex::with_val_64(bits, &next - &v), bits);
             v = next;
@@ -604,7 +774,7 @@ impl Path {
         // `h'` has the sign of `h'(w)` on the disk of `w`, which holds the
         // root: positive there, the root lies right of the fold found here,
         // the only zero of `h'` on the real axis of its disk.
-        if !(*hold.rate.real() > 0) {
+        if !positive(hold.rate.real()) {
             return Crossing::Far(None);
         }
         let centre = if known {
@@ -622,19 +792,24 @@ impl Path {
     }
 
     /// The zero of `h'` next to `start` on the real axis, where `h''` is
-    /// positive, by Newton's iteration.
+    /// positive, by Newton's iteration; `None` when the iteration does not
+    /// settle on one.
     fn critical(&self, start: &Float) -> Option<Float> {
         let bits = self.bits;
         let size = usize::try_from(bits).ok()?;
         let point = Float::new_64(bits);
-        let converged = Float::with_val_64(bits, 1) >> size.saturating_sub(12);
+        let one = Float::with_val_64(bits, 1);
+        let converged = one.clone() >> size.saturating_sub(12);
+        // Steps that no longer shrink are the rounding of `h'` only when
+        // they are this small.
+        let settled = one >> (size / 2);
         let mut centre = start.clone();
         let mut before: Option<Float> = None;
         for _ in 0..24 {
             let at = Complex::with_val_64(bits, (&centre, 0));
-            let (_, first, second) = enclosure(&at, &point, self.levels, bits, true)?;
-            let curve = second?.mid;
-            if !(*curve.real() > 0) {
+            let (_, first, second) = enclosure(&at, &point, self.levels, bits)?;
+            let curve = second.mid;
+            if !positive(curve.real()) {
                 return None;
             }
             let step = Float::with_val_64(bits, first.mid.real() / curve.real());
@@ -643,10 +818,12 @@ impl Path {
                 return None;
             }
             let moved = step.abs();
-            if moved <= Float::with_val_64(bits, centre.clone().abs() * &converged)
-                || before.as_ref().is_some_and(|last| moved >= *last)
-            {
+            let scale = centre.clone().abs();
+            if moved <= Float::with_val_64(bits, &scale * &converged) {
                 return Some(centre);
+            }
+            if before.as_ref().is_some_and(|last| moved >= *last) {
+                return (moved <= scale * settled).then_some(centre);
             }
             before = Some(moved);
         }
@@ -661,8 +838,7 @@ impl Path {
         let bits = self.bits;
         let disks = Disks::new(bits);
         let at = Complex::with_val_64(bits, (centre, 0));
-        let (value, first, second) = enclosure(&at, reach, self.levels, bits, true)?;
-        let second = second?;
+        let (value, first, second) = enclosure(&at, reach, self.levels, bits)?;
         let floor = Float::with_val_64(bits, second.mid.real() / &disks.wide) - &second.noise;
         let spread = Float::with_val_64(bits, &second.rad + &second.noise);
         (Float::with_val_64(bits, &spread << 2u32) <= floor).then(|| {
@@ -701,14 +877,13 @@ impl Path {
         // `h'` rises at least by `bound` a unit on the real axis of the
         // disk: its zero, the fold, lies within `place` of the centre, and
         // the value there within `band` of the value at the centre.
-        let slant = cnum::abs(&first.mid, bits) * &disks.wide + &first.noise;
+        let slant = Float::with_val_64(bits, &first.size * &disks.wide) + &first.noise;
         let place = Float::with_val_64(bits, &slant / &bound) * &disks.wide;
         let band = Float::with_val_64(bits, &slant * &place) * &disks.wide + &value.noise;
         if Float::with_val_64(bits, &place << 3u32) >= reach {
             return None;
         }
         let room = Float::with_val_64(bits, &reach - &place);
-        if trace() { eprintln!("T   fold centre {:.15e} gap {:.3e} reach {:.3e} place {:.3e} band {:.3e} slant {:.3e} bound {:.3e} off {:.3e}", centre.to_f64(), gap.to_f64(), reach.to_f64(), place.to_f64(), band.to_f64(), slant.to_f64(), bound.to_f64(), hold.offset.to_f64()); } // TRACE
         // The root of the path lies in the disk about the fold.
         if Float::with_val_64(bits, &gap + &hold.offset) + &place >= room {
             return None;
@@ -724,7 +899,6 @@ impl Path {
         }
         let end = Float::with_val_64(bits, to.real());
         let ahead = Float::with_val_64(bits, &end - &level);
-        if trace() { eprintln!("T   fold span {:.3e} entry {:.3e} ahead {:.3e}", span.to_f64(), entry.to_f64(), ahead.to_f64()); } // TRACE
         let fold = real(centre);
         if ahead > band {
             // The end of the path lies before the fold: the real root right
@@ -741,7 +915,13 @@ impl Path {
             }
             *root.mut_imag() = Float::new_64(bits);
             let across = Fence::Right(fold, room, place);
-            return Some(Crossing::Landing(real(&end), root, across, true, beyond >> 1u32));
+            return Some(Crossing::Landing(Box::new(Landing {
+                goal: real(&end),
+                root,
+                across,
+                end: true,
+                room: beyond >> 1u32,
+            })));
         }
         if Float::with_val_64(bits, -&ahead) > band {
             // Past the fold: the end of the path when it is near enough,
@@ -763,13 +943,19 @@ impl Path {
             if root.imag().is_sign_negative() {
                 root = root.conj();
             }
-            if !(*root.imag() > 0) {
+            if !positive(root.imag()) {
                 return None;
             }
             let room_there = Float::with_val_64(bits, root.imag() >> 1u32);
             // Within `room` of the fold, which is within `place` of the centre.
             let across = Fence::Above(fold, room - place);
-            return Some(Crossing::Landing(real(&goal), root, across, last, room_there));
+            return Some(Crossing::Landing(Box::new(Landing {
+                goal: real(&goal),
+                root,
+                across,
+                end: last,
+                room: room_there,
+            })));
         }
         Some(Crossing::Blind)
     }
@@ -825,9 +1011,23 @@ fn edge(w: &Complex, bits: u64) -> (Float, bool) {
     }
 }
 
+/// The continuation for one value at one height, kept between the passes of
+/// a caller that raises its working precision: the path is followed once,
+/// and a later pass only moves its end to the value as it is known then.
+#[derive(Default)]
+pub struct Course {
+    path: Option<Path>,
+}
+
 /// The principal super-root of `z` at the integer height `levels >= 2`, to
 /// `digits` digits of each of its parts at `work` bits.
-pub fn principal(z: &Complex, levels: u32, work: u64, digits: u64) -> Result<Complex, String> {
+pub fn principal(
+    z: &Complex,
+    levels: u32,
+    work: u64,
+    digits: u64,
+    course: &mut Course,
+) -> Result<Complex, String> {
     cnum::require_precision(work, digits)?;
     if levels < 2 || !cnum::is_finite(z) || cnum::is_zero(z) {
         return Err(
@@ -843,11 +1043,23 @@ pub fn principal(z: &Complex, levels: u32, work: u64, digits: u64) -> Result<Com
         .saturating_add(track.saturating_mul(2))
         .min(most);
     let target = logarithm(z, work);
-    let mut path = Path::new(levels, track, limit);
     // A positive value: the path lies on the real axis and passes above a
     // fold, which is the limit from above.
     let on_axis = z.imag().is_zero() && !z.real().is_sign_negative();
-    path.advance(&target, on_axis)?;
+    let kept = course
+        .path
+        .take()
+        .filter(|path| path.levels == levels && path.folds == on_axis)
+        .and_then(|mut path| path.settle(&target).then_some(path));
+    let path = match kept {
+        Some(path) => path,
+        None => {
+            let mut path = Path::new(levels, track, limit, &target, on_axis);
+            path.advance()?;
+            path
+        }
+    };
+    let path = course.path.insert(path);
     if cnum::verbose() {
         eprintln!(
             "sroot: principal branch at the height {levels}: {} certified steps, {} bits",
@@ -951,13 +1163,12 @@ mod tests {
         ] {
             let w = point(centre.0, centre.1, bits);
             let r = cnum::decimal(radius, bits);
-            let (value, rate, bend) = enclosure(&w, &r, levels, bits, true).unwrap();
-            let bend = bend.unwrap();
+            let (value, rate, bend) = enclosure(&w, &r, levels, bits).unwrap();
             let (at, slope) = values(&w, levels, bits).unwrap();
             assert_eq!(value.mid, at);
             assert_eq!(rate.mid, slope);
             let none = Float::new_64(bits);
-            let second = |v: &Complex| enclosure(v, &none, levels, bits, true).unwrap().2.unwrap();
+            let second = |v: &Complex| enclosure(v, &none, levels, bits).unwrap().2;
             // Points of the disk, on its edge and inside.
             for k in 0..24u32 {
                 let angle = Float::with_val_64(bits, Constant::Pi) * k / 12u32;
@@ -992,11 +1203,7 @@ mod tests {
             (6, "0.25", "-0.3"),
         ] {
             let w = point(re, im, bits);
-            let bend = enclosure(&w, &none, levels, bits, true)
-                .unwrap()
-                .2
-                .unwrap()
-                .mid;
+            let bend = enclosure(&w, &none, levels, bits).unwrap().2.mid;
             let (_, ahead) =
                 values(&Complex::with_val_64(bits, &w + &width), levels, bits).unwrap();
             let (_, behind) =
@@ -1024,6 +1231,65 @@ mod tests {
     }
 
     #[test]
+    fn a_real_value_above_one_has_the_real_root() {
+        let digits = 30u64;
+        let bits = cnum::digits_to_bits(digits + 10);
+        for (levels, value) in [
+            (2u32, "1.5"),
+            (3, "2"),
+            (4, "1000"),
+            (7, "1.001"),
+            (10, "1e50"),
+        ] {
+            let z = point(value, "0", bits);
+            let found = principal(&z, levels, bits, digits, &mut Course::default()).unwrap();
+            assert!(
+                found.imag().is_zero() && *found.real() > 1,
+                "{value} at {levels}"
+            );
+            let tower = integer_height::tetrate_integer(&found, i64::from(levels), bits).unwrap();
+            assert!(close(&tower, &z, bits, digits - 4), "{value} at {levels}");
+        }
+    }
+
+    #[test]
+    fn a_path_into_a_branch_point_is_an_error() {
+        // `h(w) = w e^w` has the branch value `-1/e`; a real path to `-1/2`
+        // that is not told to pass above it runs into it.
+        let bits = cnum::digits_to_bits(TRACK_DIGITS);
+        let to = point("-0.5", "0", bits);
+        let mut blind = Path::new(2, bits, bits * 4, &to, false);
+        assert_eq!(blind.advance().unwrap_err(), BRANCH_POINT);
+        let mut told = Path::new(2, bits, bits * 4, &to, true);
+        told.advance().unwrap();
+        assert!(*told.w.imag() > 0);
+        // Short of the branch value there is nothing to run into.
+        let near = point("-0.36", "0", bits);
+        let mut short = Path::new(2, bits, bits * 4, &near, false);
+        short.advance().unwrap();
+        assert!(short.w.imag().is_zero() && *short.w.real() > -1);
+    }
+
+    #[test]
+    fn a_path_is_kept_for_a_target_within_its_strip_only() {
+        let bits = cnum::digits_to_bits(TRACK_DIGITS);
+        let to = point("0.3", "2.5", bits);
+        let mut path = Path::new(5, bits, bits * 4, &to, false);
+        path.advance().unwrap();
+        let steps = path.steps;
+        let clear = path.clear.clone().unwrap();
+        // The same target known better: one more step.
+        let better = Complex::with_val_64(bits * 2, &to) + (clear.clone() >> 4u32);
+        assert!(path.settle(&better));
+        assert_eq!(path.steps, steps + 1);
+        let (value, _) = values(&path.w, 5, bits).unwrap();
+        assert!(close(&value, &better, bits, 20));
+        // A target further than the strip is wide is another path.
+        let other = Complex::with_val_64(bits, &to) + (clear << 2u32);
+        assert!(!path.settle(&other));
+    }
+
+    #[test]
     fn the_height_two_is_the_lambert_function() {
         let digits = 30u64;
         let bits = cnum::digits_to_bits(digits + 10);
@@ -1043,7 +1309,7 @@ mod tests {
             ("1e-30", "0"),
         ] {
             let z = point(re, im, bits);
-            let found = principal(&z, 2, bits, digits).unwrap();
+            let found = principal(&z, 2, bits, digits, &mut Course::default()).unwrap();
             let w = lambertw::w0(&logarithm(&z, bits), bits).unwrap();
             let expected = cnum::checked_exp(&w, bits).unwrap();
             assert!(close(&found, &expected, bits, digits), "z = {re} + {im}i");

@@ -95,6 +95,30 @@ zero imaginary part.
 * **Definition used:** `F_b(0) = 1`, `F_b(z+1) = b^{F_b(z)}`, with
   method-specific branch and normalization conventions
   (§ [Conventions](#12-conventions-and-normalization)).
+* **Status (15 November 2026, morning):** the super-root at an integer
+  height from 2 to 100 is now one function, the principal super-root
+  (§ 6.9): with `w = Log b` the tower `b^^n` is an entire function of `w`,
+  and the root is `exp(W(Log z))`, where `W` is the inverse of
+  `w ↦ Log(b^^n)` that is 0 at 0, continued along the straight segment to
+  `Log z`. At the height 2 that is `exp(W₀(Log z))`, as before; a real
+  value above 1 keeps its real root; inside `|Log z| < 1` the root tends to
+  `z^{1/z}` as the height grows. Every step of the continuation is
+  certified by disk arithmetic, so the sheet cannot change on the way, and
+  the cuts are known curves. The two limits that § 5.3 listed are gone:
+  `tet --sroot 13 -1e-9 2` gives `−3.983236308027 + 5.961941104094i` (it
+  was an error), and at the height 3 the values `−1.5` and `−1.5 ± 0.03i`
+  have the roots `2.0395 + 0.6198i` and `2.0367 ± 0.6193i` of one branch
+  (the neighbours had `−0.189 ± 0.100i`, a root of another). Heights up to
+  10 take as long as before or less: 3 to 5 ms a value at the heights 2 to
+  5, where it was 5 to 9; 15 ms at 10, as before; 4 and 7 ms for the real
+  value `0.5` at the heights 2 and 4, where it was 12 and 23. The time then
+  grows with the square of the height: 0.05 s at 20, 0.3 s at 50, 1 s and
+  at most 4 s at 100, where the path following took 0.03, 0.1 and 0.3 s
+  for a root of some sheet and ended in an error for one value in a
+  hundred. A fault of the real roots was found on the way and corrected:
+  `tet --sroot 13 5 5` was "inverse verification failed", as were 28 of
+  616 real values between `1.01` and `10⁵⁰` at the heights 2 to 100; it
+  gives `1.593408815096`.
 * **Status (15 November 2026):** pictures of the present solvers:
   what six tetrations do with the plane of heights, the spirals of nine
   bases with their towers, a map of the bases, phase portraits and views
@@ -733,15 +757,34 @@ With one argument for each number the same three runs are `tet -q 30 2 0.5`,
   `2.68778856702334` and `tet --sroot 15 -1 0 -1.5 0` gives
   `1.75033148344121`.
 * For other inputs (a value below `1`, a negative or complex value, a
-  complex height) the answer is in general complex, and the equation can
-  have several solutions; the one printed is the one reached by following
-  the real solution as the value and the height move to those requested
-  (§ 6.9). `tet --sroot 15 -1 0 2 0` gives
+  complex height) the answer is in general complex, and the equation has
+  several solutions. At an integer height from 2 to 100 the one printed is
+  the principal super-root (§ 6.9): the root that is 1 at the value 1,
+  followed along `z^t`, `0 ≤ t ≤ 1`; at the height 2 it is
+  `exp(W₀(Log z))`. `tet --sroot 15 -1 0 2 0` gives
   `1.69038675716359 + 1.86990796402678i` (a solution of `b^b = −1`),
   `tet --sroot 15 1 1 2 0` gives `1.39401786375297 + 0.577731814002267i`
   (`b^b = 1 + i`), and `tet --sroot 15 0.75 0 2 0` gives
   `0.636262939294531`, the solution of `b^b = 0.75` above `1/e` (a second
-  real one lies below).
+  real one lies below). `tet --sroot 13 -1.5 3` gives
+  `2.039520425012 + 0.6197726333890i`. Conjugate values have conjugate
+  roots, and the branch is cut along the negative real axis, where the
+  value itself has the root of the side above.
+* At an even height the tower of a base between 0 and 1 has a least value
+  (`e^{−1/e} = 0.6922` at the height 2, `0.5932` at 4), and a real value
+  below it has no real root of this branch. The root printed is the limit
+  from above (from values with a small positive imaginary part), as for
+  `W₀`; its conjugate is the limit from below: `tet --sroot 13 0.5 4` gives
+  `0.2113189300384 + 0.2175661447319i`, and `tet --sroot 13 0.6 4` the real
+  `0.3400357449748`.
+* Where the principal branch has no base the answer is an error. That is
+  so at the height 4 for values below about `10⁻¹¹⁵` in modulus
+  (`tet --sroot 13 1e-300 4`): the logarithm of the root has left the strip
+  of the principal logarithms there, so no base has it (§ 6.9).
+* At a non-integer height, and at an integer height above 100, the root
+  printed is the one reached by following the real solution as the value
+  and the height move to those requested (§ 6.9): a solution, but of a
+  branch that depends on that path.
 * With a non-integer height and a complex answer, remember that this
   program's tetration is one function for bases inside the Shell–Thron
   region and another outside it (§ 1.2). The base printed satisfies
@@ -749,7 +792,9 @@ With one argument for each number the same three runs are `tet -q 30 2 0.5`,
   returns the value. `tet --sroot 15 1.3 0.3 0.5 0` gives
   `1.34643520763314 + 0.718919636140968i` (8 s), and
   `tet 15 1.34643520763314 0.718919636140968 0.5 0` gives `1.3 + 0.3i` back.
-* Cost: integer heights are immediate. A non-integer height needs a full
+* Cost: integer heights up to about 10 take milliseconds; beyond that the
+  time of a complex root grows with the square of the height (0.05 s at
+  20, 0.3 s at 50, 1 to 4 s at 100). A non-integer height needs a full
   tetration solve for every trial base: about ten seconds for real inputs,
   seconds to minutes for complex ones. A search whose bases run into the
   Shell–Thron boundary, where the two functions meet and every solve is
@@ -1175,7 +1220,7 @@ Every row is subject to branch, domain, convergence and resource limits:
 | strictly attracting regular cases (`\|λ\| < 1`) | tested complex heights | direct inverse-Poincare / Schröder, logarithm branches by continuity (§ 6.3) | independent 100-digit fringe, 1000-digit ordinary and 100,000-digit native-scale witnesses; real heights above `−1` checked against the integer tower; computed up to `\|λ\| = 0.99999`; not all-height coverage |
 | the base `η = e^{1/e}` itself | all complex heights; integers `≤ −2` are singular | Fatou coordinate of the parabolic fixed point `e` (§ 6.11) | equals an independent mpmath implementation in 40 digits at 13 heights; the limit of the bases on both sides, with one slope; `--slog` and `--sroot` |
 | real `b > η` | all complex heights that do not overflow; integers `≤ −2` are singular | Kneser theta mapping (§ 6.8); Kouznetsov only if that construction fails | `2^^0.5` matches the independent reference to 100 digits and `e^^0.5` to 100; several contours agree; tested from `1.44467` to `10^10000` |
-| inverses `--slog`, `--sroot` | see § 6.9 | closed form (regular bases), Newton continuation on the forward evaluators | every result is checked by forward evaluation |
+| inverses `--slog`, `--sroot` | see § 6.9 | closed form (regular bases), Newton continuation on the forward evaluators; the super-root of an integer height from 2 to 100 by a certified continuation | every result is checked by forward evaluation |
 | complex and negative bases whose primary fixed points both repel | all complex heights that do not overflow; cuts along the real axis left of `−2` | two-sided theta mapping (§ 6.10); Kouznetsov only if that construction fails | equals the Kneser solver on the real axis and five Cauchy-solver values; three or more contours agree to 30 digits at `−2`, `3+4i`, `−1+2i`, `−0.8+0.4i`; 182 of 182 scanned bases outside the region solved |
 | `Im(b) < 0` | reflected domain | Schwarz convention | same numerical limitations as the reflected case |
 | boundary band `0.95 ≤ \|λ\| ≤ 1.05` | case-dependent | attracting inverse germ below `\|λ\| = 1`; theta mappings above it | strict-attractor fringe covered; real bases down to `1.44467` (§ 6.8), complex bases from outside down to `\|λ\| − 1 = 10⁻¹²` in seconds where the argument of `λ` is not next to a low-order root of unity (§ 6.10), and up to `\|λ\| = 0.99999` from inside at a cost that grows towards `\|λ\| = 1`; below `\|λ\| = 1` a failed regular iteration is an error; the parabolic base `η` itself and neutral multipliers remain |
@@ -1400,7 +1445,15 @@ Numerically cross-checked, **not interval-certified**:
   bases `2`, `10`, `1.3`, `√2`, `0.5`, `1.3+0.1i`, `i` and `0.3−0.2i`;
   `sroot(16, 3) = sroot(65536, 4) = 2`; the super square root matches
   `exp(W(ln z))` to 40 digits; round trips `sroot(F_b(h), h) = b` at 20 digits
-  for `b` = `2`, `1.3`, `1.2`, `3`, `1.6` and one complex base.
+  for `b` = `2`, `1.3`, `1.2`, `3`, `1.6` and one complex base. The
+  principal super-root of the integer heights equals `exp(W₀(Log z))` at
+  the height 2 to 30 digits, also on the cut and for negative values down
+  to `−10⁻³⁰⁰`; an independent certified continuation in Python (mpmath,
+  with other enclosures and a path tilted by `2⁻³²` instead of the step
+  across the fold) at 7300 values of the heights 2 to 50; and a plain
+  Newton continuation in 6000 small steps, without any certificate, at
+  480 random values of the heights 2 to 12. Along circles that no cut
+  crosses, and along its own paths, it has no jump.
   Regressions: [`tests/phase17_inverse.rs`](tests/phase17_inverse.rs).
 * Strict attractors near multiplier **`-1`** now have independent
   **20/50/100-digit real/complex-height library** witnesses at
@@ -1686,23 +1739,21 @@ part does not guarantee a solvable or accurate near-cut case.
   too long and Taylor jumps take over (`0.0659881`: one minute).
 * **`b = 0` at non-integer heights** — no principal-branch value
   exists: honest ERR.
-* **Super-roots of small negative values at even heights:** the path of
-  § 6.9 reaches a positive or imaginary value however small
-  (`sroot(10⁻³⁰⁰, 2)`, `sroot(10⁻⁹ i, 2)`), but a negative one below about
-  `10⁻⁷` in modulus, or a value next to it, ends in an error
-  (`tet --sroot 13 -1e-9 2`: "inverse verification failed"; `−10⁻⁶` is
-  still found). Odd heights have their own start next to 0 (§ 6.9).
-* **The branch of a super-root at integer heights from 3 on:** the root
-  printed is the one that the path of § 6.9 reaches, and each is a solution
-  (checked), but they need not fit together. At the height 3 the tower
-  `b^(b^b)` has the critical values `0.7315 ± 0.2933i`; behind them, as seen
-  from the value 2 where the path starts, the roots belong to another
-  branch, the border between the two is not the straight ray everywhere
-  (at `Re z = −1.5` it lies at `Im z = ±0.91`, the ray at `±0.81`), and a
-  negative real value, which is led around 0 far above, gets a root of the
-  outer branch (`sroot(−1.5, 3) = 2.040 + 0.620i`, while
-  `sroot(−1.5 ± 0.03i, 3) = −0.189 ± 0.100i`). The height 2 has the one cut
-  of § 5.5.
+* **Super-roots at non-integer heights and at integer heights above 100**
+  are found by following a path of solutions (§ 6.9). Each is a solution
+  (checked), but the branch is the one that the path reaches: at integer
+  heights from 3 on, where this was the rule until 15 November, the roots
+  of neighbouring values did not always fit together. The integer heights
+  2 to 100 now have the principal super-root, one function with known cuts
+  (§ 6.9); its time grows with the square of the height, which is why it
+  ends at 100.
+* **The principal super-root has no base** where the logarithm of its root
+  leaves the strip `−π < Im ≤ π`: at the height 4 for `|z|` below about
+  `10⁻¹¹⁵`, in every direction (error). A value whose path runs into a
+  branch point, as far as twice the working precision and 196 bits more
+  can tell, is an error too: it lies on a cut. (The real cuts are not
+  meant: a negative value has the root of the side above, and a value on
+  the real cut of an even height the limit from above.)
 * **Negative integer heights `h ≤ −2`** for nondegenerate bases: no finite
   value consistent with the recurrence through `F(−1)=0`; honest error.
 * **Certified enclosures** — not implemented; every gate is a consistency
@@ -2605,7 +2656,16 @@ five minutes. Complex, negative and cut bases are the subject of § 6.10.
   bases (§ 5.3).
 * Real `z > 1`, `h > 0`: the unique real `b > 1`, by a bracket in `ln b`
   (a tower beyond MPFR's range counts as "too large"), Illinois regula falsi
-  at 24 digits and secant steps at full precision. `h = 1` returns `z`;
+  at 24 digits and secant steps at full precision. Where the upper end of
+  the bracket has a finite but huge forward value (`2.09^^5` for the value
+  5 at the height 5), the regula falsi does not leave the lower end, and
+  two of its iterates agree there without a root being near. The secant
+  steps from there reach a root that lies next to that end and no other,
+  so a result whose forward value is still off goes through the bracket
+  once more, with such an end bisected like an infinite one
+  (`sroot(5, 5) = 1.593408815096`; until 15 November that was "inverse
+  verification failed", as were 28 of 616 values between `1.01` and `10⁵⁰`
+  at the heights 2 to 100). `h = 1` returns `z`;
   integer `h ≥ 2` are ordinary towers (`sroot(16, 3) = 2`). The same bracket
   serves the two other real cases with a base above 1: as `b` grows, `F_b(h)`
   falls from 1 to 0 for `−1 < h < 0` and rises from `−∞` to 0 for
@@ -2613,7 +2673,99 @@ five minutes. Complex, negative and cut bases are the subject of § 6.10.
   `h`, have a real root (`sroot(0.5, −0.5) = 2.68778856702334`,
   `sroot(−1, −1.5) = 1.75033148344121`). Every solve above `e^{1/e}` starts
   from the solution of the previous base.
-* Other inputs: the real solution for `(|z|, Re h)` is followed first to
+* **Integer heights 2 to 100, every other value: the principal super-root**
+  (`src/integer_root.rs`). With `w = Log b` the tower of principal powers
+  is `b^^n = E_n(w)`, where `E_0 = 1` and `E_k(w) = exp(w E_{k−1}(w))`:
+  entire functions of `w`. The equation `b^^n = z` is
+  `h(w) := w E_{n−1}(w) = log z`, and `h(w) = w + …` at 0. The root printed
+  is `exp(W(Log z))`: `Log` is the principal logarithm, and `W` is the
+  inverse of `h` with `W(0) = 0`, continued along the straight segment from
+  0 to `Log z` (in the plane of the value: along `z^t`, `0 ≤ t ≤ 1`, from
+  the value 1 with its root 1). It is one function of `z`:
+  - At the height 2, `h(w) = w e^w`, and the root is `exp(W₀(Log z))`.
+  - A real `z > 1` has its real root: the bracket above computes the same
+    branch.
+  - Inside `|Log z| < 1` it tends to `z^{1/z}`, the base whose infinite
+    tower is `z`, as the height grows: `sroot(1.5 + 0.5i, 100) =
+    1.396662347757 + 0.1421389488292i`, which is `z^{1/z}` to 13 digits,
+    and `sroot(0.5, 100) = 0.25`.
+  - Its cuts are known curves. One is the negative real axis, the cut of
+    `Log z`. From every branch value `z_c` of its sheet one more goes along
+    `z_c^t`, `t > 1` (a straight ray in the plane of `Log z`) as far as the
+    negative real axis: at the height 3 the tower has one such pair,
+    `z_c = 0.7315 ± 0.2933i`, and the two arcs wind inward around 0 to
+    `−0.14`; at the height 5 the arcs from `0.9826 ± 0.6069i` wind outward
+    to `−2.27`. At an even
+    height the real interval from 0 to the least value of the tower on
+    `0 < b < 1` (`0.6922` at 2, `0.5932` at 4) is a cut as well, with the
+    limit from above (`Im z → 0⁺`) on it, as `W₀` has it. Conjugate values
+    have conjugate roots.
+
+  The continuation is certified, so that no step can change the sheet. At
+  a point `(x, w)` of the path, `h(w) = x`, a disk `|v − w| ≤ r` is found on
+  which `h′` stays within half of `h′(w)`: the recursion of the tower gives
+  an enclosure of `h″` over the disk in disk arithmetic, with the rounding
+  counted, and `|h′(v) − h′(w)| ≤ r max|h″|`. On such a disk `h` is
+  one-to-one, and every `x′` within `r (|h′(w)| − d)` of `h(w)`, `d` being
+  that bound, has exactly one root in it: the chord iteration
+  `v ← v − (h(v) − x′)/h′(w)` maps the disk into itself and contracts it.
+  That root is the continuation of `w`. The next point is taken within
+  7/8 of that range, its root is found from the inverse of `h` at `w` to
+  the second order and Newton steps that stay in the disk, and the next
+  disk is accepted only if its root lies in the last one. The points are
+  `t Log z` rounded to the bits of the path, so that each is within one
+  rounding of the segment itself, and every disk keeps a reserve for it:
+  a branch value that the segment passes more closely than the rounding
+  makes the certificate fail, and the path goes on from the last certified
+  point with twice the bits (98 at the start; at most twice the working
+  precision and 196 more, where the answer is an error: the value lies on
+  a cut, or closer to one than the precision can tell). So the two values
+  `exp(1.5 Log z_c)` turned by `±10⁻³⁰` in `Log z`, which lie `10⁻³⁰` on
+  either side of the cut of the height 3, get their two roots,
+  `0.2524 + 0.4260i` and `1.1819 + 0.8840i` (a path of rounded points that
+  were not tied to the segment gave the first for both).
+
+  The one branch point that a path does run into is a fold of the real
+  axis: a real `c` with `h′(c) = 0 < h″(c)`, where the real root of a real
+  `z < 1` ends (the least value of the tower, at even heights). It is
+  passed in one step. `c` is found by Newton's iteration on `h′`. On a
+  disk about it on which `h″` stays within a quarter of `h″(c)`,
+  `h(v) − h(c) = (v − c)² φ(v)` with `φ` within a quarter of `h″(c)/2`, so
+  by Rouché's theorem every value close enough to `h(c)` has exactly two
+  roots there: real ones on the two sides of `c` for a value above `h(c)`,
+  a conjugate pair for a value below. Along a path of such values the
+  argument of `v − c` is half of the argument of `x − h(c)` less that of
+  `φ(v)`: a path that comes in with the real root right of `c` and passes
+  above `h(c)` leaves with the root of positive imaginary part, which is
+  the limit from above. A target that the bits of the path cannot tell
+  from `h(c)` raises them.
+
+  `e^w` is a base of this tetration only for `−π < Im w ≤ π`: the powers of
+  the tower are the principal ones. In all cases tried but one the
+  continuation ends in that strip. At the height 4, for `|z|` below about
+  `10⁻¹¹⁵` in every direction, the root has wound around the origin of the
+  plane of bases (`Im w = 3.148` at `10⁻¹²⁰`, `3.241` at `10⁻³⁰⁰`), and the
+  answer is an error: the principal branch has no base there. Where one
+  part of the base is small against the other (a negative value at an odd
+  height has `Im w` next to `π`), the root is computed with as many more
+  bits as that part is smaller, up to 16 times the working precision, and
+  beyond that the part is zero: `sroot(−10⁻³⁰⁰, 3) =
+  −10⁻³⁰⁰ + 4.340270647449·10⁻⁵⁹⁷ i`.
+
+  The root at the end of the path is then computed by Newton's iteration
+  at the working precision, inside the last disk, and verified like every
+  inverse. When the verification asks for more digits, the path is kept if
+  the target of the new precision lies in the certified strip about it and
+  in its last disk, and followed anew otherwise. A step costs one or two
+  towers with two derivatives over a disk and one more at a point. A path
+  has 2 to 100 steps at the heights up to 5 (a fixed part of the way to a
+  branch point at a time, where one is near) and ever more as the height
+  grows, because the branch points of `E_n` crowd along it (700 at 100):
+  3 to 5 ms at the heights 2 to 5, 15 ms at 10, 0.05 s at 20, 0.3 s at 50,
+  1 s and at most 4 s at 100. Above 100 the path following of the next
+  item is used.
+* Non-integer heights, and integer heights above 100: the real solution
+  for `(|z|, Re h)` is followed first to
   `z`, then to `h`, by Newton steps in the base. At integer heights the tower
   is analytic in the base and this is a genuine continuation. A straight
   path that meets a singular value (for `h = 2` and real `z < e^{−1/e}`, the
@@ -2621,8 +2773,9 @@ five minutes. Complex, negative and cut bases are the subject of § 6.10.
   At an odd integer height `b^^h = b (1 + O(b ln² b))` next to the base 0,
   so a value below `2⁻²⁰` in modulus has its root beside it, and Newton
   steps start from the value itself: a path from the real solution cannot
-  end that close to 0, where its steps have a size of their own
-  (`sroot(10⁻⁷, 3) = 9.999740216488·10⁻⁸`, `sroot(−10⁻⁹, 3) =
+  end that close to 0, where its steps have a size of their own (the
+  principal branch has the same roots there: `sroot(10⁻⁷, 3) =
+  9.999740216488·10⁻⁸`, `sroot(−10⁻⁹, 3) =
   −1.000000419584·10⁻⁹ + 1.302082772987·10⁻¹⁶ i`, the side above the cut).
   A forward value costs a full solve for its base, so the path is followed
   with values of 14 digits (plus the digits the conditioning asks for) and
@@ -3033,6 +3186,7 @@ digits, and fails on any that is not permitted there by name.
 | the precision ladders of both theta solvers | levels of 12, 24, … digits | each level starts the next one; the gates are passed at the last |
 | `inverse::follow` (`LOOSE_BITS`), `inverse::sroot_continued` (`WALK_DIGITS`) | roots on the way of a continuation to 24 bits; forward values of a super-root path to 14 digits plus the conditioning | the end of the path is polished by Newton at the full working precision and then verified by forward evaluation |
 | `inverse::sroot_real` | bracketing at 24 digits plus the conditioning | the secant steps and the verification run at the full precision |
+| `integer_root::Path` (`TRACK_DIGITS`, `LARGEST_HEIGHT`) | the continuation that selects the principal super-root of an integer height starts at 10 digits and doubles its bits wherever a step cannot be certified; its disks and steps are bounds with small ratios (halves, 7/8, 3/16, `2⁻¹⁰`, `2⁻¹⁶`) and its search for a fold has 24 Newton steps; the heights up to 100 that it serves | every step is certified at the bits it runs at, with the rounding counted, so the bits and ratios set the cost and never the branch; the root at the end is computed by Newton at the working precision inside the last certified disk and verified by forward evaluation |
 | central differences (`slog_generic`, `Trials`) and secants (`Trials`) | derivatives to half the working digits or less | a Newton slope steers the iteration; its root does not depend on it |
 | comparisons | the constants `0.25`, `0.5`, `1.5` and small integer ratios | exact, compared at the working precision |
 | `expression.rs` | 16 bits beyond the precision of the run on which the two evaluations must agree; 20 digits between them; 64 guard bits of a named constant before its directed rounding; three total cancellations, and 64 times the digits, before an input is refused; the 64 bits below the unit place that a large value must keep; the 8 values remembered; the 10 digits of an imaginary part in the message that refuses it | margins and limits of the precision and one width of a message, never a value: they raise the precision or end in an error |
@@ -3214,6 +3368,8 @@ src/
   parabolic.rs       the base e^(1/e) itself: Fatou coordinate of its
                      parabolic fixed point (§ 6.11)
   inverse.rs         super-logarithm and super-root (§ 6.9)
+  integer_root.rs    the principal super-root at integer heights: a
+                     certified continuation in disk arithmetic (§ 6.9)
   kouznetsov.rs      Cauchy-integral solver: grids, FFT matvec, LM Newton,
                      EM correction, normalization, continuation,
                      cut-base ε-walker (§ 6.7)
@@ -3376,6 +3532,20 @@ six at a time and next to the default tier (same host and flags): phase
 last two changes of that night (the faster coefficients of § 6.11, the
 bracket of the super-root), which they do not reach; the default tier
 was repeated after each.
+
+The run of the morning of 15 November was made on the tree with the
+principal super-root of the integer heights and the second pass of the
+real bracket (§ 6.9). The default tier passed, one target at a time:
+library 87 (seven of them for the certified continuation), phase 17 18
+(in 140 s), every other target with the counts above, the grid runner 7,
+the edge runner 4 and the 19 Python tests; `cargo clippy` and
+`cargo fmt --check` are clean. New tests: `t1715` (the values of the
+principal branch at the heights 2, 3, 4 and 100, the two sides of the
+folds, the small parts, the errors where it has no base, round trips),
+`t1716` (no jump along five circles and three of its own paths, conjugate
+values, the two sides of a cut `10⁻³⁰` apart), `t1717` (eight real roots
+that the bracket had lost) and seven unit tests of `src/integer_root.rs`.
+The slow suites 13–15 were not repeated: they do not reach the super-root.
 
 ## 11. References
 

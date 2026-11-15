@@ -683,6 +683,7 @@ fn machine_numbers_stay_out_of_the_arithmetic() {
                         "src/inverse.rs",
                         "const LOOSE_BITS" | "const CHECK_DIGITS" | "const WALK_DIGITS"
                     )
+                    | ("src/integer_root.rs", "const TRACK_DIGITS")
                     | (
                         "examples/edge_runner.rs" | "examples/grid_runner.rs",
                         "as_secs_f64" | "f64" | "100.0"

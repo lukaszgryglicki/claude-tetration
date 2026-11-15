@@ -1,3 +1,112 @@
+# Status Update — 2026-11-15, morning (the principal super-root at integer heights)
+
+README § 5.3 listed two limits of the super-root at integer heights: a small
+negative value at an even height ended in an error
+(`tet --sroot 13 -1e-9 2`), and from the height 3 on the roots of
+neighbouring values did not always belong to one branch
+(`sroot(−1.5, 3) = 2.040 + 0.620i`, `sroot(−1.5 ± 0.03i, 3) =
+−0.189 ± 0.100i`). Both came from the way the root was found: a path of
+solutions from a real one, started at `|z|` or at 2, with a detour above
+the real axis whenever a step failed, and with an absolute tolerance on the
+way. Which solution such a path reaches depends on where it starts and on
+which of its steps happen to fail. That is not a function of `z`.
+
+**The definition.** With `w = Log b` the tower of principal powers is
+`b^^n = E_n(w)`, `E_0 = 1`, `E_k(w) = exp(w E_{k−1}(w))`: entire functions
+of `w`. `b^^n = z` is `h(w) := w E_{n−1}(w) = log z`, and `h(w) = w + …`
+at 0. The principal super-root is `exp(W(Log z))`, where `Log` is the
+principal logarithm and `W` is the inverse of `h` with `W(0) = 0`,
+continued along the straight segment from 0 to `Log z` (along `z^t` in the
+plane of the value). At the height 2 it is `exp(W₀(Log z))`, the function
+that `tet` had there; a real value above 1 has its real root; inside
+`|Log z| < 1` the root tends to `z^{1/z}` as the height grows
+(`sroot(1.5 + 0.5i, 100)` equals `z^{1/z}` to 13 digits, and
+`sroot(0.5, 100) = 0.25`). Its cuts are known curves: the negative real
+axis; from each branch value `z_c` of its sheet the arc `z_c^t`, `t > 1`,
+as far as the negative real axis (height 3: from `0.7315 ± 0.2933i` inward
+around 0 to `−0.14`; height 5: from `0.9826 ± 0.6069i` outward to `−2.27`);
+and at an even height the real interval below the least value of the tower
+on `0 < b < 1` (`0.6922` at 2, `0.5932` at 4), where the value is the limit
+from above, as for `W₀`. The integer heights 2 to 100 have this branch now
+(`src/integer_root.rs`); heights above 100 and non-integer heights keep
+the path following.
+
+**Certified.** A step of the continuation cannot change the sheet. At a
+point `(x, w)` a disk about `w` is found on which `h′` stays within half of
+`h′(w)`, from an enclosure of `h″` over the disk (disk arithmetic on the
+recursion of the tower, rounding counted). There `h` is one-to-one, and a
+value within a known distance of `h(w)` has exactly one root in the disk:
+the continuation. The next disk must hold a root that lies in the last
+one. The points of the path are `t Log z` rounded to the bits of the path
+and every disk keeps a reserve for that rounding, so a branch value that
+the segment passes very closely makes the certificate fail instead of
+being passed on the wrong side, and the path continues with twice the
+bits; at twice the working precision and 196 bits more the answer is an
+error (the value lies on a cut). The first version of this code let each
+step start from the rounded point before it: a value `10⁻³⁰` to one side
+of the cut of the height 3 got the root of the other side. A comparison of
+the two sides found it; both sides are right now down to `10⁻¹⁰⁰`.
+
+**The fold.** The one branch point that a path runs into is the fold of
+the real axis, where the real root of a real value below 1 ends at an even
+height. It is passed in one certified step: on a disk about the fold `c`
+on which `h″` stays within a quarter of `h″(c)`, every value near `h(c)`
+has exactly two roots (Rouché), a conjugate pair for a value below `h(c)`,
+and the path that passes above `h(c)` leaves with the one of positive
+imaginary part. A path tilted by `2⁻³²`, which the prototype used, needs
+five to ten times the steps.
+
+**Where there is no base.** `e^w` is a base only if `−π < Im w ≤ π`. At
+the height 4, for `|z|` below about `10⁻¹¹⁵`, the root of the principal
+branch has left that strip: an error says so. Next to `Im w = π` (a
+negative value at an odd height) the small part of the base gets its
+digits: `tet --sroot 13 -1e-36 3` printed the imaginary part
+`5.208324776316e-70`, it is `5.208324776939e-70`; `-1e-300` printed 0, it
+is `4.340270647449e-597`.
+
+**A fault of the real roots, found on the way.** `tet --sroot 13 5 5` was
+"inverse verification failed", and so were 28 of 616 real values between
+`1.01` and `10⁵⁰` at the heights 2 to 100 (`1000` at 5, `10⁵⁰` at 4, `4` at
+100, …). The bracket of a real root is halved in `ln b` from above; where
+its upper end has a finite but huge forward value (`2.09^^5`), the regula
+falsi moves less than `10⁻¹⁰` of the bracket, its next iterate agrees with
+that to a few digits, and the secant stage started at the lower end as if the root
+were there. It reaches a root that lies next to that end and no other. Now
+a result whose forward value is still off goes through the bracket again,
+with such an end bisected like an infinite one. Nothing else changes: the
+588 values that were found have the same digits, and non-integer heights
+the same time (`1000` at 3.5: 6 s).
+
+**Time** (13 digits, mean of 100 random values of modulus 0.05 to 20, path
+following → principal branch): height 2: 5 → 3 ms; 3: 7 → 3; 4: 7 → 4;
+5: 9 → 5; 8: 13 → 10; 10: 15 → 15; 20: 32 → 49; 50: 100 → 317; 100:
+331 → 1087 ms (largest: 4.2 s → 1.9 s). The real value `0.5`: 12 → 4 ms at
+the height 2, 23 → 7 ms at 4, 77 → 34 ms at 100. At 1000 and 5000 digits
+the new code is 2 to 5 times faster (the path runs at 98 bits whatever the
+precision; only its end is refined). The path following failed for one or
+two of a hundred random values at the heights 5, 10 and 20; the principal
+branch for none of 1530 random values of modulus `10⁻⁶` to `10⁶` at the
+heights 2 to 100. The cost grows with the square of the height, because
+the branch points of `E_n` crowd along the path (700 steps at 100): that
+is why the branch ends at the height 100.
+
+**Checks.** Unit tests of `src/integer_root.rs` (7): the enclosures hold
+the values on their disks; `h″` against a central difference; the
+recursion against the tower; the height 2 against `exp(W₀(Log z))` to 30
+digits, also on the cut and at `−10⁻³⁰⁰`; a real value above 1 has its real
+root; a path without the rule of the fold runs into the branch value and
+ends in the error; a path is kept for the next pass only inside its
+certified strip. `tests/phase17_inverse.rs`: `t1715` (the values above,
+both sides of the folds, the limit `z^{1/z}`, the errors, round trips),
+`t1716` (no jump along five circles and three paths; conjugate symmetry;
+the two sides of the cut at `10⁻³⁰`), `t1717` (the real roots that were
+lost). Against the binary: an independent certified continuation in
+Python (mpmath, other enclosures, the tilted path) at 6912 grid values of
+the heights 3 to 5 and at 391 more of the heights 2 to 50; a plain Newton
+continuation in 6000 small steps, without any certificate, at 480 random
+values. `tests/phase10_honesty.rs` permits the one new constant
+(`TRACK_DIGITS`, README § 7.1).
+
 # Status Update — 2026-11-15 (three faults of the inverses, found while drawing the gallery)
 
 The gallery of README § 5.5 has pictures of all three functions now, and

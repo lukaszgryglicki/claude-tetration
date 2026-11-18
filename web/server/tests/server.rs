@@ -837,6 +837,11 @@ fn the_cache_is_listed_for_this_machine_when_no_proxy_passed_the_request_on() {
             && status.contains("), hits 1, misses 4, waits 0, dropped 0\n"),
         "{status}"
     );
+    // The script of the calculation that still runs may only be starting.
+    let started = Instant::now();
+    while server.calls().len() < 4 && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert_eq!(server.calls().len(), 4);
 }
 

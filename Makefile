@@ -11,6 +11,11 @@ TEST_ARGS ?= --test-threads=1
 ARGS ?=
 
 CARGO_OPTIONS = --locked --jobs $(JOBS) --target-dir "$(CARGO_TARGET_DIR)"
+# GMP's build needs m4. The Command Line Tools 15.3 of macOS have it only as gm4, and their
+# /usr/bin/m4 fails and asks to install the tools; xcrun tells which one there is without that.
+M4_ENV = if [ -z "$${M4:-}" ] && [ "$$(uname -s)" = Darwin ] && \
+	! xcrun --find m4 >/dev/null 2>&1 && xcrun --find gm4 >/dev/null 2>&1; \
+	then M4=gm4; export M4; fi;
 
 all: release
 build: release
@@ -21,19 +26,28 @@ build: release
 	doc clean chartgen plot gallery help
 
 release:
-	@$(CARGO) build $(CARGO_OPTIONS) --release
+	@$(M4_ENV) $(CARGO) build $(CARGO_OPTIONS) --release
 
 debug:
-	@$(CARGO) build $(CARGO_OPTIONS)
+	@$(M4_ENV) $(CARGO) build $(CARGO_OPTIONS)
 
+# macOS has no static executables: there the release is built for the native target and
+# must need nothing but the libraries of the system.
 static:
-	@target="$(STATIC_TARGET)"; \
+	@$(M4_ENV) target="$(STATIC_TARGET)"; \
 		flags="$(RUSTFLAGS) -C target-feature=+crt-static"; \
 		case "$$target" in \
 			*-freebsd) flags="$$flags -C link-arg=-Wno-unused-command-line-argument" ;; \
+			*-apple-darwin) flags="$(RUSTFLAGS)" ;; \
 		esac; \
 		RUSTFLAGS="$$flags" $(CARGO) build $(CARGO_OPTIONS) --release --target "$$target"
-	@kind="$$(LC_ALL=C file -b "$(CARGO_TARGET_DIR)/$(STATIC_TARGET)/release/tet")"; \
+	@target="$(STATIC_TARGET)"; binary="$(CARGO_TARGET_DIR)/$$target/release/tet"; \
+		case "$$target" in \
+			*-apple-darwin) \
+				otool -L "$$binary" | awk 'NR > 1 && $$1 !~ /^\/(usr\/lib|System\/Library)\// { bad = 1 } END { exit bad || NR < 2 }' && exit 0; \
+				kind="it needs more than the libraries of macOS: $$(otool -L "$$binary" 2>&1 | tr -s '\n\t' '  ')" ;; \
+			*) kind="$$(LC_ALL=C file -b "$$binary")" ;; \
+		esac; \
 		case "$$kind" in \
 			*"statically linked"*|*"static-pie linked"*) ;; \
 			*) printf '%s\n' "error: not a static executable: $$kind" >&2; exit 1 ;; \
@@ -54,42 +68,42 @@ run: release
 	@"$(CARGO_TARGET_DIR)/release/tet" $(ARGS)
 
 examples:
-	@$(CARGO) build $(CARGO_OPTIONS) --release --examples
+	@$(M4_ENV) $(CARGO) build $(CARGO_OPTIONS) --release --examples
 
 grid:
-	@$(CARGO) run $(CARGO_OPTIONS) --release --example grid_runner -- $(ARGS)
+	@$(M4_ENV) $(CARGO) run $(CARGO_OPTIONS) --release --example grid_runner -- $(ARGS)
 
 edge:
-	@$(CARGO) run $(CARGO_OPTIONS) --release --example edge_runner -- $(ARGS)
+	@$(M4_ENV) $(CARGO) run $(CARGO_OPTIONS) --release --example edge_runner -- $(ARGS)
 
 test-w0:
-	@$(CARGO) run $(CARGO_OPTIONS) --release --example test_w0
+	@$(M4_ENV) $(CARGO) run $(CARGO_OPTIONS) --release --example test_w0
 
 test: test-rust test-python test-doc
 
 test-rust:
-	@$(CARGO) test $(CARGO_OPTIONS) --release --all-targets -- $(TEST_ARGS)
+	@$(M4_ENV) $(CARGO) test $(CARGO_OPTIONS) --release --all-targets -- $(TEST_ARGS)
 
 test-python:
 	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
 
 test-doc:
-	@$(CARGO) test $(CARGO_OPTIONS) --release --doc -- $(TEST_ARGS)
+	@$(M4_ENV) $(CARGO) test $(CARGO_OPTIONS) --release --doc -- $(TEST_ARGS)
 
 test-lib:
-	@$(CARGO) test $(CARGO_OPTIONS) --release --lib -- $(TEST_ARGS)
+	@$(M4_ENV) $(CARGO) test $(CARGO_OPTIONS) --release --lib -- $(TEST_ARGS)
 
 test-st:
-	@env -u TET_MT -u RAYON_NUM_THREADS \
+	@$(M4_ENV) env -u TET_MT -u RAYON_NUM_THREADS \
 		$(CARGO) test $(CARGO_OPTIONS) --release --all-targets -- $(TEST_ARGS)
 
 test-ignored:
-	@$(CARGO) test $(CARGO_OPTIONS) --release --all-targets -- --ignored $(TEST_ARGS)
+	@$(M4_ENV) $(CARGO) test $(CARGO_OPTIONS) --release --all-targets -- --ignored $(TEST_ARGS)
 
 test-all: test-rust-all test-python test-doc
 
 test-rust-all:
-	@$(CARGO) test $(CARGO_OPTIONS) --release --all-targets -- --include-ignored $(TEST_ARGS)
+	@$(M4_ENV) $(CARGO) test $(CARGO_OPTIONS) --release --all-targets -- --include-ignored $(TEST_ARGS)
 
 fmt:
 	@$(CARGO) fmt --all
@@ -98,17 +112,17 @@ fmt-check:
 	@$(CARGO) fmt --all -- --check
 
 vet:
-	@$(CARGO) clippy $(CARGO_OPTIONS) --release --all-targets -- -D warnings
+	@$(M4_ENV) $(CARGO) clippy $(CARGO_OPTIONS) --release --all-targets -- -D warnings
 
 lint: vet
 
 check:
-	@$(CARGO) check $(CARGO_OPTIONS) --all-targets
+	@$(M4_ENV) $(CARGO) check $(CARGO_OPTIONS) --all-targets
 
 verify: fmt-check vet test
 
 doc:
-	@$(CARGO) doc $(CARGO_OPTIONS) --release --no-deps
+	@$(M4_ENV) $(CARGO) doc $(CARGO_OPTIONS) --release --no-deps
 
 clean:
 	@$(CARGO) clean --target-dir "$(CARGO_TARGET_DIR)"

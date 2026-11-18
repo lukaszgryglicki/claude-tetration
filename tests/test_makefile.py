@@ -9,8 +9,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class MakefileTests(unittest.TestCase):
-    def make(self, target=None, *variables, tool="make", dry=True, expected_error=None):
+    def make(self, target=None, *variables, tool="make", dry=True, expected_error=None,
+             path=None):
         environment = dict(os.environ, MAKEFLAGS="", MFLAGS="", MAKELEVEL="0")
+        if path is not None:
+            environment["PATH"] = f"{path}{os.pathsep}{environment['PATH']}"
         for name in [
             "CARGO", "RUSTC", "PYTHON", "JOBS", "CARGO_TARGET_DIR", "STATIC_TARGET",
             "BINDIR", "DESTDIR", "TEST_ARGS", "ARGS", "RUSTFLAGS",
@@ -73,7 +76,7 @@ class MakefileTests(unittest.TestCase):
             )
             cargo.chmod(0o755)
             for target in ["x86_64-unknown-freebsd", "aarch64-unknown-freebsd",
-                           "x86_64-unknown-linux-gnu"]:
+                           "x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]:
                 with self.subTest(target=target):
                     output = self.make(
                         "static", f"CARGO={cargo}", f"STATIC_TARGET={target}",
@@ -81,6 +84,10 @@ class MakefileTests(unittest.TestCase):
                         expected_error="stop after flags",
                     )
                     flags = output.splitlines()[0]
+                    if target.endswith("-apple-darwin"):
+                        # macOS has no static C runtime to link.
+                        self.assertEqual(flags, "-C opt-level=2")
+                        continue
                     self.assertIn("-C opt-level=2 -C target-feature=+crt-static", flags)
                     self.assertEqual(
                         "-C link-arg=-Wno-unused-command-line-argument" in flags,
@@ -101,6 +108,37 @@ class MakefileTests(unittest.TestCase):
                 f"CARGO_TARGET_DIR={target_dir}", dry=False,
                 expected_error="not a static executable",
             )
+
+    def test_static_on_macos_needs_only_the_libraries_of_the_system(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tools = Path(directory) / "tools"
+            tools.mkdir()
+            listing = Path(directory) / "libraries"
+            otool = tools / "otool"
+            otool.write_text(f'#!/bin/sh\n[ "$1" = -L ] && [ -f "$2" ] && cat "{listing}"\n')
+            otool.chmod(0o755)
+            target_dir = Path(directory) / "build output"
+            executable = target_dir / "x86_64-apple-darwin" / "release" / "tet"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("This stands for a Mach-O executable.\n")
+            arguments = [
+                "static", "CARGO=true", "STATIC_TARGET=x86_64-apple-darwin",
+                f"CARGO_TARGET_DIR={target_dir}",
+            ]
+            system = (
+                f"{executable}:\n"
+                "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+                "\t/System/Library/Frameworks/Foundation.framework/Foundation (current)\n"
+            )
+            listing.write_text(system)
+            self.make(*arguments, dry=False, path=tools)
+            listing.write_text(system + "\t/opt/homebrew/opt/gmp/lib/libgmp.10.dylib (current)\n")
+            self.make(
+                *arguments, dry=False, path=tools,
+                expected_error="not a static executable: it needs more than the libraries of macOS",
+            )
+            executable.unlink()
+            self.make(*arguments, dry=False, path=tools, expected_error="not a static executable")
 
     def test_validation_targets_cover_existing_checks(self):
         for target, expected in [

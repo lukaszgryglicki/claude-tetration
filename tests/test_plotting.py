@@ -76,8 +76,10 @@ class ChartgenTests(unittest.TestCase):
         environment.pop("CARGO_TARGET_DIR", None)
         if target_dir is not None:
             environment["CARGO_TARGET_DIR"] = str(target_dir)
+        # macOS has no timeout command; the limit of the run itself holds there.
+        guard = ["timeout", "15"] if shutil.which("timeout") else []
         return subprocess.run(
-            ["timeout", "15", "bash", str(script), "1", "0", str(output), multiplier],
+            [*guard, "bash", str(script), "1", "0", str(output), multiplier],
             capture_output=True, text=True, timeout=20,
             env=environment,
         )

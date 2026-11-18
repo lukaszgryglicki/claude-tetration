@@ -375,7 +375,9 @@ The project is plain Cargo, but `rug` compiles the GNU bignum stack
 * **C toolchain + m4** (for the `gmp-mpfr-sys` build):
   * Debian/Ubuntu: `sudo apt install build-essential m4 diffutils`
   * Fedora: `sudo dnf install gcc make m4 diffutils`
-  * macOS: `xcode-select --install` (m4 ships with the CLT)
+  * macOS: `xcode-select --install` (m4 ships with the CLT). The CLT 15.3 have it only as
+    `gm4`, and GMP's build stops with "No usable m4": the Makefile takes `gm4` then, and a
+    plain Cargo build needs `M4=gm4 cargo build --release`
   * Windows: use **WSL** (the MSVC target is not supported by
     `gmp-mpfr-sys`; MinGW works but WSL is the documented path)
 
@@ -446,6 +448,8 @@ gallery outputs and is never run by the default build or demo.
 the C runtime (for example `target/x86_64-unknown-linux-gnu/release/tet`).
 It requires a toolchain supporting static CRT linking, its static system
 libraries and `file`; it fails if the output is not actually static.
+macOS has no static executables: there the same target builds the release
+and fails unless `otool` shows that it needs only the libraries of macOS.
 The native target comes from `rustc -vV` (`RUSTC` is configurable).
 FreeBSD static builds suppress Clang's unused-driver-argument warning for
 Rust's redundant `-no-pie` alongside `-static`; other linker warnings and

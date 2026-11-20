@@ -53,9 +53,15 @@ static:
 			*) printf '%s\n' "error: not a static executable: $$kind" >&2; exit 1 ;; \
 		esac
 
-install: release
-	@install -d "$(DESTDIR)$(BINDIR)"
-	@install -m 0755 "$(CARGO_TARGET_DIR)/release/tet" "$(DESTDIR)$(BINDIR)/tet"
+# `make static install` installs the static executable: the goals of this run tell
+# (MAKECMDGOALS of GNU make, .TARGETS of BSD make).
+install:
+	@case " $(MAKECMDGOALS) $(.TARGETS) " in \
+		*" static "*) $(MAKE) static && binary="$(CARGO_TARGET_DIR)/$(STATIC_TARGET)/release/tet" ;; \
+		*) $(MAKE) release && binary="$(CARGO_TARGET_DIR)/release/tet" ;; \
+	esac && \
+	install -d "$(DESTDIR)$(BINDIR)" && \
+	install -m 0755 "$$binary" "$(DESTDIR)$(BINDIR)/tet"
 
 install-static: static
 	@install -d "$(DESTDIR)$(BINDIR)"
@@ -141,7 +147,8 @@ help:
 		'make / all / build / release  Build the optimized tet executable' \
 		'debug                        Build the debug executable' \
 		'static                       Build a fully static native executable' \
-		'install / install-static     Install tet into BINDIR (default /data/scripts)' \
+		'install / install-static     Install tet into BINDIR (default /data/scripts);' \
+		'                             make static install installs the static one too' \
 		'demo                         Run one 50-digit complex-base example' \
 		'run ARGS="..."               Run tet with supplied CLI arguments' \
 		'examples                     Build all three example programs' \

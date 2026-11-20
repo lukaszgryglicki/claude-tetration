@@ -457,7 +457,8 @@ errors, caller `RUSTFLAGS`, and the actual static-executable check remain.
 Cross-compilation, including GNU-to-musl, is not configured: the current
 GMP dependency rejects it without additional feature changes.
 `install-static` installs the static executable instead of the normal release
-binary. Both install targets support `BINDIR` and `DESTDIR`; they install into
+binary, and so does `make static install` (`install` in one run with `static`).
+Both install targets support `BINDIR` and `DESTDIR`; they install into
 the filesystem of the machine running Make.
 
 ### 2.3 First-run sanity checks

@@ -1,6 +1,8 @@
 #!/bin/sh
 # Installs or updates the web page and HTTP API of tet on this FreeBSD
-# machine. Run as root from a tree in which tet and tet-web are built:
+# machine. Run as root from a tree that has the programs in bin/ (tet,
+# tet-web and, for the second half of the page, symbolic-math: web/deploy.sh
+# copies them there), or in which tet and tet-web are built:
 #
 #   sudo env SITE=hyp4.duckdns.org sh web/freebsd/install.sh   https://hyp4.duckdns.org only
 #   sudo env SITE=ip sh web/freebsd/install.sh                 plain HTTP on every address
@@ -15,7 +17,7 @@
 # What it changes, each step only when needed:
 #   packages caddy and portacl-rc; the user tetweb;
 #   /usr/local/bin/tet, /usr/local/bin/tet-web, /usr/local/bin/tet-webctl,
-#   /usr/local/bin/symbolic-math when the tree has symbolic-math.upload, the
+#   /usr/local/bin/symbolic-math when the tree has bin/symbolic-math, the
 #   static binary that web/deploy.sh copies there;
 #   /usr/local/etc/rc.d/tet_web, /usr/local/etc/newsyslog.conf.d/tet-web.conf,
 #   /usr/local/etc/caddy/Caddyfile;
@@ -41,9 +43,15 @@ fail() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 [ "$(uname -s)" = FreeBSD ] || fail "this script is for FreeBSD"
 [ "$(id -u)" = 0 ] || fail "run it as root (sudo)"
+# The programs that were copied here; else the ones that were built here:
+# the static tet of `make static`, or the release one.
 tet="$root/target/release/tet"
+for found in "$root"/target/*-freebsd/release/tet "$root/bin/tet"; do
+    if [ -x "$found" ]; then tet=$found; fi
+done
 web="$root/web/server/target/release/tet-web"
-[ -x "$tet" ] || fail "$tet is missing: cargo build --release --locked --bin tet"
+if [ -x "$root/bin/tet-web" ]; then web="$root/bin/tet-web"; fi
+[ -x "$tet" ] || fail "$tet is missing: make static (or cargo build --release --locked --bin tet)"
 [ -x "$web" ] || fail "$web is missing: cargo build --release in web/server"
 
 # An update without SITE must not take https away: the site that this
@@ -80,10 +88,10 @@ say "installing tet, tet-web and the service files"
 install -m 0755 -o root -g wheel "$tet" /usr/local/bin/tet
 install -m 0755 -o root -g wheel "$web" /usr/local/bin/tet-web
 install -m 0755 -o root -g wheel "$root/web/ctl.sh" /usr/local/bin/tet-webctl
-if [ -x "$root/symbolic-math.upload" ]; then
+if [ -x "$root/bin/symbolic-math" ]; then
     say "installing symbolic-math"
-    "$root/symbolic-math.upload" --version >/dev/null || fail "$root/symbolic-math.upload does not run here"
-    install -m 0755 -o root -g wheel "$root/symbolic-math.upload" /usr/local/bin/symbolic-math
+    "$root/bin/symbolic-math" --version >/dev/null || fail "$root/bin/symbolic-math does not run here"
+    install -m 0755 -o root -g wheel "$root/bin/symbolic-math" /usr/local/bin/symbolic-math
 fi
 install -m 0555 -o root -g wheel "$here/tet_web" /usr/local/etc/rc.d/tet_web
 install -d -m 0755 /usr/local/etc/newsyslog.conf.d

@@ -1,7 +1,7 @@
 #!/bin/sh
-# Builds tet and tet-web on a FreeBSD machine and installs the web page and
-# API there (web/freebsd/install.sh). Run it from a checkout of the
-# repository; the working tree is copied as it is, committed or not.
+# Builds tet and tet-web and installs the web page and API on a FreeBSD
+# machine (web/freebsd/install.sh). Run it from a checkout of the
+# repository.
 #
 #   SITE=hyp4.duckdns.org web/deploy.sh   to lgryglicki@ovh, at https://hyp4.duckdns.org only
 #   web/deploy.sh                         an update: the site that is installed stays
@@ -14,14 +14,22 @@
 #                      it the first line of web/acme-email.secret, if that
 #                      file is there (it is not in the repository, and is
 #                      not copied); without both the installed one stays
-# TET_WEB_REMOTE_DIR   where the tree is copied to, in the home there (tet-web/src)
+# TET_WEB_REMOTE_DIR   where the programs are copied to, in the home there
+#                      (tet-web/src)
+# BUILD                here (the default): tet, as a static program (make
+#                      static), and tet-web are built on this machine, which
+#                      has to be of the system and the processor of the other
+#                      one, and nothing but the programs and the service
+#                      files is copied there. there: the working tree is
+#                      copied, committed or not, and both are built on that
+#                      machine, which then needs cargo, make and a C toolchain
 # SYMBOLIC_MATH        a static symbolic-math binary for that machine, the
 #                      second program of the page; without it the one that
 #                      `make static` built in ../symbolic-math, if it is
 #                      there; without both the installed one stays
 #
 # It needs ssh access to a user who may run sudo without a password there,
-# and cargo, rsync and a C toolchain on that machine.
+# and rsync on both machines.
 
 set -eu
 
@@ -29,10 +37,12 @@ cd "$(dirname "$0")/.."
 host=${1:-lgryglicki@ovh}
 site=${SITE:-}
 remote=${TET_WEB_REMOTE_DIR:-tet-web/src}
+build=${BUILD:-here}
 email=${ACME_EMAIL:-}
 if [ -z "$email" ] && [ -r web/acme-email.secret ]; then
     email=$(head -n 1 web/acme-email.secret | tr -d '[:space:]')
 fi
+fail() { echo "deploy.sh: $*" >&2; exit 1; }
 
 # The commit, with a + when the tree has changes that are not committed.
 revision=$(git rev-parse --short HEAD)
@@ -40,32 +50,53 @@ if [ -n "$(git status --porcelain)" ]; then
     revision="$revision+"
 fi
 
-echo "== copying the tree ($revision) to $host:$remote"
-ssh "$host" "mkdir -p '$remote'"
-{
-    git ls-files -z
-    git ls-files -z --others --exclude-standard
-} | rsync -a --from0 --files-from=- ./ "$host:$remote/"
-
-# The second program of the page is built here, not there: its static binary
-# is copied next to the tree, where install.sh finds it.
+# The second program of the page comes from its own checkout: a static
+# binary that `make static` built there.
 sm=${SYMBOLIC_MATH:-}
 if [ -z "$sm" ]; then
     for found in ../symbolic-math/target/*-freebsd/release/symbolic-math; do
         if [ -x "$found" ]; then sm=$found; fi
     done
 fi
-if [ -n "$sm" ]; then
-    [ -x "$sm" ] || { echo "deploy.sh: $sm is no program" >&2; exit 1; }
-    echo "== copying $sm to $host:$remote/symbolic-math.upload"
-    rsync -a "$sm" "$host:$remote/symbolic-math.upload"
-else
-    ssh "$host" "rm -f '$remote/symbolic-math.upload'"
-fi
+[ -z "$sm" ] || [ -x "$sm" ] || fail "$sm is no program"
 
-echo "== building tet and tet-web there"
-ssh "$host" "cd '$remote' && nice -n 10 cargo build --release --locked --bin tet &&
-    cd web/server && nice -n 10 cargo build --release"
+case "$build" in
+    here)
+        mine=$(uname -sm)
+        theirs=$(ssh "$host" uname -sm)
+        [ "$mine" = "$theirs" ] ||
+            fail "this machine ($mine) builds nothing for that one ($theirs): BUILD=there web/deploy.sh builds there"
+        echo "== building tet (static) and tet-web here ($revision)"
+        make static
+        (cd web/server && cargo build --release)
+        tet="target/$(rustc -vV | sed -n 's/^host: //p')/release/tet"
+        [ -x "$tet" ] || fail "$tet is missing after make static"
+        echo "== copying the programs and the service files to $host:$remote"
+        ssh "$host" "mkdir -p '$remote/bin' '$remote/web/freebsd'"
+        rsync -a "$tet" "$host:$remote/bin/tet"
+        rsync -a web/server/target/release/tet-web "$host:$remote/bin/tet-web"
+        rsync -a web/ctl.sh "$host:$remote/web/ctl.sh"
+        rsync -a --delete web/freebsd/ "$host:$remote/web/freebsd/"
+        ;;
+    there)
+        echo "== copying the tree ($revision) to $host:$remote"
+        ssh "$host" "mkdir -p '$remote/bin' && rm -f '$remote/bin/tet' '$remote/bin/tet-web'"
+        {
+            git ls-files -z
+            git ls-files -z --others --exclude-standard
+        } | rsync -a --from0 --files-from=- ./ "$host:$remote/"
+        echo "== building tet (static) and tet-web there"
+        ssh "$host" "cd '$remote' && nice -n 10 make static &&
+            cd web/server && nice -n 10 cargo build --release"
+        ;;
+    *) fail "BUILD is here or there, not '$build'" ;;
+esac
+if [ -n "$sm" ]; then
+    echo "== copying $sm to $host:$remote/bin/symbolic-math"
+    rsync -a "$sm" "$host:$remote/bin/symbolic-math"
+else
+    ssh "$host" "rm -f '$remote/bin/symbolic-math'"
+fi
 
 echo "== installing"
 log=$(mktemp)

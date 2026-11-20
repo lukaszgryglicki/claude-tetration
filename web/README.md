@@ -310,8 +310,8 @@ set). A server that does not find it serves `tet` alone and says so in the
 part of the page; a `TET_WEB_SM` that is set and cannot be run ends the
 server at its start. `web/deploy.sh` copies a static binary to the machine
 (`SYMBOLIC_MATH=path`, or the one that `make static` built in a checkout of
-symbolic-math next to this repository), and `web/freebsd/install.sh` puts
-it at `/usr/local/bin/symbolic-math`.
+symbolic-math next to this repository), next to `tet` and `tet-web`, and
+`web/freebsd/install.sh` puts it at `/usr/local/bin/symbolic-math`.
 
 ## Calculations that take longer
 
@@ -477,8 +477,11 @@ $ cargo fmt --check
 
 `web/freebsd/install.sh` installs or updates everything on the machine it
 runs on, as root, from a tree in which `tet` and `tet-web` are built;
-`web/deploy.sh [user@host]` copies the working tree to a machine, builds
-both there, runs it and checks the site from outside. Both can be repeated:
+`web/deploy.sh [user@host]` builds both on the machine that it runs on
+(`tet` as a static program, with `make static`), copies the programs and the
+service files to the other machine, runs `install.sh` there and checks the
+site from outside; with `BUILD=there` it copies the working tree instead and
+builds on that machine. Both can be repeated:
 a later run installs the new binaries, restarts the server (its cache
 starts empty, and the calculations that run are ended) and leaves what is
 already in place as it is.

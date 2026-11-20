@@ -172,7 +172,7 @@ pub struct Asked {
 const FIRST: &str = "x^2 - 5x + 6 = 0\nintegrate(x^2*e^(-x), x, 0, inf)\nN(pi, 50)";
 
 /// What the page offers to run at a click: a name and the inputs.
-const EXAMPLES: [(&str, &str); 22] = [
+const EXAMPLES: [(&str, &str); 29] = [
     ("simplify", "10*x - (2+3)*x\nsin(x)^2 + cos(x)^2\n(x^2 - 1)/(x - 1)"),
     ("solve", "x^2 - 5x + 6 = 0\nsin(x) = 0\nx^5 + x = i"),
     ("a system", "x + y = 3, x - y = 1\nsolve([x^2 + y^2 = 25, x - y = 1], [x, y])"),
@@ -198,6 +198,34 @@ const EXAMPLES: [(&str, &str); 22] = [
     ("primes (PNG)", "save_png(\"ulam.png\", ulamspiral(40000), width = 800)"),
     ("a surface (PNG)", "save_png(\"surface.png\", plot3d(sin(x)*cos(y), x, -3, 3, y, -3, 3), width = 900)"),
     ("a Bode chart (PNG)", "save_png(\"bode.png\", bodeplot(tf([1], [1, 0.4, 1])), width = 900, height = 700)"),
+    (
+        "a function as a 4D shape (moving PNG)",
+        "save_png_fast(\"sin4d.png\", plot4d(sin(z)))",
+    ),
+    (
+        "the same turned, as JPEG XL",
+        "save_jxl_fast(\"sin4d.jxl\", plot4d(sin(z)), rotate(30, 20, 10))\nsave_png_fast(\"sin4d_turned.png\", plot4d(sin(z)), rotate(30, 20, 10))",
+    ),
+    (
+        "every frame stretched (normalize)",
+        "save_png_fast(\"gamma4d.png\", plot4d(gamma(z), z, 3), normalize, palette = heat)",
+    ),
+    (
+        "a filled 4D body",
+        "save_png_fast(\"body4d.png\", plot4d(z^2), fill = below, palette = magma)",
+    ),
+    (
+        "the 4D shape seen from outside (PNG)",
+        "save_png(\"view.png\", view4d(sin(z)), width = 900)",
+    ),
+    (
+        "mountains of the gamma function (PNG)",
+        "save_png(\"gamma_view.png\", view4d(gamma(z), z, -4 - 3i, 4 + 3i), fill = below, palette = heat, perspective = 3, width = 600, voxels = 160)",
+    ),
+    (
+        "the eye goes around a body (moving PNG)",
+        "save_png_fast(\"around.png\", view4d((z^3 - 1)/(z^3 + 1), z, 2), fill = below, palette = magma, frames = 24)",
+    ),
 ];
 
 impl Asked {

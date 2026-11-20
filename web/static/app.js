@@ -19,9 +19,12 @@ const examples = {
 // switching keeps it.
 const typed = {};
 
-// The number of the calculation that the page shows. One that takes longer
-// is asked for again until its result is there, or until another is started.
-let latest = 0;
+// The two parts of the page, tet and symbolic-math: where the result of
+// each stands, its button and its status, and the number of the calculation
+// that it shows. One that takes longer is asked for again until its result
+// is there, or until another is started.
+const tet = { result: 'result', button: 'calculate', status: 'status', title: 'result-title', error: 'error', latest: 0 };
+const sm = { result: 'sm-result', button: 'sm-calculate', status: 'sm-status', title: 'sm-title', error: 'sm-error', latest: 0 };
 
 const byId = (id) => document.getElementById(id);
 const checked = (name) => document.querySelector(`input[name="${name}"]:checked`).value;
@@ -83,27 +86,38 @@ function address() {
   return `/?${parts.join('&')}`;
 }
 
+// The address of the page for what the form of symbolic-math says.
+function smAddress() {
+  const parts = [
+    'format=html',
+    `expr=${encodeURIComponent(byId('expr').value)}`,
+    `digits=${encodeURIComponent(byId('digits').value.trim())}`,
+    `mode=${checked('mode')}`,
+    `domain=${checked('domain')}`,
+  ];
+  return `/sm?${parts.join('&')}`;
+}
+
 // Says why there is no page to take a result from.
-function fail(message) {
+function fail(part, message) {
   const title = document.createElement('h2');
-  title.id = 'result-title';
+  title.id = part.title;
   title.textContent = 'No result';
   const error = document.createElement('p');
-  error.id = 'error';
+  error.id = part.error;
   error.className = 'error';
   error.textContent = message;
-  const result = byId('result');
+  const result = byId(part.result);
   delete result.dataset.running;
   result.replaceChildren(title, error);
 }
 
-async function calculate() {
-  const button = byId('calculate');
-  const status = byId('status');
-  latest += 1;
-  const mine = latest;
-  remember();
-  const target = address();
+// Asks for the page at `target` and shows its result in the part.
+async function calculate(part, target) {
+  const button = byId(part.button);
+  const status = byId(part.status);
+  part.latest += 1;
+  const mine = part.latest;
   // The address says what the page shows, as it does without the script.
   window.history.replaceState(null, '', target);
   const started = Date.now();
@@ -122,27 +136,32 @@ async function calculate() {
     for (;;) {
       const response = await fetch(target, { headers: { Accept: 'text/html' } });
       const page = new DOMParser().parseFromString(await response.text(), 'text/html');
-      if (mine !== latest) return;
-      const result = page.getElementById('result');
+      if (mine !== part.latest) return;
+      const result = page.getElementById(part.result);
       if (!result) {
-        fail(`the server answered with status ${response.status} and no result`);
+        fail(part, `the server answered with status ${response.status} and no result`);
         break;
       }
-      byId('result').replaceWith(document.adoptNode(result));
+      byId(part.result).replaceWith(document.adoptNode(result));
       const again = Number(result.dataset.running);
       if (!again) break;
       // The calculation continues on the server. The page is free for
       // another one, and asks for this one again until that is started.
       free();
       await new Promise((resolve) => { setTimeout(resolve, again * 1000); });
-      if (mine !== latest) return;
+      if (mine !== part.latest) return;
     }
   } catch (error) {
-    if (mine === latest) fail(`the server could not be reached: ${error.message}`);
+    if (mine === part.latest) fail(part, `the server could not be reached: ${error.message}`);
   } finally {
     clearInterval(timer);
-    if (mine === latest) free();
+    if (mine === part.latest) free();
   }
+}
+
+function calculateTet() {
+  remember();
+  calculate(tet, address());
 }
 
 for (const radio of document.querySelectorAll('input[name="func"], input[name="numbers"]')) {
@@ -153,8 +172,30 @@ for (const radio of document.querySelectorAll('input[name="func"], input[name="n
 }
 byId('form').addEventListener('submit', (event) => {
   event.preventDefault();
-  calculate();
+  calculateTet();
 });
+byId('sm-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  calculate(sm, smAddress());
+});
+// Ctrl+Enter (Cmd+Enter) in the field of the inputs sends them.
+byId('expr').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    calculate(sm, smAddress());
+  }
+});
+// An example is a link to the page with its result: here its inputs go
+// into the form, and the page stays.
+for (const example of document.querySelectorAll('a.example')) {
+  example.addEventListener('click', (event) => {
+    const inputs = new URL(example.href).searchParams.get('expr');
+    if (inputs === null) return;
+    event.preventDefault();
+    byId('expr').value = inputs;
+    calculate(sm, smAddress());
+  });
+}
 // A browser may keep the choices of a page that it loads again, and not
 // the fields that the server wrote for them.
 if (fields().map((input) => input.name).join() !== names(checked('func'), checked('numbers')).join()) {
@@ -163,4 +204,5 @@ if (fields().map((input) => input.name).join() !== names(checked('func'), checke
 remember();
 // The server made this page for a calculation that still runs: from here
 // on the script asks for it.
-if (byId('result').dataset.running) calculate();
+if (byId('result').dataset.running) calculateTet();
+if (byId('sm-result').dataset.running) calculate(sm, smAddress());

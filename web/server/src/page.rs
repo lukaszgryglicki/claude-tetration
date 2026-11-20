@@ -6,6 +6,7 @@
 use std::fmt::Write as _;
 
 use crate::api::{self, Func, Job, Outcome, Pending};
+use crate::sm::{self, Program};
 
 /// `index.html`, with a `{{name}}` wherever the server writes something.
 pub const TEMPLATE: &str = include_str!("../../static/index.html");
@@ -148,6 +149,152 @@ impl Form {
             self.again.saturating_add(1)
         )
     }
+}
+
+/// The form of `symbolic-math`: the inputs and the options as they were
+/// typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asked {
+    pub expr: String,
+    pub digits: String,
+    /// `both`, `numeric` or `exact`.
+    pub mode: String,
+    /// `complex`, `real` or `quaternion`.
+    pub domain: String,
+    /// Whether the request had inputs, and so asks for a run.
+    pub complete: bool,
+    /// How many times the page has asked again for a run that has not
+    /// ended.
+    pub again: u64,
+}
+
+/// The inputs that the page starts with.
+const FIRST: &str = "x^2 - 5x + 6 = 0\nintegrate(x^2*e^(-x), x, 0, inf)\nN(pi, 50)";
+
+/// What the page offers to run at a click: a name and the inputs.
+const EXAMPLES: [(&str, &str); 22] = [
+    ("simplify", "10*x - (2+3)*x\nsin(x)^2 + cos(x)^2\n(x^2 - 1)/(x - 1)"),
+    ("solve", "x^2 - 5x + 6 = 0\nsin(x) = 0\nx^5 + x = i"),
+    ("a system", "x + y = 3, x - y = 1\nsolve([x^2 + y^2 = 25, x - y = 1], [x, y])"),
+    ("derivative", "diff(x^3*sin(x), x)\ndiff(e^(x*y), x, y)"),
+    ("integral", "integrate(x^2*e^(-x), x, 0, inf)\nintegrate(1/(1 + x^2), x)"),
+    ("limit and series", "limit(sin(x)/x, x, 0)\nseries(e^x, x, 0, 6)\nsum(1/k^2, k, 1, inf)"),
+    ("differential equation", "dsolve(y'' + y = 0, y, x)"),
+    ("matrices", "A := [[2, 1], [1, 3]]\ndet(A)\ninv(A)\neig(A)"),
+    ("1000 digits of pi", "N(pi, 1000)"),
+    ("number theory", "factor(2^64 + 1)\nisprime(2^127 - 1)\ngcd(1071, 462)"),
+    ("tetration", "2^^0.5\nslog(2, 65536)\n2^^x = 65536"),
+    (
+        "half iterate",
+        "iterate(2x + 1, x, 1/2)\niterate(x^2, x, 1/2)\niterate(e^x - 1, x, 1/2, 1)",
+    ),
+    ("bases", "base_conv(pi, 16)\nbase_conv(1/7, 10, 3)\n0.(3) + 0.1(6)"),
+    ("statistics", "mean([2, 4, 4, 4, 5, 5, 7, 9])\nstd([2, 4, 4, 4, 5, 5, 7, 9])"),
+    ("units", "convert(100 km/h, m/s)"),
+    ("a chart as text", "plot(sin(x)/x, x, -20, 20)"),
+    ("a chart as PNG", "save_png(\"plot.png\", plot(sin(x)/x, x, -20, 20), width = 900, height = 500)"),
+    ("the walk of pi (PNG)", "save_png(\"walk.png\", walk(pi, 10, 20000), width = 900)"),
+    ("a walk in space (JPEG XL)", "save_jxl(\"walk3d.jxl\", walk3d(e + pi*i, 12, 5000), width = 900)\nsave_png(\"walk3d.png\", walk3d(e + pi*i, 12, 5000), width = 900)"),
+    ("primes (PNG)", "save_png(\"ulam.png\", ulamspiral(40000), width = 800)"),
+    ("a surface (PNG)", "save_png(\"surface.png\", plot3d(sin(x)*cos(y), x, -3, 3, y, -3, 3), width = 900)"),
+    ("a Bode chart (PNG)", "save_png(\"bode.png\", bodeplot(tf([1], [1, 0.4, 1])), width = 900, height = 700)"),
+];
+
+impl Asked {
+    /// The form as a query fills it; without inputs it has the ones that
+    /// the page starts with, and asks for nothing.
+    pub fn from_query(query: &[(String, String)]) -> Asked {
+        let get = |name: &str| {
+            query
+                .iter()
+                .find(|(found, _)| found == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let known = |value: Option<&str>, names: [&str; 3]| {
+            value
+                .filter(|value| names.contains(value))
+                .unwrap_or(names[0])
+                .to_string()
+        };
+        let expr = get("expr").map(sm::tidy);
+        Asked {
+            complete: expr.as_ref().is_some_and(|expr| !expr.trim().is_empty()),
+            expr: expr.unwrap_or_else(|| FIRST.to_string()),
+            digits: get("digits").unwrap_or("").trim().to_string(),
+            mode: known(get("mode"), ["both", "numeric", "exact"]),
+            domain: known(get("domain"), ["complex", "real", "quaternion"]),
+            again: get("again")
+                .and_then(|count| count.parse().ok())
+                .unwrap_or(0),
+        }
+    }
+
+    /// The query of the API for what the form asks.
+    pub fn api_query(&self) -> Vec<(String, String)> {
+        let mut query = vec![("expr".to_string(), self.expr.clone())];
+        if !self.digits.is_empty() {
+            query.push(("digits".to_string(), self.digits.clone()));
+        }
+        if self.mode != "both" {
+            query.push(("mode".to_string(), self.mode.clone()));
+        }
+        if self.domain != "complex" {
+            query.push(("domain".to_string(), self.domain.clone()));
+        }
+        query
+    }
+
+    fn api_address(&self, readable: bool) -> String {
+        let pairs: Vec<String> = self
+            .api_query()
+            .iter()
+            .map(|(name, value)| format!("{name}={}", in_query(value, readable)))
+            .collect();
+        format!("/sm?{}", pairs.join("&"))
+    }
+
+    /// The address of the page for what the form asks.
+    pub fn page_address(&self) -> String {
+        format!(
+            "/sm?format=html&expr={}&digits={}&mode={}&domain={}",
+            in_query(&self.expr, false),
+            in_query(&self.digits, false),
+            self.mode,
+            self.domain
+        )
+    }
+
+    fn again_address(&self) -> String {
+        format!(
+            "{}&again={}",
+            self.page_address(),
+            self.again.saturating_add(1)
+        )
+    }
+}
+
+/// What the page shows below the form of `symbolic-math`.
+pub enum Answer<'a> {
+    Nothing,
+    /// The program is not on this server.
+    Absent,
+    /// The outcome of the run that the form asked for.
+    Outcome {
+        program: &'a Program,
+        outcome: &'a Outcome,
+        cached: bool,
+    },
+    /// The run has not ended.
+    Running {
+        program: &'a Program,
+        pending: &'a Pending,
+    },
+    /// The form did not ask for a run: the reason and the status that the
+    /// API has for it.
+    Rejected {
+        message: &'a str,
+        status: u16,
+    },
 }
 
 /// What the page shows below the form.
@@ -350,8 +497,200 @@ fn result(form: &Form, shown: &Shown) -> (String, bool) {
     (html, running)
 }
 
-/// The page with the form as given and with what is shown below it.
+/// What stands below the form of `symbolic-math`, as the inside of its
+/// section, and whether it is about a run that has not ended.
+fn answer(asked: &Asked, answer: &Answer) -> (String, bool) {
+    let mut html = String::new();
+    let title = |html: &mut String, text: &str| {
+        let _ = writeln!(html, "  <h2 id=\"sm-title\">{}</h2>", escaped(text));
+    };
+    let failed = |html: &mut String, message: &str, status: u16| {
+        title(html, "No result");
+        let _ = writeln!(
+            html,
+            "  <p id=\"sm-error\" class=\"error\">{} (HTTP {status})</p>",
+            escaped(message)
+        );
+    };
+    let command = |program: &Program| {
+        format!(
+            "command: <code id=\"sm-command\">{}</code>",
+            escaped(&program.command())
+        )
+    };
+    let mut lines = Vec::new();
+    let mut running = false;
+    match answer {
+        Answer::Nothing => return (html, false),
+        Answer::Absent => {
+            failed(
+                &mut html,
+                "symbolic-math is not installed on this server",
+                503,
+            );
+            return (html, false);
+        }
+        Answer::Outcome {
+            program,
+            outcome,
+            cached,
+        } => {
+            match outcome {
+                Outcome::Output {
+                    text, files, clean, ..
+                } => {
+                    let id = program.id();
+                    title(
+                        &mut html,
+                        if *clean {
+                            "Result"
+                        } else {
+                            "Result, with errors"
+                        },
+                    );
+                    let _ = writeln!(html, "  <pre id=\"sm-output\">{}</pre>", escaped(text));
+                    if !files.is_empty() {
+                        html.push_str("  <ul id=\"sm-files\" class=\"files\">\n");
+                        for file in files {
+                            let address = format!("/sm/file/{id}/{}", file.name);
+                            let (kind, picture) = sm::kind(&file.name);
+                            let what = match kind {
+                                "image/png" => "PNG picture",
+                                "image/jxl" => {
+                                    "JPEG XL picture; few browsers show this format: download it"
+                                }
+                                _ => "file",
+                            };
+                            let _ = write!(
+                                html,
+                                "    <li><a href=\"{address}?download=1\">{}</a> ({what}, {})",
+                                file.name,
+                                sm::size(file.bytes.len())
+                            );
+                            if picture {
+                                let _ = write!(
+                                    html,
+                                    "\n      <img class=\"picture\" src=\"{address}\" alt=\"{}\">",
+                                    file.name
+                                );
+                            }
+                            html.push_str("</li>\n");
+                        }
+                        html.push_str("  </ul>\n");
+                    }
+                    lines.push(format!(
+                        "<a id=\"sm-download\" href=\"/sm/output/{id}\">Download the output</a> \
+                         as a text file"
+                    ));
+                }
+                other => failed(
+                    &mut html,
+                    &other.error().unwrap_or_default(),
+                    other.status(),
+                ),
+            }
+            let mut timing = Vec::new();
+            if let Some(took) = outcome.seconds() {
+                timing.push(format!("computed in {} s", seconds(took)));
+            }
+            if *cached {
+                timing.push("returned from the cache".to_string());
+            }
+            if !timing.is_empty() {
+                lines.insert(
+                    0,
+                    format!(
+                        "<span id=\"sm-timing\">{}</span>",
+                        escaped(&timing.join(", "))
+                    ),
+                );
+            }
+            lines.push(command(program));
+        }
+        Answer::Running { program, pending } => {
+            running = true;
+            title(&mut html, "Still calculating");
+            let message = pending.message();
+            let mut letters = message.chars();
+            let first: String = letters
+                .next()
+                .into_iter()
+                .flat_map(char::to_uppercase)
+                .collect();
+            let _ = writeln!(
+                html,
+                "  <p id=\"sm-note\" class=\"note\">{}. This page asks again every {AGAIN} \
+                 seconds; in a browser that does not, follow the link.</p>\n  \
+                 <p id=\"sm-again\"><a href=\"{}\">Ask again now</a></p>",
+                escaped(&format!("{first}{}", letters.as_str())),
+                escaped(&asked.again_address())
+            );
+            lines.push(command(program));
+        }
+        Answer::Rejected { message, status } => failed(&mut html, message, *status),
+    }
+    lines.push(format!(
+        "API: <a id=\"sm-api\" href=\"{}\">{}</a>",
+        escaped(&asked.api_address(false)),
+        escaped(&asked.api_address(true))
+    ));
+    let _ = writeln!(
+        html,
+        "  <p class=\"hint\">\n    {}\n  </p>",
+        lines.join("<br>\n    ")
+    );
+    (html, running)
+}
+
+/// The examples of `symbolic-math` as links that run them.
+fn examples() -> String {
+    let links: Vec<String> = EXAMPLES
+        .iter()
+        .map(|(name, inputs)| {
+            format!(
+                "  <a class=\"example\" href=\"/sm?format=html&amp;expr={}\">{}</a>",
+                in_query(inputs, false),
+                escaped(name)
+            )
+        })
+        .collect();
+    format!("{}\n", links.join(",\n"))
+}
+
+/// A text of `symbolic-math` as a page: its help, or one of its lists.
+pub fn text_page(title: &str, text: &str) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>symbolic-math: {title}</title>\n\
+         <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\">\n\
+         <link rel=\"stylesheet\" href=\"/style.css\">\n</head>\n<body>\n<main class=\"help\">\n\
+         <h1>symbolic-math <small>{title}</small></h1>\n\
+         <p><a href=\"/sm\">The page that runs it</a>; <a href=\"/sm/help\">the help</a> \
+         (<a href=\"/sm/help.txt\">as text</a>); the lists of the \
+         <a href=\"/sm/functions\">functions</a>, <a href=\"/sm/constants\">constants</a> and \
+         <a href=\"/sm/units\">units</a>; \
+         <a href=\"https://github.com/lukaszgryglicki/symbolic-math\">the source</a>.</p>\n\
+         <pre>{}</pre>\n</main>\n</body>\n</html>\n",
+        escaped(text)
+    )
+}
+
+/// The page with the form as given and with what is shown below it; the
+/// part of `symbolic-math` as it starts.
+#[cfg(test)]
 pub fn rendered(site: &Site, form: &Form, shown: &Shown) -> String {
+    rendered_both(site, form, shown, &Asked::from_query(&[]), &Answer::Nothing)
+}
+
+/// The page with both forms as given and with what is shown below them.
+pub fn rendered_both(
+    site: &Site,
+    form: &Form,
+    shown: &Shown,
+    asked: &Asked,
+    replied: &Answer,
+) -> String {
     let checked = |on: bool| String::from(if on { " checked" } else { "" });
     let mut rows = String::new();
     for (name, value) in &form.fields {
@@ -374,16 +713,26 @@ pub fn rendered(site: &Site, form: &Form, shown: &Shown) -> String {
     // page as it is, with what was typed since. Elsewhere the browser
     // does, and one that does not, as `links`, shows a link for it only
     // when the address is named.
-    let (refresh, again) = match running {
-        true => (
-            format!(
-                "<noscript><meta http-equiv=\"refresh\" content=\"{AGAIN}; url={}\"></noscript>\n",
-                escaped(&form.again_address())
-            ),
-            format!(" data-running=\"{AGAIN}\""),
-        ),
-        false => (String::new(), String::new()),
+    let (mut answered, answering) = answer(asked, replied);
+    if !answered.is_empty() {
+        answered.insert(0, '\n');
+    }
+    let asks_again = |address: String| {
+        format!(
+            "<noscript><meta http-equiv=\"refresh\" content=\"{AGAIN}; url={}\"></noscript>\n",
+            escaped(&address)
+        )
     };
+    let marked = |on: bool| match on {
+        true => format!(" data-running=\"{AGAIN}\""),
+        false => String::new(),
+    };
+    let refresh = match (running, answering) {
+        (true, _) => asks_again(form.again_address()),
+        (false, true) => asks_again(asked.again_address()),
+        (false, false) => String::new(),
+    };
+    let again = marked(running);
     let revision = match site.revision {
         "" => String::new(),
         revision => format!(", revision {}", escaped(revision)),
@@ -399,6 +748,20 @@ pub fn rendered(site: &Site, form: &Form, shown: &Shown) -> String {
         ("arguments", rows),
         ("running", again),
         ("result", result),
+        ("sm.expr", escaped(&asked.expr)),
+        ("sm.digits", escaped(&asked.digits)),
+        ("sm.mode.both", checked(asked.mode == "both")),
+        ("sm.mode.numeric", checked(asked.mode == "numeric")),
+        ("sm.mode.exact", checked(asked.mode == "exact")),
+        ("sm.domain.complex", checked(asked.domain == "complex")),
+        ("sm.domain.real", checked(asked.domain == "real")),
+        (
+            "sm.domain.quaternion",
+            checked(asked.domain == "quaternion"),
+        ),
+        ("sm.examples", examples()),
+        ("sm.running", marked(answering)),
+        ("sm.result", answered),
         ("wait", api::span(site.wait)),
         ("limit", api::span(site.limit)),
         ("jobs", site.jobs.to_string()),
@@ -459,6 +822,17 @@ mod tests {
                 "result",
                 "revision",
                 "running",
+                "sm.digits",
+                "sm.domain.complex",
+                "sm.domain.quaternion",
+                "sm.domain.real",
+                "sm.examples",
+                "sm.expr",
+                "sm.mode.both",
+                "sm.mode.exact",
+                "sm.mode.numeric",
+                "sm.result",
+                "sm.running",
                 "wait",
             ]
         );

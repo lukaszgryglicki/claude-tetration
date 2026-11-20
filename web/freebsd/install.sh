@@ -15,6 +15,8 @@
 # What it changes, each step only when needed:
 #   packages caddy and portacl-rc; the user tetweb;
 #   /usr/local/bin/tet, /usr/local/bin/tet-web, /usr/local/bin/tet-webctl,
+#   /usr/local/bin/symbolic-math when the tree has symbolic-math.upload, the
+#   static binary that web/deploy.sh copies there;
 #   /usr/local/etc/rc.d/tet_web, /usr/local/etc/newsyslog.conf.d/tet-web.conf,
 #   /usr/local/etc/caddy/Caddyfile;
 #   /usr/local/etc/tet-web.conf, the settings of the server: only when there
@@ -78,6 +80,11 @@ say "installing tet, tet-web and the service files"
 install -m 0755 -o root -g wheel "$tet" /usr/local/bin/tet
 install -m 0755 -o root -g wheel "$web" /usr/local/bin/tet-web
 install -m 0755 -o root -g wheel "$root/web/ctl.sh" /usr/local/bin/tet-webctl
+if [ -x "$root/symbolic-math.upload" ]; then
+    say "installing symbolic-math"
+    "$root/symbolic-math.upload" --version >/dev/null || fail "$root/symbolic-math.upload does not run here"
+    install -m 0755 -o root -g wheel "$root/symbolic-math.upload" /usr/local/bin/symbolic-math
+fi
 install -m 0555 -o root -g wheel "$here/tet_web" /usr/local/etc/rc.d/tet_web
 install -d -m 0755 /usr/local/etc/newsyslog.conf.d
 install -m 0644 -o root -g wheel "$here/newsyslog.conf" /usr/local/etc/newsyslog.conf.d/tet-web.conf

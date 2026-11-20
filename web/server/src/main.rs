@@ -1,4 +1,5 @@
-//! `tet-web`: a page and an HTTP API in front of the `tet` binary.
+//! `tet-web`: a page and an HTTP API in front of the `tet` binary, and of
+//! `symbolic-math` next to it (`/sm`, see `sm.rs`).
 //!
 //! `GET /` is the page, a form that works without a script.
 //! `GET /?func=tet&base=2&height=0.5` (or `/api?...`) runs `tet 20 2 0.5`
@@ -16,6 +17,7 @@ mod http;
 mod page;
 mod run;
 mod settings;
+mod sm;
 
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -27,9 +29,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use api::{Format, Job, Outcome, Pending};
 use cache::{Cache, Found, Listed, Source, Ticket};
 use http::{Request, Response, Unread};
-use page::{Form, Shown, Site};
+use page::{Answer as Replied, Asked, Form, Shown, Site};
 use run::{Runner, Slots};
 use settings::Shared;
+use sm::Program;
 
 const SCRIPT: &str = include_str!("../../static/app.js");
 const STYLE: &str = include_str!("../../static/style.css");
@@ -52,6 +55,7 @@ Usage: tet-web
 
     TET_WEB_LISTEN      address to listen on                 127.0.0.1:8080
     TET_WEB_TET         the tet program                      tet
+    TET_WEB_SM          the symbolic-math program            symbolic-math
     TET_WEB_CACHE_MB    most memory for kept results, in MiB 1024
     TET_WEB_REVISION    text shown as the version            (none)
     TET_WEB_CONFIG      a file with the settings below       (none)
@@ -73,6 +77,12 @@ Usage: tet-web
   GET /?func=...&...      the API; also at /api. With format=html, as the
                           form of the page sends it: the page with the result
   GET /help               the usage text of tet
+  GET /sm?expr=...&...    the API of symbolic-math: its inputs, one a line,
+                          with digits, mode and domain; with format=html the
+                          page with the result
+  GET /sm/help            the help of symbolic-math as a page; /sm/help.txt,
+                          /sm/functions, /sm/constants, /sm/units as text
+  GET /sm/file/ID/NAME    a file that a run wrote; /sm/output/ID its output
   GET /stats              counters of the server, as JSON
   GET /status             the same for people
   GET /cache              the kept results and the calculations that run,
@@ -86,8 +96,33 @@ Usage: tet-web
   a new calculation is turned away at once (status 503).
 ";
 
+/// What a computation is: a number of `tet`, or a run of `symbolic-math`.
+#[derive(Clone, Debug)]
+enum Work {
+    Tet(Job),
+    Sm(Program),
+}
+
+impl Work {
+    fn key(&self) -> String {
+        match self {
+            Work::Tet(job) => job.key(),
+            Work::Sm(program) => program.key(),
+        }
+    }
+
+    fn command(&self) -> String {
+        match self {
+            Work::Tet(job) => job.command(),
+            Work::Sm(program) => program.command(),
+        }
+    }
+}
+
 struct Server {
     runner: Runner,
+    /// `symbolic-math`, where it is installed.
+    sm: Option<sm::Runner>,
     slots: Slots,
     cache: Arc<Cache>,
     settings: Arc<Shared>,
@@ -140,8 +175,19 @@ impl Server {
             .checked_mul(1 << 20)
             .and_then(|bytes| usize::try_from(bytes).ok())
             .ok_or("TET_WEB_CACHE_MB is too large")?;
+        // The second program is optional: without it the page says so.
+        let named = std::env::var("TET_WEB_SM").is_ok_and(|name| !name.trim().is_empty());
+        let sm = match sm::Runner::new(
+            setting("TET_WEB_SM", "symbolic-math".to_string())?,
+            &runner.tet,
+        ) {
+            Ok(sm) => Some(sm),
+            Err(reason) if named => return Err(reason),
+            Err(_) => None,
+        };
         let server = Server {
             runner,
+            sm,
             slots: Slots::default(),
             cache: Arc::new(Cache::new(cache)),
             settings,
@@ -158,7 +204,7 @@ impl Server {
     /// nobody asked for before is started; the request then waits for it,
     /// as do the others, until the computation is as old as a request
     /// waits. One that comes later is answered at once.
-    fn asked(self: &Arc<Self>, job: &Job) -> (Answer, Source) {
+    fn asked(self: &Arc<Self>, job: &Work) -> (Answer, Source) {
         let now = self.settings.now();
         let key = job.key();
         let (running, source) = loop {
@@ -199,7 +245,7 @@ impl Server {
 
     /// Starts the computation of a job in a thread of its own, where it
     /// runs to its end whatever becomes of the requests for it.
-    fn start(self: &Arc<Self>, job: Job, ticket: Ticket) {
+    fn start(self: &Arc<Self>, job: Work, ticket: Ticket) {
         let server = self.clone();
         let spawned = std::thread::Builder::new()
             .name("computation".into())
@@ -211,11 +257,15 @@ impl Server {
         }
     }
 
-    fn compute(&self, job: &Job, ticket: Ticket) {
+    fn compute(&self, job: &Work, ticket: Ticket) {
         let asked = ticket.running().asked();
-        let outcome = match self.slots.take(self.settings.now().jobs) {
-            Some(_slot) => self.runner.run(job, &self.settings),
-            None => Outcome::Busy,
+        let outcome = match (self.slots.take(self.settings.now().jobs), job, &self.sm) {
+            (None, ..) => Outcome::Busy,
+            (Some(_slot), Work::Tet(job), _) => self.runner.run(job, &self.settings),
+            (Some(_slot), Work::Sm(program), Some(sm)) => sm.run(program, &self.settings),
+            (Some(_slot), Work::Sm(_), None) => Outcome::Failed {
+                message: "symbolic-math is not installed on this server".into(),
+            },
         };
         // No request waited for the end of a long computation: the log has it.
         let age = asked.elapsed();
@@ -256,14 +306,201 @@ impl Server {
             Ok(parsed) => parsed,
             Err(rejected) => return refused(rejected),
         };
-        let (answer, source) = self.asked(&job);
+        let work = Work::Tet(job.clone());
+        let (answer, source) = self.asked(&work);
         let body = match &answer {
             Ok(outcome) => api::rendered(&job, outcome, source == Source::Hit, format),
             Err(pending) => api::rendered_pending(&job, pending, format),
         };
         let status = answer.as_ref().map_or(202, |outcome| outcome.status());
         let response = reply(status, format, body).with("X-Cache", source.header());
-        (response, note(&job, source, &answer))
+        (response, note(&work, source, &answer))
+    }
+
+    /// The reply to a query of the API of `symbolic-math`, and what the
+    /// log says about it.
+    fn ran(self: &Arc<Self>, query: &str, format_hint: Format) -> (Response, Option<String>) {
+        if query.split('&').any(|piece| piece == "format=html") {
+            return self.ran_shown(query);
+        }
+        let refused = |rejected: api::Rejected| {
+            let body = api::rendered_rejection(&rejected, format_hint);
+            let note = format!("rejected: {}", rejected.message);
+            (reply(rejected.status, format_hint, body), Some(note))
+        };
+        if self.sm.is_none() {
+            return refused(api::Rejected {
+                status: 503,
+                message: "symbolic-math is not installed on this server".into(),
+            });
+        }
+        let query = match http::parse_query(query) {
+            Ok(query) => query,
+            Err(message) => {
+                return refused(api::Rejected {
+                    status: 400,
+                    message,
+                })
+            }
+        };
+        let (program, format) = match Program::parse(&query) {
+            Ok(parsed) => parsed,
+            Err(rejected) => return refused(rejected),
+        };
+        let work = Work::Sm(program.clone());
+        let (answer, source) = self.asked(&work);
+        let body = match &answer {
+            Ok(outcome) => sm::rendered(&program, outcome, source == Source::Hit, format),
+            Err(pending) => sm::rendered_pending(&program, pending, format),
+        };
+        let status = answer.as_ref().map_or(202, |outcome| outcome.status());
+        let response = reply(status, format, body).with("X-Cache", source.header());
+        (response, note(&work, source, &answer))
+    }
+
+    /// The page for a query of `symbolic-math` with `format=html`: its
+    /// form as a browser sends it, and the page with the result as the
+    /// reply.
+    fn ran_shown(self: &Arc<Self>, query: &str) -> (Response, Option<String>) {
+        let tet = Form::from_query(&[]);
+        let refused = |asked: &Asked, rejected: api::Rejected| {
+            let replied = Replied::Rejected {
+                message: &rejected.message,
+                status: rejected.status,
+            };
+            let note = format!("rejected: {}", rejected.message);
+            (
+                self.page_both(&tet, &Shown::Nothing, asked, &replied),
+                Some(note),
+            )
+        };
+        let query = match http::parse_query(&query.replace('+', "%20")) {
+            Ok(query) => query,
+            Err(message) => {
+                let rejected = api::Rejected {
+                    status: 400,
+                    message,
+                };
+                return refused(&Asked::from_query(&[]), rejected);
+            }
+        };
+        let asked = Asked::from_query(&query);
+        if self.sm.is_none() {
+            let page = self.page_both(&tet, &Shown::Nothing, &asked, &Replied::Absent);
+            return (page, Some(String::new()));
+        }
+        if !asked.complete {
+            let page = self.page_both(&tet, &Shown::Nothing, &asked, &Replied::Nothing);
+            return (page, Some(String::new()));
+        }
+        let program = match Program::parse(&asked.api_query()) {
+            Ok((program, _)) => program,
+            Err(rejected) => return refused(&asked, rejected),
+        };
+        let work = Work::Sm(program.clone());
+        let (answer, source) = self.asked(&work);
+        let replied = match &answer {
+            Ok(outcome) => Replied::Outcome {
+                program: &program,
+                outcome,
+                cached: source == Source::Hit,
+            },
+            Err(pending) => Replied::Running {
+                program: &program,
+                pending,
+            },
+        };
+        let response = self
+            .page_both(&tet, &Shown::Nothing, &asked, &replied)
+            .with("X-Cache", source.header());
+        (response, note(&work, source, &answer))
+    }
+
+    /// The kept outcome of the run of `symbolic-math` with the name `id`.
+    fn kept(&self, id: &str) -> Option<Arc<Outcome>> {
+        self.cache
+            .listed()
+            .into_iter()
+            .find_map(|(key, entry)| match entry {
+                Listed::Kept(outcome) if key.starts_with("SM\n") && sm::id_of(&key) == id => {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+    }
+
+    /// A file that a run wrote (`/sm/file/ID/NAME`), or what the run
+    /// printed (`/sm/output/ID`).
+    fn written(&self, path: &str, query: &str) -> Response {
+        let gone = || {
+            Response::text(
+                404,
+                "this run is not kept any more: calculate it again on the page\n",
+            )
+        };
+        let attached = |response: Response, name: &str| {
+            response.with(
+                "Content-Disposition",
+                format!("attachment; filename=\"{name}\""),
+            )
+        };
+        if let Some(id) = path.strip_prefix("/sm/output/") {
+            return match self.kept(id).as_deref() {
+                Some(Outcome::Output { text, .. }) => attached(
+                    Response::text(200, text.clone()).with("Cache-Control", "no-store"),
+                    &format!("symbolic-math-{}.txt", &id[..id.len().min(8)]),
+                ),
+                _ => gone(),
+            };
+        }
+        let Some((id, name)) = path
+            .strip_prefix("/sm/file/")
+            .and_then(|rest| rest.split_once('/'))
+            .filter(|(_, name)| sm::plain(name))
+        else {
+            return gone();
+        };
+        let Some(outcome) = self.kept(id) else {
+            return gone();
+        };
+        let Outcome::Output { files, .. } = &*outcome else {
+            return gone();
+        };
+        let Some(file) = files.iter().find(|file| file.name == name) else {
+            return gone();
+        };
+        let (kind, _) = sm::kind(name);
+        let response = Response::new(200, kind, file.bytes.clone())
+            .with("Cache-Control", "no-store")
+            .with("Content-Security-Policy", "default-src 'none'; sandbox");
+        // Only pictures and texts are shown in the page of a browser.
+        let download = query.split('&').any(|piece| piece == "download=1")
+            || kind == "application/octet-stream";
+        match download {
+            true => attached(response, name),
+            false => response,
+        }
+    }
+
+    /// A text of `symbolic-math`: as a page, or as it is.
+    fn told(&self, path: &str) -> Response {
+        let Some(sm) = &self.sm else {
+            return Response::text(503, "symbolic-math is not installed on this server\n");
+        };
+        match path {
+            "/sm/help" => Response::new(
+                200,
+                "text/html; charset=utf-8",
+                page::text_page("--help", &sm.help),
+            )
+            .with("Cache-Control", "no-cache")
+            .with("Content-Security-Policy", POLICY)
+            .with("Referrer-Policy", "no-referrer"),
+            "/sm/help.txt" => Response::text(200, sm.help.clone()),
+            "/sm/functions" => Response::text(200, sm.functions.clone()),
+            "/sm/constants" => Response::text(200, sm.constants.clone()),
+            _ => Response::text(200, sm.units.clone()),
+        }
     }
 
     /// The page for a query with `format=html`: the form of the page as a
@@ -296,7 +533,8 @@ impl Server {
             Ok((job, _)) => job,
             Err(rejected) => return refused(&form, rejected),
         };
-        let (answer, source) = self.asked(&job);
+        let work = Work::Tet(job.clone());
+        let (answer, source) = self.asked(&work);
         let shown = match &answer {
             Ok(outcome) => Shown::Outcome {
                 job: &job,
@@ -306,10 +544,18 @@ impl Server {
             Err(pending) => Shown::Running { job: &job, pending },
         };
         let response = self.page(&form, &shown).with("X-Cache", source.header());
-        (response, note(&job, source, &answer))
+        (response, note(&work, source, &answer))
     }
 
     fn page(&self, form: &Form, shown: &Shown) -> Response {
+        let replied = match self.sm {
+            Some(_) => Replied::Nothing,
+            None => Replied::Absent,
+        };
+        self.page_both(form, shown, &Asked::from_query(&[]), &replied)
+    }
+
+    fn page_both(&self, form: &Form, shown: &Shown, asked: &Asked, replied: &Replied) -> Response {
         let now = self.settings.now();
         let site = Site {
             wait: now.wait.as_secs(),
@@ -317,7 +563,7 @@ impl Server {
             jobs: now.jobs,
             revision: &self.revision,
         };
-        let body = page::rendered(&site, form, shown);
+        let body = page::rendered_both(&site, form, shown, asked, replied);
         Response::new(200, "text/html; charset=utf-8", body)
             .with("Cache-Control", "no-cache")
             .with("Content-Security-Policy", POLICY)
@@ -380,14 +626,16 @@ impl Server {
     fn cached(&self) -> String {
         let mut lines = String::new();
         for (key, entry) in self.cache.listed() {
-            let Some(job) = Job::of_key(&key) else {
-                continue;
-            };
             let found = match &entry {
                 Listed::Kept(outcome) => Ok(&**outcome),
                 Listed::Running(asked) => Err(asked.elapsed()),
             };
-            lines.push_str(&api::listed(&job, found));
+            let line = match (Job::of_key(&key), Program::of_key(&key)) {
+                (Some(job), _) => api::listed(&job, found),
+                (None, Some(program)) => sm::listed(&program, found),
+                (None, None) => continue,
+            };
+            lines.push_str(&line);
             lines.push('\n');
         }
         lines
@@ -421,9 +669,22 @@ impl Server {
             let number = name.trim_end_matches("_re").trim_end_matches("_im");
             ["func", "prec", "format", "base", "height", "value"].contains(&number)
         });
+        // The same for the other program, at its own address.
+        let runs = query.split('&').any(|piece| {
+            let name = piece.split('=').next().unwrap_or(piece);
+            ["expr", "digits", "mode", "domain", "format"].contains(&name)
+        });
         let response = match request.path.as_str() {
             "/api" => return self.computed(query, hint),
             "/" if asks => return self.computed(query, hint),
+            "/sm" if runs => return self.ran(query, hint),
+            "/sm" => self.page(&Form::from_query(&[]), &Shown::Nothing),
+            "/sm/help" | "/sm/help.txt" | "/sm/functions" | "/sm/constants" | "/sm/units" => {
+                self.told(&request.path)
+            }
+            path if path.starts_with("/sm/file/") || path.starts_with("/sm/output/") => {
+                self.written(path, query)
+            }
             "/" => self.page(&Form::from_query(&[]), &Shown::Nothing),
             "/app.js" => file(SCRIPT, "text/javascript; charset=utf-8"),
             "/style.css" => file(STYLE, "text/css; charset=utf-8"),
@@ -436,7 +697,10 @@ impl Server {
             "/cache" if direct => {
                 Response::text(200, self.cached()).with("Cache-Control", "no-store")
             }
-            "/robots.txt" => Response::text(200, "User-agent: *\nDisallow: /api\nDisallow: /*?\n"),
+            "/robots.txt" => Response::text(
+                200,
+                "User-agent: *\nDisallow: /api\nDisallow: /sm/file/\nDisallow: /sm/output/\nDisallow: /*?\n",
+            ),
             _ => Response::text(404, "there is nothing here; the page is at /\n"),
         };
         (response, Some(String::new()))
@@ -502,7 +766,7 @@ impl Server {
 /// it, the command, and the result or the reason why there is none. A
 /// request that only finds a computation still running, without having
 /// waited for it, has no line: a page asks like that every few seconds.
-fn note(job: &Job, source: Source, answer: &Answer) -> Option<String> {
+fn note(job: &Work, source: Source, answer: &Answer) -> Option<String> {
     let command = api::brief(&job.command(), 300);
     match answer {
         Ok(outcome) => {
@@ -584,9 +848,10 @@ fn main() -> ExitCode {
         .local_addr()
         .map_or(listen, |address| address.to_string());
     println!(
-        "{} tet-web listening on {address}: tet={} revision={:?}; {}",
+        "{} tet-web listening on {address}: tet={} symbolic-math={} revision={:?}; {}",
         timestamp(SystemTime::now()),
         server.runner.tet,
+        server.sm.as_ref().map_or("none", |sm| sm.program.as_str()),
         server.revision,
         server.settings.now().described(),
     );

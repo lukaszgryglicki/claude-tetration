@@ -273,13 +273,28 @@ pub enum Outcome {
     Busy,
     /// Something that is neither an answer nor a refusal of `tet`.
     Failed { message: String },
+    /// What `symbolic-math` printed and the files that it wrote; `clean`
+    /// when none of its inputs ended with an error.
+    Output {
+        text: String,
+        files: Vec<Written>,
+        clean: bool,
+        seconds: f64,
+    },
+}
+
+/// A file that a run of `symbolic-math` wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Written {
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 impl Outcome {
     pub fn status(&self) -> u16 {
         match self {
-            Outcome::Value { .. } => 200,
-            Outcome::Refused { .. } => 422,
+            Outcome::Value { .. } | Outcome::Output { clean: true, .. } => 200,
+            Outcome::Refused { .. } | Outcome::Output { clean: false, .. } => 422,
             Outcome::Timeout { .. } => 504,
             Outcome::Busy => 503,
             Outcome::Failed { .. } => 500,
@@ -293,13 +308,16 @@ impl Outcome {
     pub fn lasting(&self) -> bool {
         matches!(
             self,
-            Outcome::Value { .. } | Outcome::Refused { .. } | Outcome::Timeout { .. }
+            Outcome::Value { .. }
+                | Outcome::Refused { .. }
+                | Outcome::Timeout { .. }
+                | Outcome::Output { .. }
         )
     }
 
     pub fn error(&self) -> Option<String> {
         match self {
-            Outcome::Value { .. } => None,
+            Outcome::Value { .. } | Outcome::Output { .. } => None,
             Outcome::Refused { message, .. } | Outcome::Failed { message } => Some(message.clone()),
             Outcome::Timeout { limit } => Some(format!(
                 "no result within {}, the limit of this server; tet itself has no limit: \
@@ -312,7 +330,9 @@ impl Outcome {
 
     pub fn seconds(&self) -> Option<f64> {
         match self {
-            Outcome::Value { seconds, .. } | Outcome::Refused { seconds, .. } => Some(*seconds),
+            Outcome::Value { seconds, .. }
+            | Outcome::Refused { seconds, .. }
+            | Outcome::Output { seconds, .. } => Some(*seconds),
             _ => None,
         }
     }
@@ -322,6 +342,12 @@ impl Outcome {
     pub fn logged(&self) -> String {
         match self {
             Outcome::Value { re, im, .. } => format!(" = {} {}", brief(re, 100), brief(im, 100)),
+            Outcome::Output { text, files, .. } => format!(
+                " = {} line(s), {} file(s): {}",
+                text.lines().count(),
+                files.len(),
+                brief(text.lines().next().unwrap_or(""), 100)
+            ),
             other => format!(": {}", brief(&other.error().unwrap_or_default(), 300)),
         }
     }

@@ -46,7 +46,7 @@ impl Drop for Slot<'_> {
 }
 
 #[cfg(unix)]
-mod limits {
+pub(crate) mod limits {
     //! What the kernel enforces on a child, whatever becomes of this
     //! server: its address space, a lower priority than the server that
     //! has to keep answering, and its end when the server ends.
@@ -167,7 +167,7 @@ mod limits {
 }
 
 #[cfg(not(unix))]
-mod limits {
+pub(crate) mod limits {
     pub fn memory_supported() -> bool {
         false
     }
@@ -198,7 +198,7 @@ fn collected(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandl
 /// Waits for the child that was started at `started` while it has run for
 /// less than `limit`, which is asked for again and again: it can change.
 /// `None` when the child still runs at its limit, which is returned too.
-fn exited(
+pub(crate) fn exited(
     child: &mut Child,
     started: Instant,
     limit: impl Fn() -> Duration,

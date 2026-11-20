@@ -34,6 +34,35 @@ case "$1" in
 esac
 "#;
 
+/// In the place of `symbolic-math`: answers every line of its input, some
+/// of them in a special way, and says how it was called.
+const FAKE_SM: &str = r#"#!/bin/sh
+case "$1" in
+    --help) echo 'Usage: symbolic-math (a script for the tests) <x>'; exit 0 ;;
+    --functions) echo 'the functions'; exit 0 ;;
+    --constants) echo 'the constants'; exit 0 ;;
+    --units) echo 'the units'; exit 0 ;;
+esac
+echo "$*" >> "$0.calls"
+echo "options: $*"
+status=0
+while IFS= read -r line; do
+    case "$line" in
+        '') ;;
+        slow) echo $$ > "$0.pid"; sleep 30 ;;
+        longer) sleep 3; echo 'done' ;;
+        fail) echo 'error: no such thing' >&2; status=1 ;;
+        'file '*) printf 'BYTES of %s' "${line#file }" > "${line#file }"; echo "saved ${line#file }" ;;
+        where) pwd | sed 's|.*/tet-web-sm-[0-9]*/run-[0-9]*-[0-9]*$|a directory of its own|' ;;
+        env) env | grep -v -e '^PWD=' -e '^OLDPWD=' -e '^_=' -e '^SHLVL=' | sed 's|=/.*/run-[0-9]*-[0-9]*$|=the directory|' | sort ;;
+        crash) kill -KILL $$ ;;
+        big) head -c 5000000 /dev/zero | tr '\0' 7; echo ;;
+        *) echo "= $line" ;;
+    esac
+done
+exit $status
+"#;
+
 static SERVERS: AtomicUsize = AtomicUsize::new(0);
 
 struct Server {
@@ -66,12 +95,14 @@ fn fixture_directory() -> PathBuf {
         SERVERS.fetch_add(1, Ordering::SeqCst)
     ));
     std::fs::create_dir(&directory).unwrap();
-    let tet = directory.join("tet");
-    std::fs::write(&tet, FAKE_TET).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tet, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for (name, script) in [("tet", FAKE_TET), ("sm", FAKE_SM)] {
+        let program = directory.join(name);
+        std::fs::write(&program, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
     }
     directory
 }
@@ -86,6 +117,7 @@ fn command(directory: &std::path::Path, settings: &[(&str, &str)]) -> Command {
     command
         .env("TET_WEB_LISTEN", "127.0.0.1:0")
         .env("TET_WEB_TET", directory.join("tet"))
+        .env("TET_WEB_SM", directory.join("sm"))
         .envs(settings.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1253,4 +1285,350 @@ fn settings_that_cannot_work_end_the_server_at_once() {
     let usage = String::from_utf8_lossy(&usage.stdout);
     assert!(usage.starts_with("Usage: tet-web") && usage.contains("TET_WEB_CONFIG"));
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The command lines with which the script in the place of `symbolic-math`
+/// was run.
+fn sm_calls(server: &Server) -> Vec<String> {
+    std::fs::read_to_string(server.directory.join("sm.calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// The name that a reply of the API gives to its run.
+fn run_id(body: &str) -> String {
+    body.split("\"id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("no id in {body}"))
+        .to_string()
+}
+
+#[test]
+fn symbolic_math_runs_on_its_inputs_and_what_it_printed_is_kept() {
+    let server = Server::start(&[]);
+    let first = server.get("/sm?expr=1%2B1%0Ax^2=4&digits=40&mode=numeric&domain=real");
+    assert_eq!(first.status, 200, "{}", first.body);
+    assert_eq!(
+        first.header("Content-Type"),
+        Some("application/json; charset=utf-8")
+    );
+    assert_eq!(first.header("X-Cache"), Some("MISS"));
+    assert_eq!(first.header("Cache-Control"), Some("no-store"));
+    for part in [
+        "{\"expr\":\"1+1\\nx^2=4\",\"digits\":40,\"mode\":\"numeric\",\"domain\":\"real\",",
+        "\"output\":\"options: -d 40 -n -r\\n= 1+1\\n= x^2=4\\n\",\"files\":[],\"ok\":true,",
+        ",\"cached\":false,\"command\":\"symbolic-math -d 40 -n -r 1+1 'x^2=4'\"}\n",
+    ] {
+        assert!(first.body.contains(part), "{part}\n{}", first.body);
+    }
+    // The same again is not run again; a plus sign is a plus sign.
+    let again = server.get("/sm?expr=1+1%0Ax^2=4&digits=40&mode=numeric&domain=real&format=text");
+    assert_eq!((again.status, again.header("X-Cache")), (200, Some("HIT")));
+    assert_eq!(again.body, "options: -d 40 -n -r\n= 1+1\n= x^2=4\n");
+    assert_eq!(sm_calls(&server), ["-d 40 -n -r"]);
+    // Without options; the lines of a form end with \r\n.
+    let plain = server.get("/sm?expr=a%0D%0A%0D%0Ab%20c%0D%0A&format=text");
+    assert_eq!(plain.body, "options: \n= a\n= b c\n");
+    // An error of an input stands among the results, and the status says so.
+    let failed = server.get("/sm?expr=one%0Afail%0Atwo");
+    assert_eq!(failed.status, 422);
+    assert!(failed.body.contains(
+        "\"output\":\"options: \\n= one\\nerror: no such thing\\n= two\\n\",\"files\":[],\"ok\":false,\"status\":422,"
+    ));
+    assert_eq!(
+        server.get("/sm?expr=one%0Afail%0Atwo&format=text").body,
+        "options: \n= one\nerror: no such thing\n= two\n"
+    );
+    // The run has a directory of its own and an environment of its own.
+    let own = server.get("/sm?expr=where%0Aenv&format=text");
+    let lines: Vec<&str> = own.body.lines().collect();
+    assert_eq!(lines[1], "a directory of its own", "{}", own.body);
+    assert_eq!(lines[2], "HOME=the directory");
+    assert!(lines[3].starts_with("PATH=") && lines[3].ends_with(":/usr/local/bin:/usr/bin:/bin"));
+    assert_eq!(
+        &lines[4..],
+        ["SYMBOLIC_MATH_SANDBOX=48", "TMPDIR=the directory"]
+    );
+    let line = server.logged("fail%0Atwo -> 422 ");
+    assert!(line.contains(" MISS "), "{line}");
+    assert!(
+        line.ends_with("symbolic-math one fail two = 4 line(s), 0 file(s): options: "),
+        "{line}"
+    );
+    // The cache of the server lists the runs next to the numbers of tet.
+    let cache = server.ask("GET", "/cache", "").body;
+    assert!(
+        cache.contains("f=symbolic-math -d 40 -n -r expr='1+1; x^2=4' lines=3 files=0\n"),
+        "{cache}"
+    );
+}
+
+#[test]
+fn the_files_of_a_run_are_served() {
+    let server = Server::start(&[]);
+    let run = server.get("/sm?expr=file%20plot.png%0Afile%20data.csv%0Afile%20walk.jxl");
+    assert_eq!(run.status, 200, "{}", run.body);
+    let id = run_id(&run.body);
+    assert_eq!(id.len(), 32);
+    assert!(
+        run.body.contains(&format!(
+            "\"files\":[{{\"name\":\"data.csv\",\"bytes\":17,\"url\":\"/sm/file/{id}/data.csv\"}},\
+         {{\"name\":\"plot.png\",\"bytes\":17,\"url\":\"/sm/file/{id}/plot.png\"}},\
+         {{\"name\":\"walk.jxl\",\"bytes\":17,\"url\":\"/sm/file/{id}/walk.jxl\"}}]"
+        )),
+        "{}",
+        run.body
+    );
+    let picture = server.get(&format!("/sm/file/{id}/plot.png"));
+    assert_eq!(
+        (picture.status, picture.body.as_str()),
+        (200, "BYTES of plot.png")
+    );
+    assert_eq!(picture.header("Content-Type"), Some("image/png"));
+    assert_eq!(picture.header("Content-Disposition"), None);
+    assert_eq!(picture.header("X-Content-Type-Options"), Some("nosniff"));
+    let download = server.get(&format!("/sm/file/{id}/plot.png?download=1"));
+    assert_eq!(
+        download.header("Content-Disposition"),
+        Some("attachment; filename=\"plot.png\"")
+    );
+    let other = server.get(&format!("/sm/file/{id}/walk.jxl"));
+    assert_eq!(other.header("Content-Type"), Some("image/jxl"));
+    let data = server.get(&format!("/sm/file/{id}/data.csv"));
+    assert_eq!(
+        data.header("Content-Type"),
+        Some("text/plain; charset=utf-8")
+    );
+    let output = server.get(&format!("/sm/output/{id}"));
+    assert_eq!(output.status, 200);
+    assert_eq!(
+        output.body,
+        "options: \nsaved plot.png\nsaved data.csv\nsaved walk.jxl\n"
+    );
+    assert_eq!(
+        output.header("Content-Disposition"),
+        Some(format!("attachment; filename=\"symbolic-math-{}.txt\"", &id[..8]).as_str())
+    );
+    // What is not there: another run, another file, a name that is no name.
+    for path in [
+        format!("/sm/file/{id}/none.png"),
+        format!("/sm/file/{id}/.output"),
+        format!("/sm/file/{id}/..%2Ftet"),
+        format!("/sm/file/{}/plot.png", "0".repeat(32)),
+        "/sm/file/".to_string(),
+        "/sm/output/nothing".to_string(),
+    ] {
+        let reply = server.get(&path);
+        assert_eq!(reply.status, 404, "{path}");
+        assert!(
+            reply.body.starts_with("this run is not kept any more"),
+            "{path}"
+        );
+    }
+    // The page shows the pictures and has the files to download.
+    let page = server.get("/sm?format=html&expr=file+plot.png%0D%0Afile+data.csv%0D%0Afile+walk.jxl&digits=&mode=both&domain=complex");
+    assert_eq!((page.status, page.header("X-Cache")), (200, Some("HIT")));
+    for part in [
+        "<h2 id=\"sm-title\">Result</h2>".to_string(),
+        "<pre id=\"sm-output\">options: \nsaved plot.png\nsaved data.csv\nsaved walk.jxl\n</pre>".to_string(),
+        format!("<li><a href=\"/sm/file/{id}/data.csv?download=1\">data.csv</a> (file, 17 bytes)</li>"),
+        format!("<li><a href=\"/sm/file/{id}/plot.png?download=1\">plot.png</a> (PNG picture, 17 bytes)\n      <img class=\"picture\" src=\"/sm/file/{id}/plot.png\" alt=\"plot.png\"></li>"),
+        format!("<a href=\"/sm/file/{id}/walk.jxl?download=1\">walk.jxl</a> (JPEG XL picture; few browsers show this format: download it, 17 bytes)</li>"),
+        format!("<a id=\"sm-download\" href=\"/sm/output/{id}\">Download the output</a> as a text file"),
+        "command: <code id=\"sm-command\">symbolic-math &#39;file plot.png&#39; &#39;file data.csv&#39; &#39;file walk.jxl&#39;</code>".to_string(),
+        "returned from the cache".to_string(),
+        // The form of tet is on the page as it starts.
+        "<form id=\"form\" method=\"get\" action=\"/\" novalidate autocomplete=\"off\">".to_string(),
+        "<section id=\"result\"></section>".to_string(),
+    ] {
+        assert!(page.body.contains(&part), "{part}\n{}", page.body);
+    }
+    assert_eq!(sm_calls(&server).len(), 1);
+}
+
+#[test]
+fn the_page_has_the_form_of_symbolic_math_and_its_help() {
+    let server = Server::start(&[]);
+    let page = server.get("/");
+    for part in [
+        "<section class=\"tool\" id=\"tet\">",
+        "<section class=\"tool\" id=\"sm\">",
+        "<form id=\"sm-form\" method=\"get\" action=\"/sm\" novalidate autocomplete=\"off\">",
+        "<textarea id=\"expr\" name=\"expr\" rows=\"7\" spellcheck=\"false\" autocapitalize=\"off\">x^2 - 5x + 6 = 0\nintegrate(x^2*e^(-x), x, 0, inf)\nN(pi, 50)</textarea>",
+        "<input id=\"digits\" name=\"digits\" type=\"number\" min=\"1\" step=\"1\" value=\"\"",
+        "<input type=\"radio\" name=\"mode\" value=\"both\" checked>",
+        "<input type=\"radio\" name=\"domain\" value=\"complex\" checked>",
+        "<button id=\"sm-calculate\" type=\"submit\">Calculate</button>",
+        "<section id=\"sm-result\"></section>",
+        "<a class=\"example\" href=\"/sm?format=html&amp;expr=x%5E2%20-%205x%20%2B%206%20%3D%200%0Asin(x)%20%3D%200%0Ax%5E5%20%2B%20x%20%3D%20i\">solve</a>",
+        "<a href=\"sm/help\">the full help of <code>symbolic-math --help</code></a>",
+        "<a href=\"https://github.com/lukaszgryglicki/symbolic-math\">symbolic-math</a> (AGPL-3.0)",
+    ] {
+        assert!(page.body.contains(part), "{part}\n{}", page.body);
+    }
+    // The address of the other program alone is the page too.
+    assert_eq!(server.get("/sm").body, page.body);
+    // The form as a browser without scripts sends it, with other choices.
+    let sent = server.get("/sm?format=html&expr=2*3&digits=50&mode=exact&domain=quaternion");
+    for part in [
+        "<textarea id=\"expr\" name=\"expr\" rows=\"7\" spellcheck=\"false\" autocapitalize=\"off\">2*3</textarea>",
+        "name=\"digits\" type=\"number\" min=\"1\" step=\"1\" value=\"50\"",
+        "<input type=\"radio\" name=\"mode\" value=\"exact\" checked>",
+        "<input type=\"radio\" name=\"domain\" value=\"quaternion\" checked>",
+        "<pre id=\"sm-output\">options: -d 50 -e -q\n= 2*3\n</pre>",
+        "API: <a id=\"sm-api\" href=\"/sm?expr=2*3&amp;digits=50&amp;mode=exact&amp;domain=quaternion\">/sm?expr=2*3&amp;digits=50&amp;mode=exact&amp;domain=quaternion</a>",
+    ] {
+        assert!(sent.body.contains(part), "{part}\n{}", sent.body);
+    }
+    // What is no run is said on the page, with the status of the API.
+    let refused = server.get("/sm?format=html&expr=1&digits=many");
+    assert_eq!(refused.status, 200);
+    assert!(refused.body.contains(
+        "<p id=\"sm-error\" class=\"error\">digits is a whole number from 1 to 1000000, not &quot;many&quot; (HTTP 400)</p>"
+    ));
+    let empty = server.get("/sm?format=html&expr=&digits=");
+    assert!(empty.body.contains("<section id=\"sm-result\"></section>"));
+    for (path, kind, text) in [
+        (
+            "/sm/help",
+            "text/html; charset=utf-8",
+            "<pre>Usage: symbolic-math (a script for the tests) &lt;x&gt;\n</pre>",
+        ),
+        (
+            "/sm/help.txt",
+            "text/plain; charset=utf-8",
+            "Usage: symbolic-math (a script for the tests) <x>\n",
+        ),
+        (
+            "/sm/functions",
+            "text/plain; charset=utf-8",
+            "the functions\n",
+        ),
+        (
+            "/sm/constants",
+            "text/plain; charset=utf-8",
+            "the constants\n",
+        ),
+        ("/sm/units", "text/plain; charset=utf-8", "the units\n"),
+    ] {
+        let reply = server.get(path);
+        assert_eq!(reply.status, 200, "{path}");
+        assert_eq!(reply.header("Content-Type"), Some(kind), "{path}");
+        assert!(reply.body.contains(text), "{path}: {}", reply.body);
+    }
+    for (target, message) in [
+        ("/sm?expr=", "expr is empty"),
+        ("/sm?digits=5", "expr is missing"),
+        (
+            "/sm?expr=1&digits=0",
+            "digits is a whole number from 1 to 1000000",
+        ),
+        ("/sm?expr=1&mode=fast", "mode is both, numeric or exact"),
+        ("/sm?expr=1&base=2", "unknown parameter \\\"base\\\""),
+        ("/sm?expr=%ZZ", "broken escape"),
+    ] {
+        let reply = server.get(target);
+        assert_eq!(reply.status, 400, "{target}");
+        assert!(reply.body.contains(message), "{target}: {}", reply.body);
+    }
+    assert_eq!(sm_calls(&server), ["-d 50 -e -q"]);
+}
+
+#[test]
+fn a_run_of_symbolic_math_ends_at_the_time_limit_and_continues_when_it_takes_longer() {
+    let server = Server::start(&[("TET_WEB_TIMEOUT", "1")]);
+    let started = Instant::now();
+    let reply = server.get("/sm?expr=slow&format=text");
+    assert!(
+        started.elapsed() >= Duration::from_secs(1) && started.elapsed() < Duration::from_secs(10)
+    );
+    assert_eq!((reply.status, reply.header("X-Cache")), (504, Some("MISS")));
+    assert!(reply.body.starts_with("error: no result within 1 s, "));
+    let pid = std::fs::read_to_string(server.directory.join("sm.pid")).unwrap();
+    let alive = Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive);
+    drop(server);
+    let server = Server::start(&[("TET_WEB_WAIT", "1")]);
+    let first = server.get("/sm?expr=longer");
+    assert_eq!((first.status, first.header("X-Cache")), (202, Some("MISS")));
+    assert!(
+        first.body.contains("\"running\":true")
+            && first.body.contains("\"command\":\"symbolic-math longer\"")
+    );
+    let page = server.get("/sm?format=html&expr=longer&digits=&mode=both&domain=complex");
+    for part in [
+        "<h2 id=\"sm-title\">Still calculating</h2>",
+        "<section id=\"sm-result\" data-running=\"5\">",
+        "<noscript><meta http-equiv=\"refresh\" content=\"5; url=/sm?format=html&amp;expr=longer&amp;digits=&amp;mode=both&amp;domain=complex&amp;again=1\"></noscript>",
+        "<p id=\"sm-again\"><a href=\"/sm?format=html&amp;expr=longer&amp;digits=&amp;mode=both&amp;domain=complex&amp;again=1\">Ask again now</a></p>",
+    ] {
+        assert!(page.body.contains(part), "{part}\n{}", page.body);
+    }
+    let done = server.until("/sm?expr=longer&format=text", |reply| reply.status == 200);
+    assert_eq!(done.body, "options: \ndone\n");
+    assert_eq!(sm_calls(&server), [""]);
+    // A run that the system stopped, and one that prints without end.
+    let crashed = server.get("/sm?expr=crash");
+    assert_eq!(crashed.status, 500);
+    assert!(
+        crashed
+            .body
+            .contains("symbolic-math was stopped by the system"),
+        "{}",
+        crashed.body
+    );
+    let big = server.get("/sm?expr=big&format=text");
+    assert_eq!(big.status, 200);
+    assert!(
+        big.body.len() < 4_300_000
+            && big.body.ends_with(
+                "\nnote: the output is longer than the 4 MiB that this server returns\n"
+            )
+    );
+}
+
+#[test]
+fn without_symbolic_math_the_page_says_so() {
+    let directory = fixture_directory();
+    let mut command = command(&directory, &[]);
+    command.env_remove("TET_WEB_SM").env("PATH", &directory);
+    let mut child = command.spawn().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let first = lines.next().expect("the server printed nothing").unwrap();
+    assert!(first.contains(" symbolic-math=none "), "{first}");
+    let address = first
+        .split("listening on ")
+        .nth(1)
+        .and_then(|rest| rest.split(": ").next())
+        .unwrap()
+        .to_string();
+    let server = Server {
+        directory,
+        child,
+        address,
+        log: Arc::new(Mutex::new(vec![first])),
+    };
+    let reply = server.get("/sm?expr=1");
+    assert_eq!(reply.status, 503);
+    assert!(reply
+        .body
+        .contains("symbolic-math is not installed on this server"));
+    let page = server.get("/sm?format=html&expr=1");
+    assert!(page.body.contains(
+        "<p id=\"sm-error\" class=\"error\">symbolic-math is not installed on this server (HTTP 503)</p>"
+    ));
+    assert_eq!(server.get("/sm/help").status, 503);
+    // tet works as ever.
+    assert_eq!(
+        server.get("/?func=tet&base=2&height=3&format=text").body,
+        "tet|20|2 3\nserial\n"
+    );
 }

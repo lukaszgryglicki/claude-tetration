@@ -4,10 +4,27 @@ body {
   font: 16px/1.5 system-ui, sans-serif;
 }
 main {
-  max-width: 46rem;
+  max-width: 100rem;
   margin: 0 auto;
-  padding: 1rem;
+  padding: 0.75rem 1rem;
 }
+/* The two programs side by side; one below the other on a narrow screen. */
+.tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.5rem;
+  align-items: start;
+}
+.tool {
+  min-width: 0;
+  padding: 0 1rem 0.5rem;
+  border: 1px solid #8884;
+  border-radius: 0.5rem;
+}
+@media (max-width: 62rem) {
+  .tools { grid-template-columns: minmax(0, 1fr); }
+}
+main.help { max-width: 72rem; }
 h1 { font-size: 1.6rem; margin: 0.5rem 0 1rem; }
 h1 small { font-size: 1rem; font-weight: normal; opacity: 0.75; }
 h2 { font-size: 1.15rem; margin: 0 0 0.5rem; }
@@ -31,6 +48,19 @@ input[type="text"], input[type="number"] {
   color: inherit;
 }
 input[type="text"] { flex: 1 1 14rem; min-width: 0; }
+.stack { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.6rem; }
+textarea {
+  font: inherit;
+  font-family: ui-monospace, monospace;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid #8889;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
 input[type="number"] { width: 7rem; }
 button {
   font: inherit;
@@ -42,14 +72,40 @@ button {
   cursor: pointer;
 }
 button:disabled { opacity: 0.6; cursor: progress; }
-#status { margin-left: 0.8rem; opacity: 0.8; }
-#result {
+#status, #sm-status { margin-left: 0.8rem; opacity: 0.8; }
+#result, #sm-result {
   margin: 1.25rem 0;
   padding: 0.75rem 1rem;
   border: 1px solid #8886;
   border-radius: 0.4rem;
 }
-#result:empty { display: none; }
+#result:empty, #sm-result:empty { display: none; }
+pre {
+  margin: 0 0 0.75rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.95rem;
+  line-height: 1.25;
+  overflow-x: auto;
+  white-space: pre;
+}
+/* A long number is wrapped; a chart of text is narrower than the column. */
+#sm-output {
+  max-height: 44rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+main.help pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.files { margin: 0 0 0.75rem; padding-left: 1.2rem; }
+.files li { margin-bottom: 0.6rem; }
+.picture {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin-top: 0.4rem;
+  border: 1px solid #8886;
+}
+#sm-examples a { white-space: nowrap; }
 #again { margin: 0 0 0.6rem; }
 dl { margin: 0; }
 dt { font-size: 0.85rem; opacity: 0.75; }

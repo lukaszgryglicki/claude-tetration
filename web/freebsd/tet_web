@@ -16,6 +16,9 @@
 # tet_web_runas (user):       the user the server and tet run as (tetweb)
 # tet_web_server (path):      the server (/usr/local/bin/tet-web)
 # tet_web_tet (path):         the tet binary (/usr/local/bin/tet)
+# tet_web_sm (path):          the symbolic-math binary, the second program
+#                             of the page; without the file the page has
+#                             tet alone (/usr/local/bin/symbolic-math)
 # tet_web_listen (address):   where the server listens; a reverse proxy
 #                             faces the network (127.0.0.1:8080)
 # tet_web_config (path):      the file with the settings that can change
@@ -42,6 +45,7 @@ load_rc_config $name
 : ${tet_web_runas:="tetweb"}
 : ${tet_web_server:="/usr/local/bin/tet-web"}
 : ${tet_web_tet:="/usr/local/bin/tet"}
+: ${tet_web_sm:="/usr/local/bin/symbolic-math"}
 : ${tet_web_listen:="127.0.0.1:8080"}
 : ${tet_web_config:="/usr/local/etc/tet-web.conf"}
 : ${tet_web_cache_mb:="1024"}
@@ -51,6 +55,9 @@ load_rc_config $name
 tet_web_env="TET_WEB_LISTEN=${tet_web_listen} TET_WEB_TET=${tet_web_tet} \
 TET_WEB_CONFIG=${tet_web_config} TET_WEB_CACHE_MB=${tet_web_cache_mb} \
 TET_WEB_REVISION=${tet_web_revision}"
+if [ -x "${tet_web_sm}" ]; then
+	tet_web_env="${tet_web_env} TET_WEB_SM=${tet_web_sm}"
+fi
 
 # daemon(8) keeps the server running and writes its log; the pid file is
 # the one of daemon, which hands a stop on to the server. -f takes the

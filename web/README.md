@@ -5,6 +5,11 @@
 server runs `tet` with them and returns what it printed. The numerical crate
 is not linked and not changed: every computation is one `tet` process.
 
+The same page and the same server have a second program next to `tet`:
+[symbolic-math](https://github.com/lukaszgryglicki/symbolic-math), a computer
+algebra system that uses `tet` for its tetrations. Its part of the page and
+its API are at `/sm` ([symbolic-math](#symbolic-math)).
+
 A public instance runs at <https://hyp4.duckdns.org/>, over IPv4 and IPv6.
 It speaks HTTPS only: `http://hyp4.duckdns.org` and the bare address of the
 machine answer with nothing but a redirect to `https://hyp4.duckdns.org`.
@@ -21,7 +26,8 @@ web/
 ```
 
 The parts of this file: [Examples](#examples), [The page](#the-page),
-[The API](#the-api), [Calculations that take longer](#calculations-that-take-longer),
+[The API](#the-api), [symbolic-math](#symbolic-math),
+[Calculations that take longer](#calculations-that-take-longer),
 [The cache](#the-cache), [Settings](#settings), [The log](#the-log),
 [Running it](#running-it), [Installing on FreeBSD](#installing-on-freebsd),
 [Administration](#administration).
@@ -217,6 +223,96 @@ of the server as JSON, `/status` the same as text, `/healthz` answers `ok`.
 `/cache` lists what the cache holds, for the machine of the server alone
 ([The cache](#the-cache)).
 
+## symbolic-math
+
+The right half of the page (below `tet` on a narrow screen) runs
+`symbolic-math`: a field for its inputs, one a line, the number of digits,
+the choice of what a result shows (the exact form and its numeric value, the
+numeric value only, the exact form only) and of the numbers (complex, real
+only, quaternions), and the button `Calculate`. An input is what follows
+`symbolic-math` on its command line: an expression to simplify, an equation
+to solve, a command. The inputs of one run share their definitions. Below
+the form are examples, each a link that runs it, and the result: what the
+program printed, the files that it wrote, the command to run by hand and the
+address of the same request to the API. Like the form of `tet` it needs no
+JavaScript and works in `links` and `lynx`: the form is sent as it is
+(`GET /sm?format=html&expr=...`), and a run that takes longer is asked for
+again by the page itself.
+
+```console
+$ curl 'https://hyp4.duckdns.org/sm?expr=x^2-5x%2B6=0&format=text'
+x = 2
+x = 3
+$ curl 'https://hyp4.duckdns.org/sm?expr=integrate(x^2*e^(-x),x,0,inf)%0A2^^0.5&format=text'
+2
+1.4587818160364217006839716610386
+$ curl 'https://hyp4.duckdns.org/sm?expr=N(pi)&digits=50&mode=numeric'
+{"expr":"N(pi)","digits":50,"mode":"numeric","domain":"complex","output":"3.1415926535897932384626433832795028841971693993751\n","files":[],"ok":true,"id":"...","seconds":0.004,"cached":false,"command":"symbolic-math -d 50 -n 'N(pi)'"}
+```
+
+`GET /sm?expr=...` takes these parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `expr` | the inputs, one a line (`%0A` between them), 8000 bytes at most; a line that begins with `#` is a remark |
+| `digits` | significant digits, 1 to 1000000; without it 32, or as many as a number of the inputs has |
+| `mode` | `both` (the default): the exact form and its numeric value; `numeric`; `exact` |
+| `domain` | `complex` (the default), `real` or `quaternion` |
+| `format` | `json` (the default), `text`: the output as the program prints it, or `html`: the page with the result |
+
+The JSON reply has `output`, the text that the program printed, with the
+errors of single inputs among the results where they happened; `ok`, false
+when an input ended with an error (the status is 422 then); `files`, the
+files that the run wrote, each with its `name`, its size in `bytes` and its
+`url`; `id`, the name of the run in those addresses; `seconds`, `cached` and
+`command`. The statuses 202, 400, 500, 503 and 504 mean what they mean for
+`tet`.
+
+**Pictures and other files.** `save_png("plot.png", plot(sin(x)/x, x, -20, 20), width = 900)`,
+`save_jxl("walk.jxl", walk(pi, 10, 10000))`, `imwrite`, `writematrix` and
+`writetable` write files. The page shows a PNG picture and has a link to
+download every file; a JPEG XL picture is only downloaded, because few
+browsers show the format.
+
+```console
+$ curl -g 'https://hyp4.duckdns.org/sm?expr=save_png("p.png",plot(sin(x),x,0,7),width=300)'
+{...,"output":"saved p.png: PNG, 300 x 225 pixels, 8 bits, RGB, level 9, 4287 bytes\n","files":[{"name":"p.png","bytes":4287,"url":"/sm/file/0f6f.../p.png"}],"ok":true,"id":"0f6f...",...}
+$ curl -O 'https://hyp4.duckdns.org/sm/file/0f6f.../p.png'
+```
+
+| Path | What it is |
+|---|---|
+| `/sm` | the page; with `expr` the API |
+| `/sm/file/ID/NAME` | a file of the run `ID`; with `?download=1` as a download |
+| `/sm/output/ID` | what the run printed, as a text file to download |
+| `/sm/help` | the whole of `symbolic-math --help`, an example of every kind of operation, as a page; `/sm/help.txt` as text |
+| `/sm/functions`, `/sm/constants`, `/sm/units` | the lists that the program prints with these options |
+
+A file is there as long as the cache keeps its run; after that its address
+answers 404, and the same request computes it again.
+
+**How a run is made.** Every run is one `symbolic-math` process, started in
+a new directory of its own under the temporary directory of the system,
+which is removed when the run has ended; the files that it left there are
+kept with the output, in the same cache in memory as the results of `tet`
+(32 files and 48 MiB of one run at most, 4 MiB of output). The process gets
+its inputs on its standard input and an environment of its own:
+`SYMBOLIC_MATH_SANDBOX`, with which the program reads and writes nothing
+but plain file names of its directory, `PATH` with the directory of `tet`
+first, `HOME` and `TMPDIR`. It shares everything else with the calculations
+of `tet`: the slots (`TET_WEB_JOBS`), the time limit (`TET_WEB_TIMEOUT`,
+which ends the process and every `tet` that it started), the time a request
+waits, the memory limit and the niceness. No file of the system can be
+larger than 64 MiB for it.
+
+`TET_WEB_SM` names the program (`symbolic-math` on the search path unless
+set). A server that does not find it serves `tet` alone and says so in the
+part of the page; a `TET_WEB_SM` that is set and cannot be run ends the
+server at its start. `web/deploy.sh` copies a static binary to the machine
+(`SYMBOLIC_MATH=path`, or the one that `make static` built in a checkout of
+symbolic-math next to this repository), and `web/freebsd/install.sh` puts
+it at `/usr/local/bin/symbolic-math`.
+
 ## Calculations that take longer
 
 A calculation runs in the server, not in the request that started it: it
@@ -295,13 +391,14 @@ proxy that does not must not pass `/cache` on.
 
 ## Settings
 
-`tet-web` takes no arguments. Five settings are environment variables, read
+`tet-web` takes no arguments. Six settings are environment variables, read
 when it starts:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `TET_WEB_LISTEN` | `127.0.0.1:8080` | address to listen on |
 | `TET_WEB_TET` | `tet` | the `tet` program: a path, or a name on `PATH` |
+| `TET_WEB_SM` | `symbolic-math` | the `symbolic-math` program; without it on the machine the page has `tet` alone |
 | `TET_WEB_CACHE_MB` | `1024` | the most memory for kept results, in MiB |
 | `TET_WEB_REVISION` | none | text that the page and `/stats` show as the version |
 | `TET_WEB_CONFIG` | none | the settings file |
@@ -396,6 +493,8 @@ What is installed:
 
 * `/usr/local/bin/tet`, `/usr/local/bin/tet-web` and
   `/usr/local/bin/tet-webctl` (`web/ctl.sh`);
+* `/usr/local/bin/symbolic-math`, when `web/deploy.sh` had a static binary
+  of it to copy ([symbolic-math](#symbolic-math));
 * the service `tet_web` (`/usr/local/etc/rc.d/tet_web`): the server as the
   user `tetweb` on `127.0.0.1:8080`, kept running by daemon(8), its log in
   `/var/log/tet-web.log` (rotated by newsyslog: ten files of 5 MB);

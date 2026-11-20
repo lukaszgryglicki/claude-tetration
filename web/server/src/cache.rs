@@ -112,6 +112,10 @@ pub struct Cache {
 fn cost(key: &str, outcome: &Outcome) -> usize {
     let texts = match outcome {
         Outcome::Value { re, im, .. } => re.len() + im.len(),
+        Outcome::Output { text, files, .. } => {
+            let kept = |file: &crate::api::Written| file.name.len() + file.bytes.len() + 64;
+            text.len() + files.iter().map(kept).sum::<usize>()
+        }
         Outcome::Refused { message, .. } | Outcome::Failed { message } => message.len(),
         Outcome::Timeout { .. } | Outcome::Busy => 0,
     };

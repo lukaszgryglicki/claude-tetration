@@ -15,6 +15,10 @@
 #                      file is there (it is not in the repository, and is
 #                      not copied); without both the installed one stays
 # TET_WEB_REMOTE_DIR   where the tree is copied to, in the home there (tet-web/src)
+# SYMBOLIC_MATH        a static symbolic-math binary for that machine, the
+#                      second program of the page; without it the one that
+#                      `make static` built in ../symbolic-math, if it is
+#                      there; without both the installed one stays
 #
 # It needs ssh access to a user who may run sudo without a password there,
 # and cargo, rsync and a C toolchain on that machine.
@@ -42,6 +46,22 @@ ssh "$host" "mkdir -p '$remote'"
     git ls-files -z
     git ls-files -z --others --exclude-standard
 } | rsync -a --from0 --files-from=- ./ "$host:$remote/"
+
+# The second program of the page is built here, not there: its static binary
+# is copied next to the tree, where install.sh finds it.
+sm=${SYMBOLIC_MATH:-}
+if [ -z "$sm" ]; then
+    for found in ../symbolic-math/target/*-freebsd/release/symbolic-math; do
+        if [ -x "$found" ]; then sm=$found; fi
+    done
+fi
+if [ -n "$sm" ]; then
+    [ -x "$sm" ] || { echo "deploy.sh: $sm is no program" >&2; exit 1; }
+    echo "== copying $sm to $host:$remote/symbolic-math.upload"
+    rsync -a "$sm" "$host:$remote/symbolic-math.upload"
+else
+    ssh "$host" "rm -f '$remote/symbolic-math.upload'"
+fi
 
 echo "== building tet and tet-web there"
 ssh "$host" "cd '$remote' && nice -n 10 cargo build --release --locked --bin tet &&
@@ -87,6 +107,33 @@ check "/?func=ssrt&value=16&height=3&format=text" "2.0000000000000000000
 0"
 check "/?func=tet&base=1.5+0.5i&height=1+0.7i&format=text" "1.1766384980936338172
 6.0310294707303037947e-1"
+# The second program, where it is installed.
+if [ "$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "$url/sm/help.txt")" = 200 ]; then
+    check "/sm?expr=10*x-(2%2B3)*x&format=text" "5x"
+    check "/sm?expr=x^2-5x%2B6=0%0A2^^3&format=text" "x = 2
+x = 3
+16"
+    check "/sm?expr=N(pi,40)&format=text" "3.141592653589793238462643383279502884197"
+    check "/sm?expr=1/3%2B1/6&digits=40&mode=numeric&format=text" "0.5"
+    form="/sm?format=html&expr=i%5E2&digits=&mode=both&domain=complex"
+    if curl -sS --max-time 60 "$url$form" | grep -q '<pre id="sm-output">-1'; then
+        echo "ok   $form is the page with the result"
+    else
+        echo "FAIL $form is not the page with the result"
+        failed=yes
+    fi
+    # A picture: the run names it, and it is a PNG file at its address.
+    picture=$(curl -sS --max-time 120 "$url/sm?expr=save_png(%22p.png%22,plot(sin(x),x,0,7),width=300)" |
+        sed -n 's|.*"url":"\(/sm/file/[0-9a-f]*/p.png\)".*|\1|p')
+    if [ -n "$picture" ] && curl -sS --max-time 60 "$url$picture" | head -c 4 | tail -c 3 | grep -q PNG; then
+        echo "ok   $picture is a PNG picture"
+    else
+        echo "FAIL the picture of a run is not served ($picture)"
+        failed=yes
+    fi
+else
+    echo "note: symbolic-math is not installed there: /sm is not checked"
+fi
 page=$(curl -sS --max-time 60 "$url/" | head -1)
 if [ "$page" = "<!doctype html>" ]; then
     echo "ok   / is the page"

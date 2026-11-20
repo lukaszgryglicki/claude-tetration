@@ -3,14 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-{{refresh}}<title>tet: complex tetration to any precision</title>
-<meta name="description" content="Arbitrary-precision complex tetration b^^h, its super-logarithm and its super-root.">
+{{refresh}}<title>tet and symbolic-math: complex tetration and computer algebra to any precision</title>
+<meta name="description" content="Arbitrary-precision complex tetration b^^h, its super-logarithm and its super-root; and symbolic-math, a computer algebra system: equations, calculus, matrices, numbers in any base, charts and pictures.">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="style.css">
 <script src="app.js" defer></script>
 </head>
 <body>
 <main>
+<div class="tools">
+<section class="tool" id="tet">
 <h1>tet <small>complex tetration to any precision</small></h1>
 
 <form id="form" method="get" action="/" novalidate autocomplete="off">
@@ -79,6 +81,83 @@
     Source: <a href="https://github.com/lukaszgryglicki/claude-tetration">claude-tetration</a>
     (AGPL-3.0){{revision}}.</p>
 </footer>
+</section>
+
+<section class="tool" id="sm">
+<h1>symbolic-math <small>computer algebra to any precision</small></h1>
+
+<form id="sm-form" method="get" action="/sm" novalidate autocomplete="off">
+<input type="hidden" name="format" value="html">
+<div class="stack">
+  <label for="expr">Inputs, one a line: expressions to simplify, equations to solve, commands</label>
+  <textarea id="expr" name="expr" rows="7" spellcheck="false" autocapitalize="off">{{sm.expr}}</textarea>
+</div>
+<div class="row">
+  <label for="digits">Digits (32 when empty)</label>
+  <input id="digits" name="digits" type="number" min="1" step="1" value="{{sm.digits}}" inputmode="numeric">
+</div>
+
+<fieldset>
+  <legend>Results</legend>
+  <div class="choice"><label><input type="radio" name="mode" value="both"{{sm.mode.both}}>
+    the exact form and its numeric value</label></div>
+  <div class="choice"><label><input type="radio" name="mode" value="numeric"{{sm.mode.numeric}}>
+    numeric values only</label></div>
+  <div class="choice"><label><input type="radio" name="mode" value="exact"{{sm.mode.exact}}>
+    exact forms only</label></div>
+</fieldset>
+
+<fieldset>
+  <legend>Numbers</legend>
+  <div class="choice"><label><input type="radio" name="domain" value="complex"{{sm.domain.complex}}>
+    complex</label></div>
+  <div class="choice"><label><input type="radio" name="domain" value="real"{{sm.domain.real}}>
+    real only</label></div>
+  <div class="choice"><label><input type="radio" name="domain" value="quaternion"{{sm.domain.quaternion}}>
+    quaternions</label></div>
+  <p class="hint">An input is what follows <code>symbolic-math</code> on its command line:
+    <code>x^2 - 5x + 6 = 0</code>, <code>integrate(x^2*e^(-x), x, 0, inf)</code>,
+    <code>a := 3; a^2</code>. The inputs of a run share their definitions; a line that begins with
+    <code>#</code> is a remark. <code>save_png("name.png", drawing, width = 900)</code> and
+    <code>save_jxl("name.jxl", drawing)</code> make pictures to look at and to download.
+    Where scripts run, Ctrl+Enter in the field calculates.
+    <a href="sm/help">Every kind of operation with examples</a>.</p>
+</fieldset>
+
+<button id="sm-calculate" type="submit">Calculate</button>
+<span id="sm-status" role="status"></span>
+</form>
+
+<p class="hint" id="sm-examples"><b>Examples</b> (a click runs one):
+{{sm.examples}}</p>
+
+<section id="sm-result"{{sm.running}}>{{sm.result}}</section>
+
+<footer>
+  <p><b>Documentation</b>:
+    <a href="sm/help">the full help of <code>symbolic-math --help</code></a>, an example of every
+    kind of operation; the lists of its <a href="sm/functions">functions</a>,
+    <a href="sm/constants">constants</a> and <a href="sm/units">units</a>;
+    <a href="https://github.com/lukaszgryglicki/symbolic-math">the repository on GitHub</a> with
+    <a href="https://github.com/lukaszgryglicki/symbolic-math#readme">its README</a>.</p>
+  <p><b>What it does</b>: simplifies, solves equations, systems and inequalities, differentiates,
+    integrates, takes limits, sums and series, works with matrices, polynomials, statistics, special
+    functions, transforms, numbers in any base, units, tetration (through <code>tet</code>) and
+    fractional iterates of functions; it draws charts as text and as PNG and JPEG XL pictures.</p>
+  <p><b>API</b>: <code>/sm?expr=x^2-5x%2B6=0</code>, <code>/sm?expr=N(pi)&amp;digits=100&amp;mode=numeric</code>,
+    with <code>mode</code> (<code>both</code>, <code>numeric</code>, <code>exact</code>) and
+    <code>domain</code> (<code>complex</code>, <code>real</code>, <code>quaternion</code>). Several
+    inputs are lines of <code>expr</code>, with <code>%0A</code> between them. The reply is JSON with
+    the output and the files of the run; <code>&amp;format=text</code> gives the output as the program
+    prints it. In such a URL a <code>+</code> is a plus sign (<code>%2B</code> is one as well) and a
+    space is <code>%20</code>.</p>
+  <p>Every run is a <code>symbolic-math</code> process on this server, in a directory of its own that
+    is removed afterwards; results are kept in memory until the server restarts, with the same limits
+    and the same slots as the calculations of <code>tet</code>.
+    Source: <a href="https://github.com/lukaszgryglicki/symbolic-math">symbolic-math</a> (AGPL-3.0).</p>
+</footer>
+</section>
+</div>
 </main>
 </body>
 </html>

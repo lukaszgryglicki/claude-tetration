@@ -41,8 +41,13 @@ const ICON: &str = include_str!("../../static/favicon.svg");
 /// The policy of the page: its own script and style, requests and its form
 /// to its own origin, nothing else.
 const POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
-                      connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; \
-                      frame-ancestors 'none'";
+                      connect-src 'self'; img-src 'self'; frame-src 'self'; base-uri 'none'; \
+                      form-action 'self'; frame-ancestors 'none'";
+
+/// The policy of the page of all examples, which the page shows in a
+/// frame: its style and nothing else, in a frame of this origin alone.
+const FRAMED: &str = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; \
+                      form-action 'none'; frame-ancestors 'self'";
 
 /// The connections served at a time; each is one thread.
 const CONNECTIONS: usize = 256;
@@ -82,6 +87,8 @@ Usage: tet-web
                           page with the result
   GET /sm/help            the help of symbolic-math as a page; /sm/help.txt,
                           /sm/functions, /sm/constants, /sm/units as text
+  GET /sm/examples        every line of examples of that help as a link
+                          that runs it on the page
   GET /sm/file/ID/NAME    a file that a run wrote; /sm/output/ID its output
   GET /stats              counters of the server, as JSON
   GET /status             the same for people
@@ -123,6 +130,10 @@ struct Server {
     runner: Runner,
     /// `symbolic-math`, where it is installed.
     sm: Option<sm::Runner>,
+    /// The page of all the examples of its help, and their lines and
+    /// headings.
+    examples: String,
+    listed: (usize, usize),
     slots: Slots,
     cache: Arc<Cache>,
     settings: Arc<Shared>,
@@ -185,9 +196,18 @@ impl Server {
             Err(reason) if named => return Err(reason),
             Err(_) => None,
         };
+        let groups = sm
+            .as_ref()
+            .map(|sm| sm::examples(&sm.help))
+            .unwrap_or_default();
         let server = Server {
             runner,
             sm,
+            examples: page::examples_page(&groups),
+            listed: (
+                groups.iter().map(|group| group.examples.len()).sum(),
+                groups.len(),
+            ),
             slots: Slots::default(),
             cache: Arc::new(Cache::new(cache)),
             settings,
@@ -496,6 +516,10 @@ impl Server {
             .with("Cache-Control", "no-cache")
             .with("Content-Security-Policy", POLICY)
             .with("Referrer-Policy", "no-referrer"),
+            "/sm/examples" => Response::new(200, "text/html; charset=utf-8", self.examples.clone())
+                .with("Cache-Control", "no-cache")
+                .with("Content-Security-Policy", FRAMED)
+                .with("Referrer-Policy", "no-referrer"),
             "/sm/help.txt" => Response::text(200, sm.help.clone()),
             "/sm/functions" => Response::text(200, sm.functions.clone()),
             "/sm/constants" => Response::text(200, sm.constants.clone()),
@@ -562,6 +586,7 @@ impl Server {
             limit: now.timeout.as_secs(),
             jobs: now.jobs,
             revision: &self.revision,
+            examples: self.listed,
         };
         let body = page::rendered_both(&site, form, shown, asked, replied);
         Response::new(200, "text/html; charset=utf-8", body)
@@ -679,9 +704,8 @@ impl Server {
             "/" if asks => return self.computed(query, hint),
             "/sm" if runs => return self.ran(query, hint),
             "/sm" => self.page(&Form::from_query(&[]), &Shown::Nothing),
-            "/sm/help" | "/sm/help.txt" | "/sm/functions" | "/sm/constants" | "/sm/units" => {
-                self.told(&request.path)
-            }
+            "/sm/help" | "/sm/help.txt" | "/sm/functions" | "/sm/constants" | "/sm/units"
+            | "/sm/examples" => self.told(&request.path),
             path if path.starts_with("/sm/file/") || path.starts_with("/sm/output/") => {
                 self.written(path, query)
             }

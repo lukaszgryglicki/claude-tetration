@@ -106,6 +106,23 @@ main.help pre { white-space: pre-wrap; overflow-wrap: anywhere; }
   border: 1px solid #8886;
 }
 #sm-examples a { white-space: nowrap; }
+/* All the examples of the help: closed a line, open a box that scrolls. */
+#sm-all { margin: 0.6rem 0 0; font-size: 0.88rem; }
+#sm-all summary, main.examples summary { cursor: pointer; }
+#sm-all iframe {
+  display: block;
+  width: 100%;
+  height: 20rem;
+  margin-top: 0.4rem;
+  border: 1px solid #8886;
+  border-radius: 0.4rem;
+}
+main.examples { padding: 0.25rem 0.75rem; font-size: 0.88rem; }
+main.examples .hint { margin: 0 0 0.4rem; }
+main.examples ul { list-style: none; margin: 0.2rem 0 0.6rem; padding-left: 1rem; }
+main.examples li { margin: 0.2rem 0; overflow-wrap: anywhere; }
+main.examples a.example { font-family: ui-monospace, monospace; text-decoration: none; }
+main.examples li small { opacity: 0.75; }
 #again { margin: 0 0 0.6rem; }
 dl { margin: 0; }
 dt { font-size: 0.85rem; opacity: 0.75; }

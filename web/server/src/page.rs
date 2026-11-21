@@ -23,6 +23,9 @@ pub struct Site<'a> {
     /// Calculations at a time.
     pub jobs: usize,
     pub revision: &'a str,
+    /// The examples of the help of `symbolic-math`: their lines and their
+    /// headings.
+    pub examples: (usize, usize),
 }
 
 /// What the form shows: the choice of a function and of the kind of its
@@ -172,18 +175,36 @@ pub struct Asked {
 const FIRST: &str = "x^2 - 5x + 6 = 0\nintegrate(x^2*e^(-x), x, 0, inf)\nN(pi, 50)";
 
 /// What the page offers to run at a click: a name and the inputs.
-const EXAMPLES: [(&str, &str); 29] = [
+const EXAMPLES: [(&str, &str); 56] = [
     ("simplify", "10*x - (2+3)*x\nsin(x)^2 + cos(x)^2\n(x^2 - 1)/(x - 1)"),
     ("solve", "x^2 - 5x + 6 = 0\nsin(x) = 0\nx^5 + x = i"),
     ("a system", "x + y = 3, x - y = 1\nsolve([x^2 + y^2 = 25, x - y = 1], [x, y])"),
+    ("inequalities", "x^2 - 5x + 6 < 0\nabs(x - 1) <= 2"),
     ("derivative", "diff(x^3*sin(x), x)\ndiff(e^(x*y), x, y)"),
     ("integral", "integrate(x^2*e^(-x), x, 0, inf)\nintegrate(1/(1 + x^2), x)"),
     ("limit and series", "limit(sin(x)/x, x, 0)\nseries(e^x, x, 0, 6)\nsum(1/k^2, k, 1, inf)"),
     ("differential equation", "dsolve(y'' + y = 0, y, x)"),
+    (
+        "transforms",
+        "laplace(t*e^(-t), t, s)\nfourier(e^(-x^2), x, w)\nztrans(n, n, z)",
+    ),
+    (
+        "special functions",
+        "gamma(1/2)\nzeta(2)\nbesselj(0, 1.5)\nerf(1/2)",
+    ),
     ("matrices", "A := [[2, 1], [1, 3]]\ndet(A)\ninv(A)\neig(A)"),
+    ("quaternions", "domain(quaternion)\ni*j\nx^2 = -1"),
     ("1000 digits of pi", "N(pi, 1000)"),
     ("number theory", "factor(2^64 + 1)\nisprime(2^127 - 1)\ngcd(1071, 462)"),
     ("tetration", "2^^0.5\nslog(2, 65536)\n2^^x = 65536"),
+    (
+        "tetration as a chart",
+        "plot(sqrt(2)^^x, x, -1.5, 4)\nplot([slog(sqrt(2), x), ssrt(x, 2)], x, 1.1, 1.9)",
+    ),
+    (
+        "tetration in colours (PNG)",
+        "save_png(\"tetration.png\", complexplot(sqrt(2)^^z, z, -4 - 2i, 4 + 2i), width = 160)",
+    ),
     (
         "half iterate",
         "iterate(2x + 1, x, 1/2)\niterate(x^2, x, 1/2)\niterate(e^x - 1, x, 1/2, 1)",
@@ -191,6 +212,18 @@ const EXAMPLES: [(&str, &str); 29] = [
     ("bases", "base_conv(pi, 16)\nbase_conv(1/7, 10, 3)\n0.(3) + 0.1(6)"),
     ("statistics", "mean([2, 4, 4, 4, 5, 5, 7, 9])\nstd([2, 4, 4, 4, 5, 5, 7, 9])"),
     ("units", "convert(100 km/h, m/s)"),
+    (
+        "systems of control",
+        "s := tf(\"s\")\ng := 1/(s^2 + 3s + 2)\nstep(g)\nmargin(4/(s + 1)^3)\nhsvd(g)",
+    ),
+    (
+        "filters",
+        "butter(2, 0.3)\nfirpm(6, [0, 0.4, 0.6, 1], [1, 1, 0, 0])",
+    ),
+    (
+        "the earth",
+        "distance(52.2297, 21.0122, 40.7128, -74.006, \"wgs84\")",
+    ),
     ("a chart as text", "plot(sin(x)/x, x, -20, 20)"),
     ("a chart as PNG", "save_png(\"plot.png\", plot(sin(x)/x, x, -20, 20), width = 900, height = 500)"),
     ("the walk of pi (PNG)", "save_png(\"walk.png\", walk(pi, 10, 20000), width = 900)"),
@@ -215,6 +248,14 @@ const EXAMPLES: [(&str, &str); 29] = [
         "save_png_fast(\"body4d.png\", plot4d(z^2), fill = below, palette = magma)",
     ),
     (
+        "a body between Re f(z) and Im f(z) (moving PNG)",
+        "save_png_fast(\"between.png\", plot4d(sin(z), z, pi), fill = between)",
+    ),
+    (
+        "the same body seen from outside (PNG)",
+        "save_png(\"between_view.png\", view4d(sin(z), z, pi), fill = between, width = 900)",
+    ),
+    (
         "the 4D shape seen from outside (PNG)",
         "save_png(\"view.png\", view4d(sin(z)), width = 900)",
     ),
@@ -225,6 +266,64 @@ const EXAMPLES: [(&str, &str); 29] = [
     (
         "the eye goes around a body (moving PNG)",
         "save_png_fast(\"around.png\", view4d((z^3 - 1)/(z^3 + 1), z, 2), fill = below, palette = magma, frames = 24)",
+    ),
+    (
+        "several inputs and outputs",
+        "H := [[1/(s + 1), 2/(s + 2)], [0, 1/(s + 3)]]\npole(H)\ntzero(H)\nstep(H)",
+    ),
+    (
+        "a delay in a loop",
+        "G := e^(-s)/(s + 1)\nstep(feedback(G, 1), [0, 1, 2, 3])\nmargin(4*e^(-s/4)/(s + 1))",
+    ),
+    (
+        "a diagram of blocks",
+        "r := sim([[\"u\", \"step\", 0], [\"e\", \"sum\", \"u\", \"-y\"], [\"v\", \"gain\", 2, \"e\"], [\"y\", \"tf\", [1], [1, 1], \"v\"]], 2, \"points\", 5)\ngetfield(r, \"y\")",
+    ),
+    ("the geoid", "egm96geoid(52, 21)\ngeoidheight(27.988, 86.925)"),
+    (
+        "solids of four dimensions",
+        "volume4d(solid4d(\"tiger\", 2, 3, 1/2))\nlength(edges4d(solid4d(\"120-cell\")))\ndensity4d(solid4d(\"grand 600-cell\"), [0.001, 0.002, -0.001, 0.0005])",
+    ),
+    (
+        "a tesseract turning in 4D (moving PNG)",
+        "save_png(\"tesseract.png\", wire4d(solid4d(\"tesseract\"), \"xw\", \"yz\"), frames = 24, width = 400)",
+    ),
+    (
+        "the 600-cell as a wire frame (PNG)",
+        "save_png(\"cell600.png\", wire4d(solid4d(\"600-cell\")), width = 900)",
+    ),
+    (
+        "a 4D solid as a shape (moving PNG)",
+        "save_png_fast(\"solid.png\", plot4d(rotate4d(solid4d(\"tesseract\"), \"xw\", 30)))",
+    ),
+    (
+        "a star polychoron seen from outside (PNG)",
+        "save_png(\"star.png\", view4d(solid4d(\"great grand stellated 120-cell\")), width = 600, voxels = 128)",
+    ),
+    (
+        "a walk of chance (PNG)",
+        "save_png(\"chance.png\", randomwalk(20000, \"any\", 7), width = 900)",
+    ),
+    (
+        "cell arrays and MAT-files",
+        "c := {1, \"two\", [3, 4]}\ncellfun(length, {[1, 2], [3], []})\nmatwrite(\"v.mat\", \"x\", [[1, 2], [3, 4]], \"c\", c)\nmatread(\"v.mat\")",
+    ),
+    (
+        "pictures as matrices",
+        "bwlabel([[1, 0, 1], [1, 0, 0], [0, 0, 1]])\nimdilate([[0, 0, 0], [0, 1, 0], [0, 0, 0]], strel(\"disk\", 1))\ngraythresh([[0, 0, 255, 255], [0, 10, 250, 255]])",
+    ),
+    ("MATLAB's random numbers", "rng(0)\nrandn(1, 5)\nrng(0)\nrandperm(6)"),
+    (
+        "laws of whole numbers, lists of parameters",
+        "rng(7)\npoissrnd([1, 2, 3])\npoissrnd(1000000)\npoisspdf(2, [1, 2])\nbinocdf(50000, 100000, 1/2)",
+    ),
+    (
+        "a system sampled",
+        "G := tf([1], [1, 2, 5])\nc2d(G, 1/10)\nc2d(G, 1/10, \"matched\")\nc2d(tf([1], [1, a]), 1/10, \"matched\")\nroots([1, a, b])",
+    ),
+    (
+        "a network of windows",
+        "net := dlnetwork([imageinputlayer([4, 4]), convolution2dlayer(2, 2), relulayer(), maxpooling2dlayer(2), flattenlayer(), fullyconnectedlayer(2), softmaxlayer()])\npredict(net, [[1, 0, 0, 1], [0, 1, 1, 0], [0, 1, 1, 0], [1, 0, 0, 1]])",
     ),
 ];
 
@@ -685,6 +784,85 @@ fn examples() -> String {
     format!("{}\n", links.join(",\n"))
 }
 
+/// The address of the page that runs `program`, at its result.
+fn run_address(program: &Program) -> String {
+    let mut address = format!("/sm?format=html&expr={}", in_query(&program.text, false));
+    if let Some(digits) = program.digits {
+        let _ = write!(address, "&digits={digits}");
+    }
+    if program.mode != sm::Mode::Both {
+        let _ = write!(address, "&mode={}", program.mode.name());
+    }
+    if program.domain != sm::Domain::Complex {
+        let _ = write!(address, "&domain={}", program.domain.name());
+    }
+    address.push_str("#sm-result");
+    address
+}
+
+/// All the examples of the help of `symbolic-math` as a page of their own:
+/// under every heading its lines, each a link that runs the line on the
+/// page of the programs. The page of the programs shows it in a frame.
+pub fn examples_page(groups: &[sm::Group]) -> String {
+    let lines: usize = groups.iter().map(|group| group.examples.len()).sum();
+    let mut html = format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>symbolic-math: the examples of its help</title>\n\
+         <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\">\n\
+         <link rel=\"stylesheet\" href=\"/style.css\">\n</head>\n<body>\n<main class=\"examples\">\n\
+         <p class=\"hint\">The {lines} lines of examples of \
+         <a href=\"/sm/help\" target=\"_top\">the help of <code>symbolic-math</code></a> under \
+         their {} headings: a heading opens, and a click on a line runs it on \
+         <a href=\"/sm\" target=\"_top\">the page</a>.</p>\n",
+        groups.len()
+    );
+    for group in groups {
+        let _ = writeln!(
+            html,
+            "<details>\n<summary>{} <small>({})</small></summary>\n<ul>",
+            escaped(&group.title),
+            group.examples.len()
+        );
+        for example in &group.examples {
+            // The line as the help has it: its options, then its inputs.
+            let mut line = example.program.options().join(" ");
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(&example.program.text.replace('\n', "; "));
+            let _ = write!(
+                html,
+                "<li><a class=\"example\" target=\"_top\" href=\"{}\">{}</a>",
+                escaped(&run_address(&example.program)),
+                escaped(&line)
+            );
+            if !example.shows.is_empty() {
+                let _ = write!(html, " <small>{}</small>", escaped(&example.shows));
+            }
+            html.push_str("</li>\n");
+        }
+        html.push_str("</ul>\n</details>\n");
+    }
+    html.push_str("</main>\n</body>\n</html>\n");
+    html
+}
+
+/// The place of all the examples of the help in the page: closed it is a
+/// line, open a box that scrolls. Without examples there is none.
+fn all_examples(site: &Site) -> String {
+    let (lines, headings) = site.examples;
+    if lines == 0 {
+        return String::new();
+    }
+    format!(
+        "<details id=\"sm-all\">\n<summary>All {lines} lines of examples of the help, under \
+         {headings} headings (a click runs a line)</summary>\n\
+         <iframe id=\"sm-all-frame\" src=\"/sm/examples\" loading=\"lazy\" \
+         title=\"All the examples of the help of symbolic-math\"></iframe>\n</details>\n"
+    )
+}
+
 /// A text of `symbolic-math` as a page: its help, or one of its lists.
 pub fn text_page(title: &str, text: &str) -> String {
     format!(
@@ -788,6 +966,7 @@ pub fn rendered_both(
             checked(asked.domain == "quaternion"),
         ),
         ("sm.examples", examples()),
+        ("sm.all", all_examples(site)),
         ("sm.running", marked(answering)),
         ("sm.result", answered),
         ("wait", api::span(site.wait)),
@@ -807,6 +986,7 @@ mod tests {
         limit: 10_800,
         jobs: 4,
         revision: "abc1234",
+        examples: (0, 0),
     };
 
     fn query(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -821,6 +1001,66 @@ mod tests {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect()
+    }
+
+    #[test]
+    fn all_the_examples_of_the_help_are_links_that_run_them() {
+        let run = |text: &str, digits, mode, domain| Program {
+            text: text.to_string(),
+            digits,
+            mode,
+            domain,
+        };
+        let (both, complex) = (sm::Mode::Both, sm::Domain::Complex);
+        let groups = [
+            sm::Group {
+                title: "Sums & <more>".to_string(),
+                examples: vec![
+                    sm::Example {
+                        program: run("1+1\nx^2 = \"4\"", None, both, complex),
+                        shows: "two <inputs>".to_string(),
+                    },
+                    sm::Example {
+                        program: run("pi", Some(50), sm::Mode::Numeric, sm::Domain::Real),
+                        shows: String::new(),
+                    },
+                ],
+            },
+            sm::Group {
+                title: "Quaternions".to_string(),
+                examples: vec![sm::Example {
+                    program: run("i*j", None, sm::Mode::Exact, sm::Domain::Quaternion),
+                    shows: "k".to_string(),
+                }],
+            },
+        ];
+        let page = examples_page(&groups);
+        for part in [
+            "<main class=\"examples\">\n<p class=\"hint\">The 3 lines of examples of ",
+            " under their 2 headings: ",
+            "<details>\n<summary>Sums &amp; &lt;more&gt; <small>(2)</small></summary>\n<ul>\n",
+            "<li><a class=\"example\" target=\"_top\" href=\"/sm?format=html&amp;expr=1%2B1%0Ax%5E2%20%3D%20%224%22#sm-result\">1+1; x^2 = &quot;4&quot;</a> <small>two &lt;inputs&gt;</small></li>\n",
+            "<li><a class=\"example\" target=\"_top\" href=\"/sm?format=html&amp;expr=pi&amp;digits=50&amp;mode=numeric&amp;domain=real#sm-result\">-d 50 -n -r pi</a></li>\n</ul>\n</details>\n",
+            "<summary>Quaternions <small>(1)</small></summary>",
+            "href=\"/sm?format=html&amp;expr=i*j&amp;mode=exact&amp;domain=quaternion#sm-result\">-e -q i*j</a> <small>k</small></li>",
+        ] {
+            assert!(page.contains(part), "{part}\n{page}");
+        }
+        assert!(!page.contains("<script"));
+        // The page of the programs has them in a frame, when there are any.
+        let none = rendered(&SITE, &Form::from_query(&[]), &Shown::Nothing);
+        assert!(!none.contains("sm-all"));
+        let site = Site {
+            examples: (3, 2),
+            ..SITE
+        };
+        let some = rendered(&site, &Form::from_query(&[]), &Shown::Nothing);
+        assert!(some.contains(
+            "</p>\n<details id=\"sm-all\">\n<summary>All 3 lines of examples of the help, under 2 \
+             headings (a click runs a line)</summary>\n<iframe id=\"sm-all-frame\" \
+             src=\"/sm/examples\" loading=\"lazy\" title=\"All the examples of the help of \
+             symbolic-math\"></iframe>\n</details>\n\n<section id=\"sm-result\">"
+        ), "{some}");
     }
 
     #[test]
@@ -850,6 +1090,7 @@ mod tests {
                 "result",
                 "revision",
                 "running",
+                "sm.all",
                 "sm.digits",
                 "sm.domain.complex",
                 "sm.domain.quaternion",

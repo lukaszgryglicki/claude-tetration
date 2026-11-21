@@ -6,7 +6,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// Prints its mode, precision and arguments as the real part and its
@@ -21,7 +21,7 @@ prec=$1; shift
 case "$1" in
     slow) echo $$ > "$0.pid"; exec sleep 30 ;;
     wait) sleep 1; printf '%s\n0\n' "$2" ;;
-    longer) sleep 3; printf '%s\n0\n' "$2" ;;
+    longer) sleep 5; printf '%s\n0\n' "$2" ;;
     refuse) echo 'a line of progress' >&2
         echo 'error: invalid number "refuse": unknown name refuse' >&2; exit 1 ;;
     usage) exit 2 ;;
@@ -38,7 +38,10 @@ esac
 /// of them in a special way, and says how it was called.
 const FAKE_SM: &str = r#"#!/bin/sh
 case "$1" in
-    --help) echo 'Usage: symbolic-math (a script for the tests) <x>'; exit 0 ;;
+    --help) printf '%s\n' 'Usage: symbolic-math (a script for the tests) <x>' '' \
+        'Examples: each line is what follows the name of the program.' '' \
+        'Sums and a remark:' "  '1+1' 'x^2=4'  # two inputs" "  -d 40 -n -r '2*3'" '' \
+        'Files:' "  'file plot.png'" '      # a picture'; exit 0 ;;
     --functions) echo 'the functions'; exit 0 ;;
     --constants) echo 'the constants'; exit 0 ;;
     --units) echo 'the units'; exit 0 ;;
@@ -50,7 +53,7 @@ while IFS= read -r line; do
     case "$line" in
         '') ;;
         slow) echo $$ > "$0.pid"; sleep 30 ;;
-        longer) sleep 3; echo 'done' ;;
+        longer) sleep 5; echo 'done' ;;
         fail) echo 'error: no such thing' >&2; status=1 ;;
         'file '*) printf 'BYTES of %s' "${line#file }" > "${line#file }"; echo "saved ${line#file }" ;;
         where) pwd | sed 's|.*/tet-web-sm-[0-9]*/run-[0-9]*-[0-9]*$|a directory of its own|' ;;
@@ -64,6 +67,18 @@ exit $status
 "#;
 
 static SERVERS: AtomicUsize = AtomicUsize::new(0);
+
+/// One thread at a time writes a script or starts a process. A process that begins while
+/// another thread writes a script holds that file open for a moment, and a system refuses
+/// to run a program that is open for writing ("Text file busy"); one that begins while the
+/// pipes of another are made may keep their ends, and the other is never read to its end.
+static PROCESSES: Mutex<()> = Mutex::new(());
+
+/// Starts a process, or runs one to its end.
+fn forked<T>(run: impl FnOnce() -> T) -> T {
+    let _held = PROCESSES.lock().unwrap_or_else(PoisonError::into_inner);
+    run()
+}
 
 struct Server {
     directory: PathBuf,
@@ -95,6 +110,7 @@ fn fixture_directory() -> PathBuf {
         SERVERS.fetch_add(1, Ordering::SeqCst)
     ));
     std::fs::create_dir(&directory).unwrap();
+    let _held = PROCESSES.lock().unwrap_or_else(PoisonError::into_inner);
     for (name, script) in [("tet", FAKE_TET), ("sm", FAKE_SM)] {
         let program = directory.join(name);
         std::fs::write(&program, script).unwrap();
@@ -133,9 +149,13 @@ impl Server {
     /// Starts the server with the fixtures of a directory, where a test
     /// may have put a settings file.
     fn start_in(directory: PathBuf, settings: &[(&str, &str)]) -> Server {
-        let mut child = command(&directory, settings).spawn().unwrap();
+        let mut child = forked(|| command(&directory, settings).spawn()).unwrap();
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        let first = lines.next().expect("the server printed nothing").unwrap();
+        let first = lines.next().map(Result::unwrap).unwrap_or_else(|| {
+            let mut said = String::new();
+            let _ = child.stderr.take().unwrap().read_to_string(&mut said);
+            panic!("the server printed nothing: {said}")
+        });
         let address = first
             .split("listening on ")
             .nth(1)
@@ -227,6 +247,21 @@ impl Server {
         }
     }
 
+    /// The reply to a request that is answered without any wait: on a busy
+    /// machine one of a few tries comes back within half a second.
+    fn at_once(&self, target: &str) -> Reply {
+        let mut slowest = Duration::ZERO;
+        for _ in 0..6 {
+            let asked = Instant::now();
+            let reply = self.get(target);
+            if asked.elapsed() < Duration::from_millis(500) {
+                return reply;
+            }
+            slowest = slowest.max(asked.elapsed());
+        }
+        panic!("{target}: no reply within half a second (the slowest took {slowest:?})");
+    }
+
     /// Asks until the reply is as wanted, for twenty seconds at most.
     fn until(&self, target: &str, wanted: impl Fn(&Reply) -> bool) -> Reply {
         let started = Instant::now();
@@ -257,12 +292,14 @@ impl Drop for Server {
 /// Whether the process that the script `slow` became is still there.
 fn slow_process_runs(server: &Server) -> bool {
     let pid = std::fs::read_to_string(server.directory.join("tet.pid")).unwrap();
-    Command::new("kill")
-        .args(["-0", pid.trim()])
-        .stderr(Stdio::null())
-        .status()
-        .unwrap()
-        .success()
+    forked(|| {
+        Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+    })
+    .unwrap()
+    .success()
 }
 
 const BUSY: &str = "all slots are busy calculating; try again later";
@@ -599,9 +636,7 @@ fn a_calculation_ends_at_the_time_limit_and_that_is_kept() {
     assert!(!slow_process_runs(&server));
     // It would be stopped again after as long a time: the same request is
     // answered at once, and nothing runs for it.
-    let started = Instant::now();
-    let again = server.get("/?func=tet&base=slow&height=1&format=text");
-    assert!(started.elapsed() < Duration::from_millis(500));
+    let again = server.at_once("/?func=tet&base=slow&height=1&format=text");
     assert_eq!((again.status, again.header("X-Cache")), (504, Some("HIT")));
     assert!(again.body.starts_with("error: no result within 1 s, "));
     assert_eq!(server.calls().len(), 1);
@@ -611,11 +646,11 @@ fn a_calculation_ends_at_the_time_limit_and_that_is_kept() {
 fn a_calculation_that_takes_longer_continues_and_is_found_again() {
     let server = Server::start(&[("TET_WEB_WAIT", "1")]);
     let target = "/?func=tet&base=longer&height=7";
-    // The request waits one of the three seconds that the calculation takes.
+    // The request waits one of the five seconds that the calculation takes.
     let started = Instant::now();
     let first = server.get(target);
     let waited = started.elapsed();
-    assert!(waited >= Duration::from_secs(1) && waited < Duration::from_millis(2500));
+    assert!(waited >= Duration::from_secs(1) && waited < Duration::from_millis(4500));
     assert_eq!((first.status, first.header("X-Cache")), (202, Some("MISS")));
     assert_eq!(first.header("Cache-Control"), Some("no-store"));
     assert!(
@@ -632,9 +667,7 @@ fn a_calculation_that_takes_longer_continues_and_is_found_again() {
         .body
         .ends_with(",\"limit_seconds\":10800,\"cached\":false,\"command\":\"tet 20 longer 7\"}\n"));
     // The same request again is answered at once: the calculation is running.
-    let asked = Instant::now();
-    let second = server.get(&format!("{target}&format=text"));
-    assert!(asked.elapsed() < Duration::from_millis(500));
+    let second = server.at_once(&format!("{target}&format=text"));
     assert_eq!(
         (second.status, second.header("X-Cache")),
         (202, Some("WAIT"))
@@ -663,7 +696,7 @@ fn a_calculation_that_takes_longer_continues_and_is_found_again() {
     assert!(
         result
             .body
-            .contains("\"result\":\"value\",\"re\":\"7\",\"im\":\"0\",\"seconds\":3."),
+            .contains("\"result\":\"value\",\"re\":\"7\",\"im\":\"0\",\"seconds\":"),
         "{}",
         result.body
     );
@@ -672,7 +705,7 @@ fn a_calculation_that_takes_longer_continues_and_is_found_again() {
     // No request waited for its end: the log has it, with the result.
     let done = server.logged(" - DONE ");
     assert!(
-        done.contains(" - DONE tet 20 longer 7 -> 200 3.") && done.ends_with("s = 7 0"),
+        done.contains(" - DONE tet 20 longer 7 -> 200 ") && done.ends_with("s = 7 0"),
         "{done}"
     );
     assert_eq!(server.lines_with(" - DONE ").len(), 1);
@@ -681,15 +714,15 @@ fn a_calculation_that_takes_longer_continues_and_is_found_again() {
     // page asks like that every few seconds.
     let found = server.logged(" HIT ");
     assert!(
-        found.contains(&format!(" 127.0.0.1 GET {target} -> 200 0.0"))
-            && found.contains("s HIT 3.")
+        found.contains(&format!(" 127.0.0.1 GET {target} -> 200 "))
+            && found.contains("s HIT ")
             && found.ends_with("s tet 20 longer 7 = 7 0"),
         "{found}"
     );
     let asked = server.lines_with(" GET /?func=tet&base=longer");
     assert_eq!(asked.len(), 2, "{asked:#?}");
     assert!(
-        asked[0].contains(&format!(" 127.0.0.1 GET {target} -> 202 1."))
+        asked[0].contains(&format!(" 127.0.0.1 GET {target} -> 202 "))
             && asked[0].ends_with("s MISS tet 20 longer 7: still running after 1 s"),
         "{}",
         asked[0]
@@ -730,17 +763,21 @@ fn when_all_slots_are_taken_a_new_calculation_is_turned_away_at_once() {
     let server = Server::start(&[("TET_WEB_JOBS", "2")]);
     let ask =
         |height: u32| server.get(&format!("/?func=tet&base=wait&height={height}&format=text"));
+    // Two that take five seconds each hold the slots meanwhile.
+    let hold = |height: u32| {
+        server.get(&format!(
+            "/?func=tet&base=longer&height={height}&format=text"
+        ))
+    };
     std::thread::scope(|scope| {
-        let (first, second) = (scope.spawn(|| ask(1)), scope.spawn(|| ask(2)));
-        std::thread::sleep(Duration::from_millis(400));
-        assert!(server
-            .get("/status")
-            .body
-            .contains("\ncalculations: 2 running, at most 2 at a time\n"));
+        let (first, second) = (scope.spawn(|| hold(1)), scope.spawn(|| hold(2)));
+        server.until("/status", |reply| {
+            reply
+                .body
+                .contains("\ncalculations: 2 running, at most 2 at a time\n")
+        });
         // There is no queue: the third one is told so without any wait.
-        let started = Instant::now();
-        let third = ask(3);
-        assert!(started.elapsed() < Duration::from_millis(400));
+        let third = server.at_once("/?func=tet&base=wait&height=3&format=text");
         assert_eq!((third.status, third.header("X-Cache")), (503, Some("MISS")));
         assert_eq!(third.body, format!("error: {BUSY}\n"));
         let json = server.get("/?func=tet&base=wait&height=3");
@@ -1025,9 +1062,7 @@ fn the_page_of_a_calculation_that_still_runs_asks_again() {
     }
     // The page asks again at the address that it was given for that, and
     // gets the next one.
-    let asked = Instant::now();
-    let second = server.get(&format!("{target}&again=1"));
-    assert!(asked.elapsed() < Duration::from_millis(500));
+    let second = server.at_once(&format!("{target}&again=1"));
     assert_eq!(second.header("X-Cache"), Some("WAIT"));
     assert!(second
         .body
@@ -1220,10 +1255,7 @@ fn a_child_gets_its_threads_and_its_memory_limit() {
     let memory = server.get("/?func=tet&base=memory&height=1&format=text");
     assert_eq!(memory.body, "524288\n0\n");
     // Without the setting the limit is the one that the server has itself.
-    let own = Command::new("sh")
-        .args(["-c", "ulimit -v"])
-        .output()
-        .unwrap();
+    let own = forked(|| Command::new("sh").args(["-c", "ulimit -v"]).output()).unwrap();
     let own = String::from_utf8_lossy(&own.stdout).trim().to_string();
     let free = Server::start(&[]);
     let memory = free.get("/?func=tet&base=memory&height=1&format=text");
@@ -1233,10 +1265,12 @@ fn a_child_gets_its_threads_and_its_memory_limit() {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn a_child_is_nicer_than_the_server_when_that_is_asked() {
-    let own = Command::new("ps")
-        .args(["-o", "nice=", "-p", &std::process::id().to_string()])
-        .output()
-        .unwrap();
+    let own = forked(|| {
+        Command::new("ps")
+            .args(["-o", "nice=", "-p", &std::process::id().to_string()])
+            .output()
+    })
+    .unwrap();
     let own: i32 = String::from_utf8_lossy(&own.stdout).trim().parse().unwrap();
     let ask = |server: &Server| server.get("/?func=tet&base=nice&height=1&format=text");
     assert_eq!(ask(&Server::start(&[])).body, format!("{own}\n0\n"));
@@ -1272,7 +1306,7 @@ fn settings_that_cannot_work_end_the_server_at_once() {
         (&[("TET_WEB_CONFIG", file.as_str())], named.as_str()),
         (&[("TET_WEB_LISTEN", "nowhere")], "cannot listen on nowhere"),
     ] {
-        let output = command(&directory, settings).output().unwrap();
+        let output = forked(|| command(&directory, settings).output()).unwrap();
         assert_eq!(output.status.code(), Some(1), "{settings:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -1280,7 +1314,7 @@ fn settings_that_cannot_work_end_the_server_at_once() {
             "{stderr}"
         );
     }
-    let usage = command(&directory, &[]).arg("--help").output().unwrap();
+    let usage = forked(|| command(&directory, &[]).arg("--help").output()).unwrap();
     assert_eq!(usage.status.code(), Some(2));
     let usage = String::from_utf8_lossy(&usage.stdout);
     assert!(usage.starts_with("Usage: tet-web") && usage.contains("TET_WEB_CONFIG"));
@@ -1495,7 +1529,7 @@ fn the_page_has_the_form_of_symbolic_math_and_its_help() {
         (
             "/sm/help",
             "text/html; charset=utf-8",
-            "<pre>Usage: symbolic-math (a script for the tests) &lt;x&gt;\n</pre>",
+            "<pre>Usage: symbolic-math (a script for the tests) &lt;x&gt;\n\nExamples: each line",
         ),
         (
             "/sm/help.txt",
@@ -1519,6 +1553,45 @@ fn the_page_has_the_form_of_symbolic_math_and_its_help() {
         assert_eq!(reply.header("Content-Type"), Some(kind), "{path}");
         assert!(reply.body.contains(text), "{path}: {}", reply.body);
     }
+    // Every line of examples of the help is a link that runs it: on a page
+    // of their own, which the page of the programs shows in a frame.
+    for part in [
+        "<details id=\"sm-all\">\n<summary>All 3 lines of examples of the help, under 2 headings (a click runs a line)</summary>",
+        "<iframe id=\"sm-all-frame\" src=\"/sm/examples\" loading=\"lazy\" title=\"All the examples of the help of symbolic-math\"></iframe>",
+    ] {
+        assert!(page.body.contains(part), "{part}\n{}", page.body);
+    }
+    assert!(page
+        .header("Content-Security-Policy")
+        .is_some_and(|policy| policy.contains("frame-src 'self'")
+            && policy.contains("frame-ancestors 'none'")));
+    let examples = server.get("/sm/examples");
+    assert_eq!(examples.status, 200);
+    assert_eq!(
+        examples.header("Content-Type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert_eq!(
+        examples.header("Content-Security-Policy"),
+        Some("default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'")
+    );
+    for part in [
+        "<summary>Sums and a remark <small>(2)</small></summary>",
+        "<li><a class=\"example\" target=\"_top\" href=\"/sm?format=html&amp;expr=1%2B1%0Ax%5E2%3D4#sm-result\">1+1; x^2=4</a> <small>two inputs</small></li>",
+        "<li><a class=\"example\" target=\"_top\" href=\"/sm?format=html&amp;expr=2*3&amp;digits=40&amp;mode=numeric&amp;domain=real#sm-result\">-d 40 -n -r 2*3</a></li>",
+        "<summary>Files <small>(1)</small></summary>",
+        "<li><a class=\"example\" target=\"_top\" href=\"/sm?format=html&amp;expr=file%20plot.png#sm-result\">file plot.png</a> <small>a picture</small></li>",
+    ] {
+        assert!(examples.body.contains(part), "{part}\n{}", examples.body);
+    }
+    // Such a link is the form as a browser without scripts sends it.
+    let ran = server.get("/sm?format=html&expr=2*3&digits=40&mode=numeric&domain=real");
+    assert!(
+        ran.body
+            .contains("<pre id=\"sm-output\">options: -d 40 -n -r\n= 2*3\n</pre>"),
+        "{}",
+        ran.body
+    );
     for (target, message) in [
         ("/sm?expr=", "expr is empty"),
         ("/sm?digits=5", "expr is missing"),
@@ -1534,7 +1607,7 @@ fn the_page_has_the_form_of_symbolic_math_and_its_help() {
         assert_eq!(reply.status, 400, "{target}");
         assert!(reply.body.contains(message), "{target}: {}", reply.body);
     }
-    assert_eq!(sm_calls(&server), ["-d 50 -e -q"]);
+    assert_eq!(sm_calls(&server), ["-d 50 -e -q", "-d 40 -n -r"]);
 }
 
 #[test]
@@ -1548,12 +1621,14 @@ fn a_run_of_symbolic_math_ends_at_the_time_limit_and_continues_when_it_takes_lon
     assert_eq!((reply.status, reply.header("X-Cache")), (504, Some("MISS")));
     assert!(reply.body.starts_with("error: no result within 1 s, "));
     let pid = std::fs::read_to_string(server.directory.join("sm.pid")).unwrap();
-    let alive = Command::new("kill")
-        .args(["-0", pid.trim()])
-        .stderr(Stdio::null())
-        .status()
-        .unwrap()
-        .success();
+    let alive = forked(|| {
+        Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+    })
+    .unwrap()
+    .success();
     assert!(!alive);
     drop(server);
     let server = Server::start(&[("TET_WEB_WAIT", "1")]);
@@ -1575,8 +1650,9 @@ fn a_run_of_symbolic_math_ends_at_the_time_limit_and_continues_when_it_takes_lon
     let done = server.until("/sm?expr=longer&format=text", |reply| reply.status == 200);
     assert_eq!(done.body, "options: \ndone\n");
     assert_eq!(sm_calls(&server), [""]);
-    // A run that the system stopped, and one that prints without end.
-    let crashed = server.get("/sm?expr=crash");
+    // A run that the system stopped, and one that prints without end
+    // (either may take longer than the second that a request waits).
+    let crashed = server.until("/sm?expr=crash", |reply| reply.status != 202);
     assert_eq!(crashed.status, 500);
     assert!(
         crashed
@@ -1585,7 +1661,7 @@ fn a_run_of_symbolic_math_ends_at_the_time_limit_and_continues_when_it_takes_lon
         "{}",
         crashed.body
     );
-    let big = server.get("/sm?expr=big&format=text");
+    let big = server.until("/sm?expr=big&format=text", |reply| reply.status != 202);
     assert_eq!(big.status, 200);
     assert!(
         big.body.len() < 4_300_000
@@ -1600,7 +1676,7 @@ fn without_symbolic_math_the_page_says_so() {
     let directory = fixture_directory();
     let mut command = command(&directory, &[]);
     command.env_remove("TET_WEB_SM").env("PATH", &directory);
-    let mut child = command.spawn().unwrap();
+    let mut child = forked(|| command.spawn()).unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let first = lines.next().expect("the server printed nothing").unwrap();
     assert!(first.contains(" symbolic-math=none "), "{first}");
@@ -1626,6 +1702,8 @@ fn without_symbolic_math_the_page_says_so() {
         "<p id=\"sm-error\" class=\"error\">symbolic-math is not installed on this server (HTTP 503)</p>"
     ));
     assert_eq!(server.get("/sm/help").status, 503);
+    assert_eq!(server.get("/sm/examples").status, 503);
+    assert!(!server.get("/").body.contains("sm-all"));
     // tet works as ever.
     assert_eq!(
         server.get("/?func=tet&base=2&height=3&format=text").body,

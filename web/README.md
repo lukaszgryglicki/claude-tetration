@@ -239,6 +239,15 @@ JavaScript and works in `links` and `lynx`: the form is sent as it is
 (`GET /sm?format=html&expr=...`), and a run that takes longer is asked for
 again by the page itself.
 
+Under the named examples is a line that opens a box with every line of
+examples of `symbolic-math --help` (the server reads them from the help of
+the program that is installed, so they are those of that version): under
+each heading of the help its lines, and a click on a line runs it, with the
+options of the line (`-d 50`, `-n`, `-e`, `-r`, `-q`) as the choices of the
+form. The box scrolls, so the page stays short. It is a page of its own,
+`/sm/examples`, in a frame: without JavaScript a click loads the page of the
+programs with the result, with it the page stays.
+
 ```console
 $ curl 'https://hyp4.duckdns.org/sm?expr=x^2-5x%2B6=0&format=text'
 x = 2
@@ -286,6 +295,7 @@ $ curl -O 'https://hyp4.duckdns.org/sm/file/0f6f.../p.png'
 | `/sm/file/ID/NAME` | a file of the run `ID`; with `?download=1` as a download |
 | `/sm/output/ID` | what the run printed, as a text file to download |
 | `/sm/help` | the whole of `symbolic-math --help`, an example of every kind of operation, as a page; `/sm/help.txt` as text |
+| `/sm/examples` | every line of examples of that help as a link that runs it on the page |
 | `/sm/functions`, `/sm/constants`, `/sm/units` | the lists that the program prints with these options |
 
 A file is there as long as the cache keeps its run; after that its address

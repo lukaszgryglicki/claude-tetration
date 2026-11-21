@@ -528,9 +528,15 @@ mod tests {
         for _ in 0..8 {
             let (cache, runs) = (cache.clone(), runs.clone());
             threads.push(std::thread::spawn(move || {
+                let asked = cache.clone();
                 ask(&cache, "slow", LONG, move || {
                     runs.fetch_add(1, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(300));
+                    // It ends when the other seven have found it under way,
+                    // however long the machine takes to start them.
+                    let started = Instant::now();
+                    while asked.counts().waits < 7 && started.elapsed() < LONG {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
                     value("slow")
                 })
             }));

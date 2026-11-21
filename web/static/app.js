@@ -196,6 +196,35 @@ for (const example of document.querySelectorAll('a.example')) {
     calculate(sm, smAddress());
   });
 }
+// All the examples of the help are a page of their own in a frame. A click
+// on a line there fills the form too, with the options of the line, and
+// the page stays.
+const frame = byId('sm-all-frame');
+if (frame) {
+  const choices = { mode: ['both', 'numeric', 'exact'], domain: ['complex', 'real', 'quaternion'] };
+  const listen = () => {
+    const list = frame.contentDocument;
+    if (!list || list.listened) return;
+    list.listened = true;
+    list.addEventListener('click', (event) => {
+      const example = event.target.closest('a.example');
+      if (!example) return;
+      const asked = new URL(example.href).searchParams;
+      if (asked.get('expr') === null) return;
+      event.preventDefault();
+      byId('expr').value = asked.get('expr');
+      byId('digits').value = asked.get('digits') || '';
+      for (const [name, known] of Object.entries(choices)) {
+        const value = known.includes(asked.get(name)) ? asked.get(name) : known[0];
+        document.querySelector(`input[name="${name}"][value="${value}"]`).checked = true;
+      }
+      calculate(sm, smAddress());
+      byId('sm-result').scrollIntoView({ block: 'nearest' });
+    });
+  };
+  frame.addEventListener('load', listen);
+  listen();
+}
 // A browser may keep the choices of a page that it loads again, and not
 // the fields that the server wrote for them.
 if (fields().map((input) => input.name).join() !== names(checked('func'), checked('numbers')).join()) {

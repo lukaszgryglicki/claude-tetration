@@ -100,6 +100,127 @@ pub struct Program {
     pub domain: Domain,
 }
 
+/// A line of the examples of the help: what follows `symbolic-math` on a
+/// command line, as a run, and what the help says that the line shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Example {
+    pub program: Program,
+    pub shows: String,
+}
+
+/// The examples of the help under one of its headings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub title: String,
+    pub examples: Vec<Example>,
+}
+
+/// The words of a line of examples: an option or its number as it stands
+/// (`true`), or an input out of its quotes; and the remark after `#`.
+fn words(line: &str) -> (Vec<(bool, String)>, String) {
+    let mut words = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        match c {
+            ' ' => {
+                chars.next();
+            }
+            '#' => {
+                chars.next();
+                return (words, chars.collect::<String>().trim().to_string());
+            }
+            '\'' | '"' => {
+                chars.next();
+                words.push((false, chars.by_ref().take_while(|x| *x != c).collect()));
+            }
+            _ => {
+                let mut word = String::new();
+                while let Some(x) = chars.next_if(|x| *x != ' ') {
+                    word.push(x);
+                }
+                words.push((true, word));
+            }
+        }
+    }
+    (words, String::new())
+}
+
+/// The run of a line of examples: its inputs with its options. There is
+/// none for a line with an option that the page has no field for.
+fn run_of(words: &[(bool, String)]) -> Option<Program> {
+    let (mut digits, mut mode, mut domain) = (None, Mode::Both, Domain::Complex);
+    let mut inputs = Vec::new();
+    let mut rest = words.iter();
+    while let Some((option, word)) = rest.next() {
+        match (option, word.as_str()) {
+            (false, input) => inputs.push(input),
+            (true, "-d" | "--digits") => {
+                let (_, number) = rest.next().filter(|(option, _)| *option)?;
+                digits = Some(number.parse::<u64>().ok()?);
+            }
+            (true, "-n" | "--numeric") => mode = Mode::Numeric,
+            (true, "-e" | "--exact") => mode = Mode::Exact,
+            (true, "-r" | "--real") => domain = Domain::Real,
+            (true, "-q" | "--quaternions") => domain = Domain::Quaternion,
+            (true, _) => return None,
+        }
+    }
+    if inputs.is_empty() {
+        return None;
+    }
+    Some(Program {
+        text: inputs.join("\n"),
+        digits,
+        mode,
+        domain,
+    })
+}
+
+/// The examples of the help of `symbolic-math`, heading by heading. They
+/// come after the line that begins with `Examples`: a heading is a line
+/// without an indent that ends with a colon; a line of examples begins
+/// with two spaces and a quote or an option; what it shows is after `#`,
+/// on the line or on the next one.
+pub fn examples(help: &str) -> Vec<Group> {
+    // An input that is too long for a line is cut into pieces in quotes,
+    // with a backslash after all but the last: a shell joins them.
+    let help = help.replace("'\\\n'", "");
+    let mut groups: Vec<Group> = Vec::new();
+    let mut lines = help
+        .lines()
+        .skip_while(|line| !line.starts_with("Examples"))
+        .peekable();
+    while let Some(line) = lines.next() {
+        if !line.starts_with(' ') {
+            if let Some(title) = line.strip_suffix(':').filter(|title| !title.is_empty()) {
+                groups.push(Group {
+                    title: title.to_string(),
+                    examples: Vec::new(),
+                });
+            }
+            continue;
+        }
+        let begins = line
+            .strip_prefix("  ")
+            .is_some_and(|rest| rest.starts_with(['\'', '"', '-']));
+        let (Some(group), true) = (groups.last_mut(), begins) else {
+            continue;
+        };
+        let (words, mut shows) = words(line);
+        if shows.is_empty() {
+            let remark = lines.next_if(|next| next.trim_start().starts_with('#'));
+            if let Some(remark) = remark {
+                shows = remark.trim_start()[1..].trim().to_string();
+            }
+        }
+        if let Some(program) = run_of(&words) {
+            group.examples.push(Example { program, shows });
+        }
+    }
+    groups.retain(|group| !group.examples.is_empty());
+    groups
+}
+
 fn rejected(message: impl Into<String>) -> Rejected {
     Rejected {
         status: 400,
@@ -442,8 +563,9 @@ impl Runner {
         ));
         let mut made = Ok(());
         for _ in 0..8 {
-            std::fs::create_dir_all(&self.work)?;
-            made = std::fs::create_dir(&directory);
+            // (either step fails when a run that ends takes the directory of all runs away)
+            made =
+                std::fs::create_dir_all(&self.work).and_then(|()| std::fs::create_dir(&directory));
             if made.is_ok() {
                 break;
             }
@@ -707,6 +829,32 @@ mod tests {
             .collect()
     }
 
+    /// The directory of all runs comes and goes while runs begin and end: every run gets
+    /// its own directory all the same.
+    #[test]
+    fn runs_that_begin_while_others_end_get_their_directories() {
+        let runner = Runner {
+            program: String::new(),
+            path: String::new(),
+            work: std::env::temp_dir().join(format!("tet-web-sm-test-{}", std::process::id())),
+            help: String::new(),
+            functions: String::new(),
+            constants: String::new(),
+            units: String::new(),
+        };
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..4000 {
+                        let directory = runner.directory().expect("a directory for the run");
+                        std::fs::remove_dir_all(&directory).expect("the directory is there");
+                        let _ = std::fs::remove_dir(&runner.work);
+                    }
+                });
+            }
+        });
+    }
+
     #[test]
     fn a_query_is_a_run_of_the_program() {
         let (program, format) = Program::parse(&query(&[("expr", "2+2")])).unwrap();
@@ -740,6 +888,74 @@ mod tests {
             .unwrap()
             .0;
         assert_ne!(program.id(), other.id());
+    }
+
+    #[test]
+    fn the_examples_of_the_help_are_runs() {
+        let help = "Usage: symbolic-math [OPTIONS] [INPUT]...\n\nOptions:\n  -d, --digits N    digits\n\n\
+                    Examples of every kind of operation. Each line is what follows\n\
+                    line: one or more inputs in quotes.\n\n\
+                    Simplifying:\n  '10*x - (2+3)*x'  # like terms: 5x\n  'i^2' '(1+2i)*(3-i)'\n      # complex numbers\n\n\
+                    Derivatives, with a quote:\n  \"f(x) := x^3; f'(2)\" 'a := 3; a^2'\n\n\
+                    Nothing to run:\n  --functions\n\n\
+                    Options and long inputs:\n  -d 50 -n 'pi'  # fifty digits\n  -q 'i*j' 'j*i'\n  -r -e 'x^3 = -8'\n  --verbose 'x'\n  -d many 'x'\n\
+                    \x20 'save_png(\"a.png\", plot(sin(x), x, 0, 1),'\\\n'      width = 90)'\n      # a long one\n\n\
+                    Pictures: the files of the directory\n(effort 10); sh jxls/make.sh makes them again:\n    one.jxl\n        save_jxl(\"one.jxl\", plot4d(sin(z)))\n";
+        let groups = examples(help);
+        let titles: Vec<&str> = groups.iter().map(|group| group.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Simplifying",
+                "Derivatives, with a quote",
+                "Options and long inputs"
+            ]
+        );
+        let run = |text: &str, digits, mode, domain, shows: &str| Example {
+            program: Program {
+                text: text.to_string(),
+                digits,
+                mode,
+                domain,
+            },
+            shows: shows.to_string(),
+        };
+        let (both, complex) = (Mode::Both, Domain::Complex);
+        assert_eq!(
+            groups[0].examples,
+            [
+                run("10*x - (2+3)*x", None, both, complex, "like terms: 5x"),
+                run("i^2\n(1+2i)*(3-i)", None, both, complex, "complex numbers"),
+            ]
+        );
+        assert_eq!(
+            groups[1].examples,
+            [run(
+                "f(x) := x^3; f'(2)\na := 3; a^2",
+                None,
+                both,
+                complex,
+                ""
+            )]
+        );
+        assert_eq!(
+            groups[2].examples,
+            [
+                run("pi", Some(50), Mode::Numeric, complex, "fifty digits"),
+                run("i*j\nj*i", None, both, Domain::Quaternion, ""),
+                run("x^3 = -8", None, Mode::Exact, Domain::Real, ""),
+                run(
+                    "save_png(\"a.png\", plot(sin(x), x, 0, 1),      width = 90)",
+                    None,
+                    both,
+                    complex,
+                    "a long one"
+                ),
+            ]
+        );
+        // A text without examples has none.
+        assert!(examples("Usage: symbolic-math (a script for the tests) <x>\n").is_empty());
+        assert!(examples("Options:\n  -d, --digits N\n  'x'\n").is_empty());
     }
 
     #[test]

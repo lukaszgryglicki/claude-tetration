@@ -145,19 +145,27 @@ fn words(line: &str) -> (Vec<(bool, String)>, String) {
     (words, String::new())
 }
 
-/// The run of a line of examples: its inputs with its options. There is
-/// none for a line with an option that the page has no field for.
+/// The run of a line of examples: its inputs with its options. An option
+/// that the page has no field for becomes the statement that does the
+/// same, in front of the first input; there is no run for a line with an
+/// option that has no such statement.
 fn run_of(words: &[(bool, String)]) -> Option<Program> {
     let (mut digits, mut mode, mut domain) = (None, Mode::Both, Domain::Complex);
     let mut inputs = Vec::new();
+    let mut settings = Vec::new();
     let mut rest = words.iter();
     while let Some((option, word)) = rest.next() {
+        let mut number = || {
+            let (_, number) = rest.next().filter(|(option, _)| *option)?;
+            number.parse::<u64>().ok()
+        };
         match (option, word.as_str()) {
-            (false, input) => inputs.push(input),
-            (true, "-d" | "--digits") => {
-                let (_, number) = rest.next().filter(|(option, _)| *option)?;
-                digits = Some(number.parse::<u64>().ok()?);
-            }
+            (false, input) => inputs.push(input.to_string()),
+            (true, "-d" | "--digits" | "--prec" | "--precision") => digits = Some(number()?),
+            (true, "--roots") => settings.push(format!("roots = {}", number()?)),
+            (true, "--terms") => settings.push(format!("terms = {}", number()?)),
+            (true, "-v" | "--verbose") => settings.push("verbose".to_string()),
+            (true, "--debug") => settings.push("debug".to_string()),
             (true, "-n" | "--numeric") => mode = Mode::Numeric,
             (true, "-e" | "--exact") => mode = Mode::Exact,
             (true, "-r" | "--real") => domain = Domain::Real,
@@ -165,8 +173,9 @@ fn run_of(words: &[(bool, String)]) -> Option<Program> {
             (true, _) => return None,
         }
     }
-    if inputs.is_empty() {
-        return None;
+    let first = inputs.first_mut()?;
+    if !settings.is_empty() {
+        *first = format!("{}; {first}", settings.join("; "));
     }
     Some(Program {
         text: inputs.join("\n"),
@@ -898,7 +907,9 @@ mod tests {
                     Simplifying:\n  '10*x - (2+3)*x'  # like terms: 5x\n  'i^2' '(1+2i)*(3-i)'\n      # complex numbers\n\n\
                     Derivatives, with a quote:\n  \"f(x) := x^3; f'(2)\" 'a := 3; a^2'\n\n\
                     Nothing to run:\n  --functions\n\n\
-                    Options and long inputs:\n  -d 50 -n 'pi'  # fifty digits\n  -q 'i*j' 'j*i'\n  -r -e 'x^3 = -8'\n  --verbose 'x'\n  -d many 'x'\n\
+                    Options and long inputs:\n  -d 50 -n 'pi'  # fifty digits\n  -q 'i*j' 'j*i'\n  -r -e 'x^3 = -8'\n  --frames 3 'x'\n  -d many 'x'\n\
+                    \x20 --roots 5 'e^x = x^2'  # as an option\n  --terms 200 --prec 40 'sum(1/n^2, n, 1, inf)'\n\
+                    \x20 -v 'x^2 = 2' 'x^2 = 3'\n  --debug -n 'sqrt(2)'\n  --roots many 'x'\n  --terms 'x'\n\
                     \x20 'save_png(\"a.png\", plot(sin(x), x, 0, 1),'\\\n'      width = 90)'\n      # a long one\n\n\
                     Pictures: the files of the directory\n(effort 10); sh jxls/make.sh makes them again:\n    one.jxl\n        save_jxl(\"one.jxl\", plot4d(sin(z)))\n";
         let groups = examples(help);
@@ -944,6 +955,17 @@ mod tests {
                 run("pi", Some(50), Mode::Numeric, complex, "fifty digits"),
                 run("i*j\nj*i", None, both, Domain::Quaternion, ""),
                 run("x^3 = -8", None, Mode::Exact, Domain::Real, ""),
+                // An option without a field of the page is a statement of the first input.
+                run("roots = 5; e^x = x^2", None, both, complex, "as an option"),
+                run(
+                    "terms = 200; sum(1/n^2, n, 1, inf)",
+                    Some(40),
+                    both,
+                    complex,
+                    ""
+                ),
+                run("verbose; x^2 = 2\nx^2 = 3", None, both, complex, ""),
+                run("debug; sqrt(2)", None, Mode::Numeric, complex, ""),
                 run(
                     "save_png(\"a.png\", plot(sin(x), x, 0, 1),      width = 90)",
                     None,

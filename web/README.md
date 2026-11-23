@@ -244,7 +244,9 @@ examples of `symbolic-math --help` (the server reads them from the help of
 the program that is installed, so they are those of that version): under
 each heading of the help its lines, and a click on a line runs it, with the
 options of the line (`-d 50`, `-n`, `-e`, `-r`, `-q`) as the choices of the
-form. The box scrolls, so the page stays short. It is a page of its own,
+form; an option that the form has no choice for (`--roots 5`, `--terms N`,
+`-v`, `--debug`) is the statement that does the same in front of the input
+(`roots = 5; ...`). The box scrolls, so the page stays short. It is a page of its own,
 `/sm/examples`, in a frame: without JavaScript a click loads the page of the
 programs with the result, with it the page stays.
 

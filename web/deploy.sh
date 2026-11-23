@@ -146,6 +146,9 @@ x = 3
 16"
     check "/sm?expr=N(pi,40)&format=text" "3.141592653589793238462643383279502884197"
     check "/sm?expr=1/3%2B1/6&digits=40&mode=numeric&format=text" "0.5"
+    # (settings as statements: a program of this year)
+    check "/sm?expr=prec=40%20pi&format=text" "pi
+  ~ 3.141592653589793238462643383279502884197"
     form="/sm?format=html&expr=i%5E2&digits=&mode=both&domain=complex"
     if curl -sS --max-time 60 "$url$form" | grep -q '<pre id="sm-output">-1'; then
         echo "ok   $form is the page with the result"
@@ -170,6 +173,14 @@ if [ "$page" = "<!doctype html>" ]; then
     echo "ok   / is the page"
 else
     echo "FAIL / is not the page: $page"
+    failed=yes
+fi
+# The requests that were counted: at the foot of the page and in /stats.
+if curl -sS --max-time 60 "$url/" | grep -q '<p id="counted">Counted since ' &&
+    curl -sS --max-time 60 "$url/stats" | grep -q '"counted":{"since":"'; then
+    echo "ok   the page and /stats tell the requests that were counted"
+else
+    echo "FAIL the page or /stats does not tell the requests that were counted"
     failed=yes
 fi
 # The page as a browser without scripts gets it when its form is sent.

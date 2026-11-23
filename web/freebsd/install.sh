@@ -84,6 +84,9 @@ if ! pw usershow tetweb >/dev/null 2>&1; then
     pw useradd tetweb -c "tet web page and API" -d /nonexistent -s /usr/sbin/nologin
 fi
 
+# The counts of the requests and of their clients outlive a restart here.
+install -d -m 0755 -o tetweb -g tetweb /var/db/tet-web
+
 say "installing tet, tet-web and the service files"
 install -m 0755 -o root -g wheel "$tet" /usr/local/bin/tet
 install -m 0755 -o root -g wheel "$web" /usr/local/bin/tet-web

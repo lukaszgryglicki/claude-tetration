@@ -1710,3 +1710,175 @@ fn without_symbolic_math_the_page_says_so() {
         "tet|20|2 3\nserial\n"
     );
 }
+
+/// What `/stats` says was counted, without the day the counting began.
+fn counted(server: &Server) -> String {
+    let stats = server.get("/stats").body;
+    let (_, counted) = stats
+        .split_once("\"counted\":{\"since\":\"")
+        .unwrap_or_else(|| panic!("nothing counted in {stats}"));
+    let (since, rest) = counted.split_once("\",").unwrap();
+    // 2026-11-14T08:15:00Z
+    assert_eq!((since.len(), &since[10..11], &since[19..]), (20, "T", "Z"));
+    let (counted, _) = rest.split_once("},\"limits\":").unwrap();
+    counted.to_string()
+}
+
+#[test]
+fn the_requests_for_calculations_and_their_clients_are_counted_and_kept_in_a_file() {
+    let kept = std::env::temp_dir().join(format!("tet-web-test-counter-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&kept);
+    std::fs::create_dir(&kept).unwrap();
+    let file = kept.join("counter");
+    let settings = [("TET_WEB_COUNTER", file.to_str().unwrap())];
+    let server = Server::start(&settings);
+    assert_eq!(
+        counted(&server),
+        "\"tet\":0,\"symbolic_math\":0,\"clients\":0,\"tet_clients\":0,\
+         \"symbolic_math_clients\":0,\"more_clients\":false"
+    );
+    let page = server.get("/").body;
+    let (_, sentence) = page.split_once("<p id=\"counted\">Counted since ").unwrap();
+    assert!(
+        sentence[10..].starts_with(
+            ": 0 requests to <code>tet</code> and 0 to <code>symbolic-math</code>, from 0 \
+             different clients.</p>"
+        ),
+        "{sentence}"
+    );
+    let from = |address: &str| format!("X-Forwarded-For: {address}\r\n");
+    // A calculation, the same one again from the cache, and the page of a form.
+    let tet = "/?func=tet&base=2&height=3";
+    assert_eq!(server.ask("GET", tet, &from("203.0.113.5")).status, 200);
+    assert_eq!(
+        server
+            .ask("GET", tet, &from("203.0.113.5, 10.0.0.1"))
+            .status,
+        200
+    );
+    let form = "/?format=html&func=ssrt&numbers=2&value=16&height=3";
+    assert_eq!(server.ask("GET", form, &from("203.0.113.9")).status, 200);
+    // The other program, at its API and as the page of its form.
+    assert_eq!(
+        server
+            .ask("GET", "/sm?expr=1%2B1", &from("203.0.113.9"))
+            .status,
+        200
+    );
+    let form = "/sm?format=html&expr=2&digits=&mode=both&domain=complex";
+    assert_eq!(server.ask("GET", form, &from("198.51.100.7")).status, 200);
+    // Two addresses of one network of IPv6 are one client; a request that no proxy
+    // passed on comes from this machine.
+    assert_eq!(server.ask("GET", tet, &from("2001:db8:1:2::1")).status, 200);
+    assert_eq!(
+        server.ask("GET", tet, &from("2001:db8:1:2:3:4:5:6")).status,
+        200
+    );
+    assert_eq!(server.get("/sm?expr=3").status, 200);
+    // What tet refuses was asked of it; what never reached a program was not, and
+    // neither were the pages, the files and the counters themselves.
+    assert_eq!(
+        server
+            .ask(
+                "GET",
+                "/?func=tet&base=refuse&height=1",
+                &from("203.0.113.5")
+            )
+            .status,
+        422
+    );
+    assert_eq!(
+        server.ask("GET", "/?func=exp", &from("192.0.2.200")).status,
+        400
+    );
+    assert_eq!(
+        server.ask("GET", "/sm?expr=", &from("192.0.2.201")).status,
+        400
+    );
+    for other in [
+        "/",
+        "/sm",
+        "/healthz",
+        "/stats",
+        "/status",
+        "/style.css",
+        "/sm/help.txt",
+    ] {
+        assert_eq!(
+            server.ask("GET", other, &from("192.0.2.202")).status,
+            200,
+            "{other}"
+        );
+    }
+    let expected = "\"tet\":6,\"symbolic_math\":3,\"clients\":5,\"tet_clients\":3,\
+                    \"symbolic_math_clients\":3,\"more_clients\":false";
+    assert_eq!(counted(&server), expected);
+    let status = server.get("/status").body;
+    let line = status.lines().nth(1).unwrap();
+    assert!(
+        line.starts_with("counted since 20")
+            && line.ends_with(
+                "Z: 6 requests to tet from 3 clients, 3 to symbolic-math from 3, 5 clients in all"
+            ),
+        "{status}"
+    );
+    let page = server.get("/").body;
+    assert!(
+        page.contains(
+            ": 6 requests to <code>tet</code> and 3 to <code>symbolic-math</code>, from 5 \
+             different clients.</p>"
+        ),
+        "{page}"
+    );
+    // The file is written a few seconds after a count has changed: the counts and
+    // hashes of the clients, no address.
+    let started = Instant::now();
+    let text = loop {
+        match std::fs::read_to_string(&file) {
+            Ok(text) if text.contains("\ntet 6\nsm 3\n") => break text,
+            _ => {
+                assert!(
+                    started.elapsed() < Duration::from_secs(30),
+                    "the file was not written"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    };
+    assert!(text.starts_with("tet-web counter 1\nsince "), "{text}");
+    assert_eq!(text.matches("\nclient ").count(), 5, "{text}");
+    for address in ["203.0.113", "198.51.100", "2001", "127.0.0.1"] {
+        assert!(!text.contains(address), "{text}");
+    }
+    // Another server with the same file goes on where this one ended, and knows
+    // its clients again.
+    drop(server);
+    let server = Server::start(&settings);
+    assert_eq!(counted(&server), expected);
+    assert_eq!(
+        server.ask("GET", "/sm?expr=5", &from("203.0.113.5")).status,
+        200
+    );
+    assert_eq!(server.ask("GET", tet, &from("192.0.2.77")).status, 200);
+    assert_eq!(
+        counted(&server),
+        "\"tet\":7,\"symbolic_math\":4,\"clients\":6,\"tet_clients\":4,\
+         \"symbolic_math_clients\":4,\"more_clients\":false"
+    );
+    drop(server);
+    // A file that is not understood is set aside; the log says so, and the server runs.
+    std::fs::write(&file, "something else\n").unwrap();
+    let server = Server::start(&settings);
+    let line = server.logged(" - COUNTER ");
+    assert!(
+        line.contains("is not understood") && line.ends_with("counter.unread"),
+        "{line}"
+    );
+    assert!(counted(&server).starts_with("\"tet\":0,\"symbolic_math\":0,\"clients\":0,"));
+    assert_eq!(
+        std::fs::read_to_string(kept.join("counter.unread")).unwrap(),
+        "something else\n"
+    );
+    drop(server);
+    let _ = std::fs::remove_dir_all(&kept);
+}

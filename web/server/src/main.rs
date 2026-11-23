@@ -13,6 +13,7 @@
 
 mod api;
 mod cache;
+mod counter;
 mod http;
 mod page;
 mod run;
@@ -28,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use api::{Format, Job, Outcome, Pending};
 use cache::{Cache, Found, Listed, Source, Ticket};
+use counter::Counter;
 use http::{Request, Response, Unread};
 use page::{Answer as Replied, Asked, Form, Shown, Site};
 use run::{Runner, Slots};
@@ -63,6 +65,8 @@ Usage: tet-web
     TET_WEB_SM          the symbolic-math program            symbolic-math
     TET_WEB_CACHE_MB    most memory for kept results, in MiB 1024
     TET_WEB_REVISION    text shown as the version            (none)
+    TET_WEB_COUNTER     a file that keeps the counts of the  (none: they
+                        requests and of the clients          begin at 0)
     TET_WEB_CONFIG      a file with the settings below       (none)
 
   The settings below can stand in that file as well, as lines NAME=value.
@@ -142,6 +146,11 @@ struct Server {
     started: Instant,
     requests: AtomicU64,
     connections: AtomicUsize,
+    /// The requests for calculations and the clients that made them.
+    counter: Counter,
+    /// What the log says about the file of the counter, when it could not
+    /// be used as it was.
+    counter_remark: Option<String>,
 }
 
 fn setting<T: std::str::FromStr>(name: &str, default: T) -> Result<T, String> {
@@ -200,6 +209,11 @@ impl Server {
             .as_ref()
             .map(|sm| sm::examples(&sm.help))
             .unwrap_or_default();
+        let (counter, remark) = Counter::open(
+            std::env::var_os("TET_WEB_COUNTER")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
+        );
         let server = Server {
             runner,
             sm,
@@ -216,6 +230,8 @@ impl Server {
             started: Instant::now(),
             requests: AtomicU64::new(0),
             connections: AtomicUsize::new(0),
+            counter,
+            counter_remark: remark,
         };
         Ok((server, listen))
     }
@@ -587,6 +603,7 @@ impl Server {
             jobs: now.jobs,
             revision: &self.revision,
             examples: self.listed,
+            counted: self.counter.counts(),
         };
         let body = page::rendered_both(&site, form, shown, asked, replied);
         Response::new(200, "text/html; charset=utf-8", body)
@@ -598,10 +615,13 @@ impl Server {
     fn stats(&self) -> String {
         let counts = self.cache.counts();
         let now = self.settings.now();
+        let counted = self.counter.counts();
         format!(
             "{{\"revision\":{},\"uptime_seconds\":{},\"requests\":{},\"running\":{},\
              \"cache\":{{\"entries\":{},\"bytes\":{},\"hits\":{},\"misses\":{},\"waits\":{},\
-             \"dropped\":{}}},\"limits\":{{\"wait_seconds\":{},\"timeout_seconds\":{},\
+             \"dropped\":{}}},\"counted\":{{\"since\":{},\"tet\":{},\"symbolic_math\":{},\
+             \"clients\":{},\"tet_clients\":{},\"symbolic_math_clients\":{},\
+             \"more_clients\":{}}},\"limits\":{{\"wait_seconds\":{},\"timeout_seconds\":{},\
              \"jobs\":{}}}}}\n",
             api::json_string(&self.revision),
             self.started.elapsed().as_secs(),
@@ -613,6 +633,13 @@ impl Server {
             counts.misses,
             counts.waits,
             counts.dropped,
+            api::json_string(&timestamp(UNIX_EPOCH + Duration::from_secs(counted.since))),
+            counted.tet,
+            counted.sm,
+            counted.clients,
+            counted.tet_clients,
+            counted.sm_clients,
+            counted.full,
             now.wait.as_secs(),
             now.timeout.as_secs(),
             now.jobs,
@@ -627,13 +654,23 @@ impl Server {
             "" => String::new(),
             revision => format!(" {revision}"),
         };
+        let counted = self.counter.counts();
         format!(
             "tet-web{revision}: up {}, requests {}\n\
+             counted since {}: {} requests to tet from {} clients, {} to symbolic-math from {}, \
+             {}{} clients in all\n\
              calculations: {} running, at most {} at a time\n\
              cache: kept {} ({} bytes), hits {}, misses {}, waits {}, dropped {}\n\
              limits: a request waits {}, a calculation may take {}\n",
             api::span(self.started.elapsed().as_secs()),
             self.requests.load(Ordering::Relaxed),
+            timestamp(UNIX_EPOCH + Duration::from_secs(counted.since)),
+            counted.tet,
+            counted.tet_clients,
+            counted.sm,
+            counted.sm_clients,
+            if counted.full { "more than " } else { "" },
+            counted.clients,
             self.slots.taken(),
             now.jobs,
             counts.entries,
@@ -771,6 +808,16 @@ impl Server {
             Some(query) => format!("{}?{query}", request.path),
             None => request.path.clone(),
         };
+        // A request for a calculation that was taken counts, with its
+        // client; one that only looks whether a calculation has ended, as a
+        // page does every few seconds, has no note and came not this far.
+        if !note.is_empty() && !note.starts_with("rejected:") {
+            let program = match request.path.as_str() {
+                "/sm" => counter::Program::Sm,
+                _ => counter::Program::Tet,
+            };
+            self.counter.count(program, &client);
+        }
         let note = match note.as_str() {
             "" => note,
             said => format!(" {said}"),
@@ -879,6 +926,9 @@ fn main() -> ExitCode {
         server.revision,
         server.settings.now().described(),
     );
+    if let Some(remark) = &server.counter_remark {
+        println!("{} - COUNTER {remark}", timestamp(SystemTime::now()));
+    }
     // The settings file is read again whenever it changes.
     server.settings.watch(|read| {
         let time = timestamp(SystemTime::now());
@@ -888,6 +938,38 @@ fn main() -> ExitCode {
         }
     });
     let server = Arc::new(server);
+    // The counts are written to their file a few seconds after they change.
+    if server.counter.file().is_some() {
+        let counting = server.clone();
+        let spawned = std::thread::Builder::new()
+            .name("counter".into())
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let mut failed = false;
+                loop {
+                    std::thread::sleep(Duration::from_secs(5));
+                    match counting.counter.save() {
+                        Ok(()) => failed = false,
+                        // (said once, not every five seconds)
+                        Err(error) if !failed => {
+                            failed = true;
+                            println!(
+                                "{} - COUNTER the file {} cannot be written: {error}",
+                                timestamp(SystemTime::now()),
+                                counting
+                                    .counter
+                                    .file()
+                                    .map_or(String::new(), |file| file.display().to_string()),
+                            );
+                        }
+                        Err(_) => {}
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("tet-web: no thread for the counter: {error}");
+        }
+    }
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
             // Out of descriptors, for instance: let the load fall.

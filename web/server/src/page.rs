@@ -26,6 +26,8 @@ pub struct Site<'a> {
     /// The examples of the help of `symbolic-math`: their lines and their
     /// headings.
     pub examples: (usize, usize),
+    /// The requests for calculations and their clients.
+    pub counted: crate::counter::Counts,
 }
 
 /// What the form shows: the choice of a function and of the kind of its
@@ -502,6 +504,27 @@ fn seconds(seconds: f64) -> String {
     format!("{}", (seconds * 1000.0).round() / 1000.0)
 }
 
+/// The sentence of the page about the requests that were counted.
+fn counted(counts: &crate::counter::Counts) -> String {
+    let since =
+        crate::timestamp(std::time::UNIX_EPOCH + std::time::Duration::from_secs(counts.since));
+    let requests = match counts.tet {
+        1 => "1 request".to_string(),
+        many => format!("{many} requests"),
+    };
+    let clients = match (counts.full, counts.clients) {
+        (false, 1) => "1 client".to_string(),
+        (false, many) => format!("{many} different clients"),
+        (true, many) => format!("more than {many} different clients"),
+    };
+    format!(
+        "Counted since {}: {requests} to <code>tet</code> and {} to <code>symbolic-math</code>, \
+         from {clients}.",
+        &since[..10],
+        counts.sm
+    )
+}
+
 /// The template with every `{{name}}` replaced by its value. What is put
 /// in is not read again, so that no value can bring a name of its own.
 fn filled(values: &[(&str, String)]) -> String {
@@ -973,6 +996,7 @@ pub fn rendered_both(
         ("limit", api::span(site.limit)),
         ("jobs", site.jobs.to_string()),
         ("revision", revision),
+        ("counted", counted(&site.counted)),
     ])
 }
 
@@ -987,6 +1011,15 @@ mod tests {
         jobs: 4,
         revision: "abc1234",
         examples: (0, 0),
+        counted: crate::counter::Counts {
+            since: 1_794_643_200,
+            tet: 1_234,
+            sm: 1,
+            clients: 57,
+            tet_clients: 40,
+            sm_clients: 1,
+            full: false,
+        },
     };
 
     fn query(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -1050,6 +1083,22 @@ mod tests {
         // The page of the programs has them in a frame, when there are any.
         let none = rendered(&SITE, &Form::from_query(&[]), &Shown::Nothing);
         assert!(!none.contains("sm-all"));
+        // The requests that were counted stand at the foot of the page.
+        assert!(none.contains(
+            "<p id=\"counted\">Counted since 2026-11-14: 1234 requests to <code>tet</code> and 1 \
+             to <code>symbolic-math</code>, from 57 different clients.</p>"
+        ));
+        let counts = |tet, clients, full| crate::counter::Counts {
+            tet,
+            clients,
+            full,
+            ..SITE.counted
+        };
+        assert!(counted(&counts(1, 1, false)).contains(": 1 request to <code>tet</code>"));
+        assert!(counted(&counts(1, 1, false)).ends_with(", from 1 client."));
+        assert!(counted(&counts(0, 0, false)).contains(": 0 requests to"));
+        assert!(counted(&counts(9, 200_000, true))
+            .ends_with(", from more than 200000 different clients."));
         let site = Site {
             examples: (3, 2),
             ..SITE
@@ -1078,6 +1127,7 @@ mod tests {
             names,
             [
                 "arguments",
+                "counted",
                 "func.ate",
                 "func.ssrt",
                 "func.tet",

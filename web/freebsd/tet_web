@@ -31,6 +31,10 @@
 # tet_web_cache_mb (number):  the most memory for kept results in MiB; it is
 #                             used as the results come, not set aside (1024)
 # tet_web_revision (text):    shown by the page and by /stats ()
+# tet_web_counter (path):     the file that keeps the counts of the requests
+#                             and of their clients over a restart; set it
+#                             empty and they begin at 0 with every start
+#                             (/var/db/tet-web/counter)
 # tet_web_log (path):         the log (/var/log/tet-web.log)
 
 . /etc/rc.subr
@@ -50,11 +54,12 @@ load_rc_config $name
 : ${tet_web_config:="/usr/local/etc/tet-web.conf"}
 : ${tet_web_cache_mb:="1024"}
 : ${tet_web_revision:=""}
+: ${tet_web_counter="/var/db/tet-web/counter"}
 : ${tet_web_log:="/var/log/tet-web.log"}
 
 tet_web_env="TET_WEB_LISTEN=${tet_web_listen} TET_WEB_TET=${tet_web_tet} \
 TET_WEB_CONFIG=${tet_web_config} TET_WEB_CACHE_MB=${tet_web_cache_mb} \
-TET_WEB_REVISION=${tet_web_revision}"
+TET_WEB_REVISION=${tet_web_revision} TET_WEB_COUNTER=${tet_web_counter}"
 if [ -x "${tet_web_sm}" ]; then
 	tet_web_env="${tet_web_env} TET_WEB_SM=${tet_web_sm}"
 fi

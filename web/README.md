@@ -399,9 +399,35 @@ kin, `Forwarded`, `Via`, `X-Real-IP`) gets the 404 of an address where
 nothing is. Caddy sets such headers on everything that it passes on; a
 proxy that does not must not pass `/cache` on.
 
+## The counter
+
+The foot of the page says how many requests for a calculation were made to
+`tet` and to `symbolic-math` since the counting began, and from how many
+different clients; `/stats` has the same numbers as `counted`, with the
+clients of each program, and `/status` has them as a line. A request counts
+when a program was asked for it or its result came from the cache, on the
+page or at the API; what was refused before it reached a program, the pages
+themselves and a page that only looks whether its calculation has ended do
+not count. A client is the address that a request came from (the one that
+the proxy names), an IPv6 address with its first 64 bits.
+
+With `TET_WEB_COUNTER=file` the counts are written to that file a few
+seconds after they change, and the next start goes on from them: the
+service of FreeBSD keeps them in `/var/db/tet-web/counter`. The file holds
+the two counts and, for each client, a hash of its address made with a
+secret of the file: the addresses are not in it. Remove the file, with the
+server stopped, to count from 0 again. A file that the server cannot
+understand is set aside as `counter.unread`, and the log says so. At most
+200000 clients are told apart; beyond them the page says "more than".
+
+```console
+$ curl -s https://hyp4.duckdns.org/stats
+{"revision":"70212af","uptime_seconds":484,"requests":1785,"running":0,"cache":{"entries":1772,"bytes":15316167,"hits":1,"misses":1772,"waits":0,"dropped":0},"counted":{"since":"2026-11-23T10:00:00Z","tet":12,"symbolic_math":1773,"clients":3,"tet_clients":2,"symbolic_math_clients":3,"more_clients":false},"limits":{"wait_seconds":300,"timeout_seconds":21600,"jobs":4}}
+```
+
 ## Settings
 
-`tet-web` takes no arguments. Six settings are environment variables, read
+`tet-web` takes no arguments. Seven settings are environment variables, read
 when it starts:
 
 | Variable | Default | Meaning |
@@ -411,6 +437,7 @@ when it starts:
 | `TET_WEB_SM` | `symbolic-math` | the `symbolic-math` program; without it on the machine the page has `tet` alone |
 | `TET_WEB_CACHE_MB` | `1024` | the most memory for kept results, in MiB |
 | `TET_WEB_REVISION` | none | text that the page and `/stats` show as the version |
+| `TET_WEB_COUNTER` | none | the file that keeps the counts of the requests and of their clients over a restart; without it they begin at 0 |
 | `TET_WEB_CONFIG` | none | the settings file |
 
 The other six can change while the server runs. They stand in the settings
@@ -841,6 +868,7 @@ ends the calculations that run and empties the cache.
 |---|---|
 | `/usr/local/etc/tet-web.conf` | the settings that can change while the server runs |
 | `/var/log/tet-web.log` | the log of the server |
+| `/var/db/tet-web/counter` | the counts of the requests and of their clients (`tet_web_counter` in `/etc/rc.conf`) |
 | `/usr/local/etc/caddy/Caddyfile` | the site of the proxy: the name, HTTPS, the redirect |
 | `/var/log/caddy/caddy.log` | the log of the proxy |
 | `/var/db/caddy/` | the certificate and the account at the certificate authority |
@@ -855,4 +883,5 @@ ends the calculations that run and empties the cache.
 `/usr/local/etc/newsyslog.conf.d/tet-web.conf` and the Caddyfile, remove the
 `tet_web_*`, `caddy_*` and `portacl_*` lines from `/etc/rc.conf` and the
 lines marked `# tet-web` from `/etc/pf.conf` (`pfctl -f /etc/pf.conf`), then
-`pw userdel tetweb` and `pkg delete caddy portacl-rc`.
+`pw userdel tetweb` and `pkg delete caddy portacl-rc`; `/var/db/tet-web`
+holds the counter.

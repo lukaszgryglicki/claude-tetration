@@ -137,6 +137,7 @@ code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 .error { color: #c0262d; font-weight: 600; overflow-wrap: anywhere; }
 .note { margin: 0 0 0.6rem; overflow-wrap: anywhere; }
 footer { margin-top: 2rem; font-size: 0.85rem; opacity: 0.85; }
+#counted { margin-top: 1.5rem; font-size: 0.85rem; opacity: 0.85; text-align: center; }
 a { color: #2563eb; }
 @media (prefers-color-scheme: dark) {
   a { color: #7aa7ff; }

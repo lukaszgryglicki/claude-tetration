@@ -424,7 +424,9 @@ understand is set aside as `counter.unread`, and the log says so. At most
 
 ```console
 $ curl -s https://hyp4.duckdns.org/stats
-{"revision":"70212af","uptime_seconds":484,"requests":1785,"running":0,"cache":{"entries":1772,"bytes":15316167,"hits":1,"misses":1772,"waits":0,"dropped":0},"counted":{"since":"2026-11-23T10:00:00Z","tet":12,"symbolic_math":1773,"clients":3,"tet_clients":2,"symbolic_math_clients":3,"more_clients":false},"limits":{"wait_seconds":300,"timeout_seconds":21600,"jobs":4}}
+{"revision":"aee73a2+","uptime_seconds":346,"requests":1832,"running":0,"cache":{"entries":1818,"bytes":15365056,"hits":1,"misses":1818,"waits":0,"dropped":0},"counted":{"since":"2026-11-23T14:28:53Z","tet":15,"symbolic_math":3629,"clients":1,"tet_clients":1,"symbolic_math_clients":1,"more_clients":false},"limits":{"wait_seconds":300,"timeout_seconds":21600,"jobs":4}}
+$ curl -s https://hyp4.duckdns.org/status | sed -n 2p
+counted since 2026-11-23T14:28:53Z: 15 requests to tet from 1 client, 3629 to symbolic-math from 1, 1 client in all
 ```
 
 ## Settings

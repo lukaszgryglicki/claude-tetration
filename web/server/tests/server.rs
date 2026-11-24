@@ -1750,6 +1750,13 @@ fn the_requests_for_calculations_and_their_clients_are_counted_and_kept_in_a_fil
     // A calculation, the same one again from the cache, and the page of a form.
     let tet = "/?func=tet&base=2&height=3";
     assert_eq!(server.ask("GET", tet, &from("203.0.113.5")).status, 200);
+    let status = server.get("/status").body;
+    assert!(
+        status.lines().nth(1).unwrap().ends_with(
+            "Z: 1 request to tet from 1 client, 0 to symbolic-math from 0, 1 client in all"
+        ),
+        "{status}"
+    );
     assert_eq!(
         server
             .ask("GET", tet, &from("203.0.113.5, 10.0.0.1"))

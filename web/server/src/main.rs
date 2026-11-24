@@ -655,22 +655,26 @@ impl Server {
             revision => format!(" {revision}"),
         };
         let counted = self.counter.counts();
+        let count = |number: u64, one: &str| match number {
+            1 => format!("1 {one}"),
+            many => format!("{many} {one}s"),
+        };
         format!(
             "tet-web{revision}: up {}, requests {}\n\
-             counted since {}: {} requests to tet from {} clients, {} to symbolic-math from {}, \
-             {}{} clients in all\n\
+             counted since {}: {} to tet from {}, {} to symbolic-math from {}, \
+             {}{} in all\n\
              calculations: {} running, at most {} at a time\n\
              cache: kept {} ({} bytes), hits {}, misses {}, waits {}, dropped {}\n\
              limits: a request waits {}, a calculation may take {}\n",
             api::span(self.started.elapsed().as_secs()),
             self.requests.load(Ordering::Relaxed),
             timestamp(UNIX_EPOCH + Duration::from_secs(counted.since)),
-            counted.tet,
-            counted.tet_clients,
+            count(counted.tet, "request"),
+            count(counted.tet_clients, "client"),
             counted.sm,
             counted.sm_clients,
             if counted.full { "more than " } else { "" },
-            counted.clients,
+            count(counted.clients, "client"),
             self.slots.taken(),
             now.jobs,
             counts.entries,
